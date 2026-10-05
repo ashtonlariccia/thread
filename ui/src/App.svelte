@@ -791,10 +791,12 @@
     display: flex;
     align-items: center;
     overflow: hidden;
-    color: var(--fg);
-    font-family: "Cascadia Mono", Consolas, monospace;
   }
+  /* Everything the extension puts in here takes the bar's own font, size and
+     colour, over the monospace and the colours it asks for inline -- so the
+     left-hand end of the bar reads as the same strip of status as the right. */
   .vim-line :global(*) {
+    color: inherit !important;
     font-family: inherit !important;
     font-size: inherit;
   }
@@ -804,7 +806,12 @@
     background: transparent;
     border: none;
     outline: none;
-    color: var(--fg);
+  }
+
+  /* The mode, set like the status items across the bar from it. It is named
+     the way they are too: "Normal", not vim's shouted "NORMAL". */
+  .mode {
+    text-transform: capitalize;
   }
   .vim-line :global(.cm-vim-message) {
     color: var(--fg-dim) !important;

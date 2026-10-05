@@ -271,10 +271,13 @@
   .start {
     display: flex;
     align-items: center;
-    gap: 0.7rem;
+    /* Set exactly as `.info` at the other end is, so the two ends of the
+       bar are one strip of status rather than two styles of it. */
+    gap: 0.9rem;
     flex: 1;
     min-width: 0;
     padding: 0 0.45rem;
+    color: var(--fg-dim);
     font-size: 0.71rem;
     white-space: nowrap;
   }
