@@ -16,6 +16,17 @@ serde_json.workspace = true
 toml = "1.1.6"
 toml_edit = "0.25.15"
 trash = "5.2.9"
+tracing.workspace = true
+# Already in the tree by way of the window toolkit; the terminal calls the
+# pseudoconsole API through it rather than through a PTY crate of its own.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

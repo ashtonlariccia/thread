@@ -14,6 +14,7 @@
   import Sidebar from "./lib/Sidebar.svelte";
   import SidebarResizer from "./lib/SidebarResizer.svelte";
   import TabBar, { type Tab } from "./lib/TabBar.svelte";
+  import TerminalPanel, { TERMINAL_MIN } from "./lib/TerminalPanel.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import UnsavedDialog from "./lib/UnsavedDialog.svelte";
 
@@ -276,6 +277,73 @@
     if (tree.roots.length > before || path !== undefined) sidebarCollapsed = false;
   }
 
+  // --- terminal -----------------------------------------------------------------
+  //
+  // One per window, in a panel under the editor. Three states, not two: no
+  // shell at all, which is how a window starts and costs nothing; a shell with
+  // the panel showing; and a shell with the panel folded away, still running.
+  // Toggling moves between the last two. Only killing it, or the shell
+  // exiting, goes back to the first.
+
+  let terminalAlive = $state(false);
+  let terminalOpen = $state(false);
+  let terminalHeight = $state(240);
+  /** Where the shell was started, fixed for as long as it lives. */
+  let terminalCwd = $state<string | null>(null);
+  let terminal = $state<TerminalPanel>();
+
+  /** The stage's height, which is what bounds the panel's. */
+  let stageHeight = $state(0);
+  /** What the editor and the tabs above it are always left. */
+  const EDITOR_MIN = 110;
+
+  // The terminal is set in the editor's font: the two are read side by side.
+  const terminalLook = $derived({
+    fontFamily: config.current.editor.font_family,
+    fontSize: config.current.editor.font_size,
+  });
+
+  /**
+   * Where a new shell starts: the open folder, or with none open, the folder
+   * of the file being edited. With several folders open it is the one that
+   * file is in, and the first of them if it is in none. Null leaves it to the
+   * backend, which uses the home folder.
+   */
+  function terminalDir(): string | null {
+    const file = docs.active?.path ?? null;
+    const roots = tree.roots.map((root) => root.path);
+    // The deepest: with a project and one of its subfolders both open, the
+    // file belongs to the more specific one.
+    const holding = roots
+      .filter((root) => file !== null && segmentsBelow(root, file) !== null)
+      .sort((a, b) => b.length - a.length)[0];
+    return holding ?? roots[0] ?? (file ? dirName(file) : null);
+  }
+
+  function toggleTerminal() {
+    if (terminalOpen) {
+      terminalOpen = false;
+      docs.editor.focus();
+      return;
+    }
+    if (!terminalAlive) {
+      terminalCwd = terminalDir();
+      terminalAlive = true;
+    }
+    terminalOpen = true;
+  }
+
+  /** End the shell and whatever is running in it. Also where `exit` lands. */
+  function killTerminal() {
+    terminalAlive = false;
+    terminalOpen = false;
+    docs.editor.focus();
+  }
+
+  function inTerminal(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest("[data-terminal]") !== null;
+  }
+
   // --- session ------------------------------------------------------------------
   //
   // What is open is written down as it changes and put back at the next
@@ -290,6 +358,7 @@
     active: string | null;
     sidebarCollapsed: boolean;
     sidebarWidth: number;
+    terminalHeight: number;
   };
 
   const keepsSession = appWindow.label === "main";
@@ -299,6 +368,7 @@
   async function restoreSession() {
     const session = await invoke<Session>("session_load");
     sidebarWidth = session.sidebarWidth;
+    terminalHeight = session.terminalHeight;
 
     if (session.folders.length > 0) loadFolderIcons();
     await tree.restore(session.folders, session.unfolded);
@@ -317,6 +387,7 @@
     active: docs.active?.path ?? null,
     sidebarCollapsed,
     sidebarWidth: Math.round(sidebarWidth),
+    terminalHeight: Math.round(terminalHeight),
   });
 
   $effect(() => {
@@ -390,13 +461,26 @@
 
   function onKeydown(event: KeyboardEvent) {
     if (!event.ctrlKey || event.altKey || event.metaKey) return;
+    // A dialog is up; the window behind it is not taking commands.
+    const blocked = docs.busy || appearanceOpen || question !== null;
+
+    // Ctrl+` is the terminal's, from anywhere, the terminal included.
+    if (event.code === "Backquote") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!blocked && !event.repeat) toggleTerminal();
+      return;
+    }
+    // Typed into the terminal, the rest belong to the shell: Ctrl+W there
+    // deletes a word, and must not close the file behind it.
+    if (inTerminal(event.target)) return;
+
     const key = event.key.toLowerCase();
     if (!SHORTCUTS.has(key)) return;
     event.preventDefault();
     event.stopPropagation();
 
-    // A dialog is up; the window behind it is not taking commands.
-    if (docs.busy || appearanceOpen || question) return;
+    if (blocked) return;
 
     if (key === "tab") {
       docs.cycle(event.shiftKey ? -1 : 1);
@@ -478,6 +562,28 @@
       x: event.clientX,
       y: event.clientY,
       items: [...create, ...own, item("Refresh Page", refreshPage)],
+    };
+  }
+
+  /** The terminal. The way to copy out of it, and one of the ways to end it. */
+  function onTerminalContextMenu(event: MouseEvent) {
+    const back = (act: () => void) => () => {
+      act();
+      // The menu took the focus to be clicked; typing carries on after it.
+      terminal?.focus();
+    };
+    // Only with something selected: there is nothing else it could copy.
+    const copy = terminal?.hasSelection() ? [item("Copy", back(() => terminal?.copy()))] : [];
+
+    ctx = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        ...copy,
+        item("Paste", back(() => terminal?.paste())),
+        SEP,
+        item("Kill Terminal", killTerminal, true),
+      ],
     };
   }
 
@@ -607,6 +713,10 @@
     onclosefile={() => void docs.close()}
     {sidebarCollapsed}
     ontogglesidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
+    {terminalOpen}
+    {terminalAlive}
+    ontoggleterminal={toggleTerminal}
+    onkillterminal={killTerminal}
     onnewwindow={newWindow}
     onappearance={() => (appearanceOpen = true)}
     onclosewindow={closeWindow}
@@ -640,7 +750,7 @@
 
     <!-- The resizer normally provides the gap on this side; collapsed, it is
          not rendered, so the stage supplies its own. -->
-    <section class="stage" class:railed={sidebarCollapsed}>
+    <section class="stage" class:railed={sidebarCollapsed} bind:clientHeight={stageHeight}>
       <!-- No strip with nothing open: an empty bar across the top of an empty
            editor is a line with no reason to be there. -->
       {#if tabs.length > 0}
@@ -659,6 +769,23 @@
           <p class="empty">Ctrl+O to open a file, Ctrl+N for a new one</p>
         {/if}
       </div>
+
+      <!-- Not rendered until a terminal is asked for, and gone again once it
+           is killed: with it goes xterm, and the shell. -->
+      {#if terminalAlive}
+        <TerminalPanel
+          bind:this={terminal}
+          open={terminalOpen}
+          height={terminalHeight}
+          max={Math.max(TERMINAL_MIN, stageHeight - EDITOR_MIN)}
+          cwd={terminalCwd}
+          look={terminalLook}
+          scrollback={config.current.terminal.scrollback}
+          onresize={(h) => (terminalHeight = h)}
+          onexit={killTerminal}
+          oncontext={onTerminalContextMenu}
+        />
+      {/if}
     </section>
   </main>
 

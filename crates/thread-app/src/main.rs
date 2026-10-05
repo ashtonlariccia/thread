@@ -4,6 +4,8 @@
 
 mod commands;
 
+use tauri::Manager;
+
 /// Frontend liveness beacon.
 ///
 /// WebView2 renders in a separate process, so `PrintWindow` captures the host
@@ -99,6 +101,15 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::PendingFiles::from_args())
         .manage(commands::Applied::load())
+        .manage(commands::Terminals::default())
+        // However a window goes, its shell goes with it.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window
+                    .state::<commands::Terminals>()
+                    .close_window(window.label());
+            }
+        })
         .on_page_load(|webview, payload| {
             tracing::info!(
                 target: "thread::ui",
@@ -132,6 +143,10 @@ fn main() {
             commands::delete_path,
             commands::session_load,
             commands::session_save,
+            commands::terminal_open,
+            commands::terminal_write,
+            commands::terminal_resize,
+            commands::terminal_close,
             commands::pins,
             commands::add_pin,
             commands::remove_pin,

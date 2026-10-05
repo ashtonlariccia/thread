@@ -1,7 +1,8 @@
 //! Core for Thread.
 //!
 //! Everything here is UI-agnostic: the config, the stores the window chrome
-//! reads and writes, and the file handling behind the editor and the tree.
+//! reads and writes, the file handling behind the editor and the tree, and
+//! the terminal's shell.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ pub mod document;
 pub mod fsops;
 pub mod pins;
 pub mod session;
+pub mod terminal;
 pub mod tree;
 
 pub use config::{Appearance, Config, Material};

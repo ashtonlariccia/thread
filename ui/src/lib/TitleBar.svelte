@@ -18,6 +18,13 @@
     onclosefile: () => void;
     sidebarCollapsed: boolean;
     ontogglesidebar: () => void;
+    /** Whether the terminal panel is showing. */
+    terminalOpen: boolean;
+    /** Whether there is a shell at all, showing or not. */
+    terminalAlive: boolean;
+    ontoggleterminal: () => void;
+    /** End the shell, not just hide it. */
+    onkillterminal: () => void;
     onnewwindow: () => void;
     onappearance: () => void;
     /** This window only. */
@@ -39,6 +46,10 @@
     onclosefile,
     sidebarCollapsed,
     ontogglesidebar,
+    terminalOpen,
+    terminalAlive,
+    ontoggleterminal,
+    onkillterminal,
     onnewwindow,
     onappearance,
     onclosewindow,
@@ -248,6 +259,50 @@
   {/if}
 
   <div class="controls">
+    <!-- Only while there is a shell to end. Hiding the panel leaves it
+         running; this is the one that does not. -->
+    {#if terminalAlive}
+      <button
+        class="ctl"
+        onclick={onkillterminal}
+        title="Kill terminal"
+        aria-label="Kill terminal"
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M3.2 4.6 H12.8 M6.4 4.6 V3.2 H9.6 V4.6 M4.4 4.6 L5 12.4 A1 1 0 0 0 6 13.4 H10 A1 1 0 0 0 11 12.4 L11.6 4.6"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+    {/if}
+    <button
+      class="ctl"
+      onclick={ontoggleterminal}
+      aria-expanded={terminalOpen}
+      title={terminalOpen ? "Hide terminal (Ctrl+`)" : "Show terminal (Ctrl+`)"}
+      aria-label={terminalOpen ? "Hide terminal" : "Show terminal"}
+    >
+      <!-- The sidebar's icon turned on its side: a window with its bottom
+           panel marked off. -->
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+        <rect
+          x="1.6"
+          y="2.6"
+          width="12.8"
+          height="10.8"
+          rx="2"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.2"
+        />
+        <path d="M1.6 9.4 H14.4" stroke="currentColor" stroke-width="1.2" />
+      </svg>
+    </button>
     <button
       class="ctl"
       onclick={ontogglesidebar}
@@ -425,8 +480,8 @@
     background: var(--hover);
     color: var(--fg);
   }
-  /* Sets the sidebar toggle apart from the window buttons: beside them, but
-     not one of them. */
+  /* Sets the panel toggles apart from the window buttons: beside them, but
+     not among them. */
   .gap {
     width: 8px;
   }

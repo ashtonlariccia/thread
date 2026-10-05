@@ -27,6 +27,9 @@ pub struct Session {
     pub active: Option<String>,
     pub sidebar_collapsed: bool,
     pub sidebar_width: u32,
+    /// How tall the terminal panel was dragged. Whether it was open is not
+    /// kept: a shell is not started until it is asked for.
+    pub terminal_height: u32,
 }
 
 impl Default for Session {
@@ -38,6 +41,7 @@ impl Default for Session {
             active: None,
             sidebar_collapsed: true,
             sidebar_width: 230,
+            terminal_height: 240,
         }
     }
 }
@@ -71,6 +75,7 @@ mod tests {
             active: Some("C:\\src\\thread\\Cargo.toml".into()),
             sidebar_collapsed: false,
             sidebar_width: 300,
+            terminal_height: 320,
         };
 
         let json = serde_json::to_string(&session).unwrap();

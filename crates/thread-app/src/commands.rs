@@ -1,4 +1,5 @@
-//! Tauri command surface: windows, files, the config, and the pinned strip.
+//! Tauri command surface: windows, files, the config, the terminal, and the
+//! pinned strip.
 //!
 //! This layer owns the windows and the IPC transport. Anything that can be
 //! decided without a window lives in `thread-core`.
@@ -6,8 +7,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
 
+use thread_core::terminal::{self, LocalTerminal, Terminal};
 use thread_core::{
     config, document, fsops, tree, Appearance, Config, Document, Entry, Eol, Material, Pin,
     PinStore, Session, Stamp,
@@ -453,6 +456,128 @@ pub fn session_load() -> Session {
 #[tauri::command]
 pub async fn session_save(session: Session) -> Result<(), String> {
     thread_core::session::save(&session).map_err(|e| e.to_string())
+}
+
+// --- terminal ---------------------------------------------------------------
+//
+// One per window, in the panel that rises from the bottom bar. It belongs to
+// whatever the window is working on: a shell on this machine today, and one on
+// the remote host once a window can be connected to one. Everything below
+// deals in `dyn Terminal`, so that is a second thing `terminal_open` can make
+// rather than a second set of commands.
+
+/// Each window's terminal, by window label.
+#[derive(Default)]
+pub struct Terminals(Mutex<HashMap<String, Open>>);
+
+/// A terminal, and an id to tell it from the next one its window opens: a
+/// shell that has just ended must not take its replacement with it.
+type Open = (u64, Box<dyn Terminal>);
+
+impl Terminals {
+    /// Take a window's terminal out — only the one with this id, if one is
+    /// given. Dropping what comes back is what ends its shell, and is left to
+    /// the caller so that it happens outside the lock.
+    fn take(&self, label: &str, id: Option<u64>) -> Option<Box<dyn Terminal>> {
+        let mut open = self.0.lock().ok()?;
+        match open.get(label) {
+            Some((current, _)) if id.is_none_or(|id| id == *current) => {
+                open.remove(label).map(|(_, terminal)| terminal)
+            }
+            _ => None,
+        }
+    }
+
+    /// The window has gone; so does its shell.
+    pub fn close_window(&self, label: &str) {
+        drop(self.take(label, None));
+    }
+
+    fn with(&self, label: &str, act: impl FnOnce(&dyn Terminal)) {
+        if let Ok(open) = self.0.lock() {
+            if let Some((_, terminal)) = open.get(label) {
+                act(terminal.as_ref());
+            }
+        }
+    }
+}
+
+/// Start this window's terminal, in `cwd`. Output arrives on `on_output` as
+/// raw bytes; `on_exit` hears once, when the shell has ended.
+///
+/// A terminal the window already had is ended first. That is how a reloaded
+/// page, which never got to close the one it had, does not leave it running.
+#[tauri::command]
+pub async fn terminal_open(
+    app: AppHandle,
+    window: WebviewWindow,
+    on_output: Channel<InvokeResponseBody>,
+    on_exit: Channel<()>,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> Result<u64, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    let label = window.label().to_owned();
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    app.state::<Terminals>().close_window(&label);
+
+    let options = terminal::Options {
+        shell: stored_config().terminal.shell,
+        cwd: cwd.map(Into::into),
+        cols,
+        rows,
+    };
+    let spawned = LocalTerminal::spawn(
+        options,
+        move |chunk| {
+            // A channel that refuses is a page that has gone.
+            let _ = on_output.send(InvokeResponseBody::Raw(chunk.to_vec()));
+        },
+        {
+            let (app, label) = (app.clone(), label.clone());
+            move || {
+                drop(app.state::<Terminals>().take(&label, Some(id)));
+                let _ = on_exit.send(());
+                tracing::info!(target: "thread::terminal", "ENDED {label} #{id}");
+            }
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    tracing::info!(target: "thread::terminal", "OPENED {label} #{id} {cols}x{rows}");
+    if let Ok(mut open) = app.state::<Terminals>().0.lock() {
+        open.insert(label, (id, Box::new(spawned)));
+    }
+    Ok(id)
+}
+
+// Not `async`, unlike the rest: these run in the order they were sent, which
+// is the order the keys were pressed. Neither waits on the shell.
+
+/// What was typed, or pasted, as the terminal emulator encoded it.
+#[tauri::command]
+pub fn terminal_write(window: WebviewWindow, terminals: State<'_, Terminals>, data: String) {
+    terminals.with(window.label(), |terminal| terminal.write(data.as_bytes()));
+}
+
+#[tauri::command]
+pub fn terminal_resize(
+    window: WebviewWindow,
+    terminals: State<'_, Terminals>,
+    cols: u16,
+    rows: u16,
+) {
+    terminals.with(window.label(), |terminal| terminal.resize(cols, rows));
+}
+
+/// End the terminal `terminal_open` gave this id to, and everything running
+/// in it. Nothing happens if it has already gone.
+#[tauri::command]
+pub fn terminal_close(window: WebviewWindow, terminals: State<'_, Terminals>, id: u64) {
+    drop(terminals.take(window.label(), Some(id)));
 }
 
 // --- pins -------------------------------------------------------------------

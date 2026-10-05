@@ -73,6 +73,14 @@ syntax = "catppuccin"
 # `:` command line. `:w`, `:q`, `:wq`, `:bn` and `:bp` act on Thread's files.
 enabled = true
 
+[terminal]
+# The command line the terminal runs, such as "cmd.exe" or "wsl.exe". Empty
+# picks PowerShell 7 if it is installed, and Windows PowerShell if not. The
+# font is the editor's.
+shell = ""
+# How many lines that have scrolled off the top are kept to scroll back to.
+scrollback = 2000
+
 # Per-language overrides for `tab_width` and `insert_spaces`. The name is the
 # one shown in the bottom bar, in lower case. Detected indentation still wins
 # while `detect_indentation` is on.
@@ -244,6 +252,26 @@ impl Default for Vim {
     }
 }
 
+/// The terminal in the bottom panel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Terminal {
+    /// A command line, run as written. Empty leaves the choice to
+    /// [`crate::terminal::default_shell`].
+    pub shell: String,
+    /// Lines kept above the screen. Every one is held in memory.
+    pub scrollback: u32,
+}
+
+impl Default for Terminal {
+    fn default() -> Self {
+        Self {
+            shell: String::new(),
+            scrollback: 2000,
+        }
+    }
+}
+
 /// What one language does differently from `[editor]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -263,6 +291,7 @@ pub struct Config {
     pub files: Files,
     pub theme: Theme,
     pub vim: Vim,
+    pub terminal: Terminal,
     /// By language name, lower-case.
     pub language: BTreeMap<String, LanguageOverride>,
 }
@@ -271,6 +300,8 @@ impl Config {
     fn sanitised(mut self) -> Self {
         self.appearance = self.appearance.sanitised();
         self.editor = self.editor.sanitised();
+        // Scrollback is memory; a slip of the hand should not cost a gigabyte.
+        self.terminal.scrollback = self.terminal.scrollback.min(100_000);
         // Keyed in lower case, so `[language.Rust]` and `[language.rust]` are
         // the same thing to whoever looks one up.
         self.language = self

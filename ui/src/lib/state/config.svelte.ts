@@ -41,6 +41,8 @@ export type Config = {
   files: { exclude: string[] };
   theme: { syntax: string };
   vim: { enabled: boolean };
+  /** `shell` is a command line; empty leaves the choice to the backend. */
+  terminal: { shell: string; scrollback: number };
   /** By language name, lower-case. */
   language: Record<string, LanguageOverride>;
 };
@@ -63,6 +65,7 @@ export const DEFAULTS: Config = {
   files: { exclude: [".*"] },
   theme: { syntax: "catppuccin" },
   vim: { enabled: true },
+  terminal: { shell: "", scrollback: 2000 },
   language: {},
 };
 
