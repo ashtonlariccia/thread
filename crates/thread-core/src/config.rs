@@ -68,6 +68,11 @@ exclude = [".*"]
 # Colours for syntax highlighting. Available: "catppuccin".
 syntax = "catppuccin"
 
+[vim]
+# Vim motions in the editor: modes, operators, registers, macros and the
+# `:` command line. `:w`, `:q`, `:wq`, `:bn` and `:bp` act on Thread's files.
+enabled = true
+
 # Per-language overrides for `tab_width` and `insert_spaces`. The name is the
 # one shown in the bottom bar, in lower case. Detected indentation still wins
 # while `detect_indentation` is on.
@@ -227,6 +232,18 @@ impl Default for Theme {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Vim {
+    pub enabled: bool,
+}
+
+impl Default for Vim {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// What one language does differently from `[editor]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -245,6 +262,7 @@ pub struct Config {
     pub editor: Editor,
     pub files: Files,
     pub theme: Theme,
+    pub vim: Vim,
     /// By language name, lower-case.
     pub language: BTreeMap<String, LanguageOverride>,
 }
@@ -625,6 +643,7 @@ mod tests {
                 .insert_spaces
         );
         assert_eq!(set("theme", "syntax", "other".into()).theme.syntax, "other");
+        assert!(!set("vim", "enabled", false.into()).vim.enabled);
         assert_eq!(
             set("files", "exclude", serde_json::json!([".*", "target"]))
                 .files

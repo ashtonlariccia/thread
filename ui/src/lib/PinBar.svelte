@@ -14,9 +14,11 @@
     info?: Snippet;
     /** What sits in the middle of the bar, centred on the window. */
     center?: Snippet;
+    /** What leads the bar, at its left-hand end. */
+    start?: Snippet;
   };
 
-  let { pins, onopen, onunpin, onmove, info, center }: Props = $props();
+  let { pins, onopen, onunpin, onmove, info, center, start }: Props = $props();
 
   // The context menu is positioned in *viewport* coordinates rather than inside
   // the row, because the strip scrolls horizontally -- and `overflow` clips any
@@ -190,6 +192,10 @@
 <svelte:window onkeydown={onWindowKey} onclick={() => (menu = null)} />
 
 <footer class="pinbar">
+  {#if start}
+    <div class="start">{@render start()}</div>
+  {/if}
+
   <!-- Empty until something learns to pin; the bar keeps its height either
        way, so the window's frame does not change shape when the first one lands. -->
   {#if pins.length > 0}
@@ -268,6 +274,15 @@
     overflow: hidden;
     /* For the centred slot. */
     position: relative;
+  }
+
+  .start {
+    display: flex;
+    align-items: center;
+    flex: none;
+    padding: 0 0.45rem;
+    font-size: 0.71rem;
+    white-space: nowrap;
   }
 
   /* Pushed to the right-hand end whether or not there are pins before it. */

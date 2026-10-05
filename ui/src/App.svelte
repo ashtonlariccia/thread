@@ -341,6 +341,11 @@
   // Ctrl+C/X/V/Z/A are the editor's and the text fields' own; these are the
   // ones the File menu advertises, plus Ctrl+Tab. `preventDefault` matters as
   // much as the handler: the webview has its own ideas about most of them.
+  //
+  // Handled on the way *down* to the editor and stopped there, so they mean
+  // the same thing whatever the editor would have made of them. Vim has uses
+  // of its own for Ctrl+O, Ctrl+W and Ctrl+N; a key that both closed the file
+  // and started a vim window command would be worse than either.
   const SHORTCUTS = new Set(["n", "o", "s", "w", "tab"]);
 
   function onKeydown(event: KeyboardEvent) {
@@ -348,6 +353,7 @@
     const key = event.key.toLowerCase();
     if (!SHORTCUTS.has(key)) return;
     event.preventDefault();
+    event.stopPropagation();
 
     // A dialog is up; the window behind it is not taking commands.
     if (docs.busy || appearanceOpen) return;
@@ -542,7 +548,7 @@
 <!-- Coming back to the window is when a stale file would be noticed, so that
      moment does not wait for the next tick of the poll. -->
 <svelte:window
-  onkeydown={onKeydown}
+  onkeydowncapture={onKeydown}
   oncontextmenu={onWindowContextMenu}
   onfocus={checkDisk}
 />
@@ -625,6 +631,11 @@
     onunpin={(pin) => void pins.remove(pin)}
     onmove={(pin, index) => void pins.move(pin, index)}
   >
+    {#snippet start()}
+      {#if docs.vimMode && docs.active}
+        <span class="mode" data-mode={docs.vimMode}>{docs.vimMode}</span>
+      {/if}
+    {/snippet}
     {#snippet center()}
       {#if docs.active}
         <!-- The left-to-right mark keeps a path that starts with punctuation
@@ -737,6 +748,24 @@
      ellipsis only ever lands on the overflowing end of a box, so the box is
      right-to-left -- which moves that end to the left without reordering the
      text inside it. */
+  /* Bottom left, where vim puts it. Coloured by mode, because which mode you
+     are in decides what the next key does, and that should not need reading. */
+  .mode {
+    color: var(--fg-dim);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .mode[data-mode="insert"] {
+    color: var(--ok);
+  }
+  .mode[data-mode="visual"] {
+    color: var(--accent);
+  }
+  .mode[data-mode="replace"] {
+    color: var(--danger);
+  }
+
   .path {
     min-width: 0;
     overflow: hidden;

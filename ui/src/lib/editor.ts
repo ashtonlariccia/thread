@@ -70,6 +70,11 @@ type Events = {
   /** A file's text now differs from, or matches again, what was last saved. */
   ondirty: (key: number, dirty: boolean) => void;
   oncursor: (cursor: Cursor) => void;
+  /**
+   * The view was given a different file, or different extensions. For
+   * anything that hangs off the view itself rather than off a file's state.
+   */
+  onview: (view: EditorView) => void;
 };
 
 // Colours come from app.css, so the editor follows the window's palette. The
@@ -96,6 +101,25 @@ const chrome = EditorView.theme(
     ".cm-activeLine": { backgroundColor: "#ffffff0a" },
     ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--fg-dim)" },
     ".cm-cursor": { borderLeftColor: "var(--accent)" },
+    // Vim's block cursor and command line, in the window's colours rather
+    // than the extension's pink and monospace-default. `!important` because
+    // the extension registers its own at the highest precedence.
+    ".cm-fat-cursor": {
+      background: "var(--accent) !important",
+      color: "var(--accent-ink) !important",
+    },
+    "&:not(.cm-focused) .cm-fat-cursor": {
+      background: "none !important",
+      outline: "solid 1px var(--accent) !important",
+    },
+    ".cm-panels": {
+      backgroundColor: "transparent",
+      color: "var(--fg)",
+    },
+    ".cm-panels-bottom": { borderTop: "1px solid var(--border)" },
+    ".cm-vim-panel": { padding: "3px 14px", fontFamily: "inherit" },
+    ".cm-vim-panel input": { color: "var(--fg)", fontFamily: "inherit", fontSize: "inherit" },
+    ".cm-searchMatch": { backgroundColor: "var(--hover-strong) !important" },
     "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground":
       { backgroundColor: "var(--hover-strong)" },
   },
@@ -154,7 +178,8 @@ function lookExtension(look: EditorLook): Extension {
       // typing.
       ...(look.smoothCaret
         ? {
-            ".cm-cursor": {
+            // Vim's block cursor is a different element, moved the same way.
+            ".cm-cursor, .cm-fat-cursor": {
               transition: "left 80ms cubic-bezier(0.2, 0.9, 0.3, 1), top 80ms cubic-bezier(0.2, 0.9, 0.3, 1)",
             },
           }
@@ -217,12 +242,14 @@ export class EditorHost {
   private current: number | null = null;
 
   // Same for every file.
+  private readonly vimMode = new Compartment();
   private readonly look = new Compartment();
   private readonly highlight = new Compartment();
   // Each file's own.
   private readonly indent = new Compartment();
   private readonly language = new Compartment();
 
+  private vimValue: Extension = [];
   private lookValue: Extension = [];
   /** Empty until the config names a palette; grammars colour nothing before then. */
   private highlightValue: Extension = [];
@@ -249,6 +276,9 @@ export class EditorHost {
     const state = EditorState.create({
       doc: text,
       extensions: [
+        // First, so its key handling is ahead of every keymap below: in
+        // normal mode `d` is an operator, not a letter to type.
+        this.vimMode.of(this.vimValue),
         this.look.of(this.lookValue),
         this.indent.of(indentExtension(indent)),
         this.language.of([]),
@@ -292,6 +322,7 @@ export class EditorHost {
     this.view.setState(state);
     // `setState` is not an update, so the listener above never hears of it.
     this.events.oncursor(cursorOf(state));
+    this.events.onview(this.view);
     if (key !== null) this.view.focus();
   }
 
@@ -302,6 +333,13 @@ export class EditorHost {
   }
 
   // --- configuration ----------------------------------------------------------
+
+  /** Vim key handling, for every file; `[]` to switch it off. */
+  setVim(extension: Extension) {
+    this.vimValue = extension;
+    this.reconfigureAll(this.vimMode.reconfigure(extension));
+    if (this.view) this.events.onview(this.view);
+  }
 
   /** The font and gutter, for every file. */
   setLook(look: EditorLook) {

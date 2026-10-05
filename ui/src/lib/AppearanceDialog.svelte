@@ -211,6 +211,14 @@
 
       <span class="label-ish top">Options</span>
       <div class="checks">
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={config.current.vim.enabled}
+            onchange={(e) => void config.set("vim", "enabled", e.currentTarget.checked)}
+          />
+          Vim motions
+        </label>
         {#each TOGGLES as toggle (toggle.key)}
           {@const usable = toggle.needs?.() ?? true}
           <label class="check" class:off={!usable}>

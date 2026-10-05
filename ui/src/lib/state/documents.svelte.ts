@@ -18,6 +18,7 @@ import { languageOf } from "../languages";
 import { baseName, samePath, segmentsBelow } from "../paths";
 import { loadSyntax } from "../syntax";
 import { syntaxTheme } from "../themes";
+import { loadVim, type VimApi, type VimMode } from "../vim";
 import { DEFAULTS, type Config } from "./config.svelte";
 
 export type Eol = "lf" | "crlf";
@@ -68,6 +69,9 @@ export class Documents {
   activeKey = $state<number | null>(null);
   cursor = $state<Cursor>({ line: 1, col: 1 });
 
+  /** The vim mode the editor is in, or null while vim motions are off. */
+  vimMode = $state<VimMode | null>(null);
+
   /** Set while the user is being asked what to do with unsaved files. */
   asking = $state.raw<{ docs: Doc[]; resolve: (proceed: boolean) => void } | null>(null);
 
@@ -80,9 +84,13 @@ export class Documents {
       if (doc && doc.dirty !== dirty) doc.dirty = dirty;
     },
     oncursor: (cursor) => (this.cursor = cursor),
+    onview: (view) => this.#vim?.watch(view, (mode) => (this.vimMode = mode)),
   });
 
   #config: Config = DEFAULTS;
+  /** The vim extension, once fetched and while switched on. */
+  #vim: VimApi | null = null;
+  #vimWanted = false;
   #nextKey = 1;
   #nextUntitled = 1;
   /** The language each file's grammar was last asked for, so it is asked once. */
@@ -126,7 +134,41 @@ export class Documents {
       smoothCaret: config.editor.smooth_caret,
     });
     this.editor.setHighlightStyle(syntaxTheme(config.theme.syntax));
+    this.#setVim(config.vim.enabled);
     for (const doc of this.list) this.#dress(doc);
+  }
+
+  #setVim(enabled: boolean) {
+    if (enabled === this.#vimWanted) return;
+    this.#vimWanted = enabled;
+
+    if (!enabled) {
+      this.#vim = null;
+      this.vimMode = null;
+      this.editor.setVim([]);
+      return;
+    }
+
+    void loadVim({
+      write: () => void this.save(),
+      quit: () => void this.close(),
+      writeQuit: () =>
+        void this.save().then((saved) => {
+          // A save that failed or was cancelled leaves the file open.
+          if (saved) void this.close();
+        }),
+      cycle: (step) => this.cycle(step),
+    })
+      .then((vim) => {
+        // Switched off again while it was being fetched.
+        if (!this.#vimWanted) return;
+        this.#vim = vim;
+        this.editor.setVim(vim.extension);
+      })
+      .catch((e) => {
+        this.#vimWanted = false;
+        console.error("loading vim motions failed", e);
+      });
   }
 
   /**

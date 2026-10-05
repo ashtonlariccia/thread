@@ -40,6 +40,7 @@ export type Config = {
   editor: EditorConfig;
   files: { exclude: string[] };
   theme: { syntax: string };
+  vim: { enabled: boolean };
   /** By language name, lower-case. */
   language: Record<string, LanguageOverride>;
 };
@@ -61,11 +62,12 @@ export const DEFAULTS: Config = {
   },
   files: { exclude: [".*"] },
   theme: { syntax: "catppuccin" },
+  vim: { enabled: true },
   language: {},
 };
 
 /** The sections whose keys are plain values, settable one at a time. */
-type Settable = "appearance" | "editor" | "files" | "theme";
+type Settable = "appearance" | "editor" | "files" | "theme" | "vim";
 
 export class ConfigStore {
   current = $state.raw<Config>(DEFAULTS);
@@ -110,7 +112,7 @@ export class ConfigStore {
 
   /** Put every setting the dialog shows back to its default. */
   async reset() {
-    for (const section of ["appearance", "editor", "files", "theme"] as const) {
+    for (const section of ["appearance", "editor", "files", "theme", "vim"] as const) {
       const defaults = DEFAULTS[section] as Record<string, unknown>;
       const current = this.current[section] as Record<string, unknown>;
       for (const key of Object.keys(defaults)) {
