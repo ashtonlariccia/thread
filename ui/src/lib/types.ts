@@ -1,12 +1,13 @@
-/**
- * One row in the sidebar.
- *
- * Deliberately bare: the sidebar only needs to list, select and close things.
- * Whatever ends up living there (open files, a tree) extends this.
- */
+/** One row in a sidebar. */
 export type SidebarItem = {
   key: number;
   title: string;
+  /** Second line of the hover card: for a file, its full path. */
+  detail?: string;
+  /** Icon URL. A row without one gets a plain dot. */
+  icon?: string;
+  /** Has unsaved changes. */
+  dirty?: boolean;
 };
 
 /**

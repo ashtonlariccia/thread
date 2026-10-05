@@ -3,6 +3,16 @@
   import { canEdit, runEdit, type EditCommand } from "./edit";
 
   type Props = {
+    /** Whether a file is open, so entries that need one can be disabled. */
+    hasFile: boolean;
+    onopen: () => void;
+    onsave: () => void;
+    onsaveas: () => void;
+    onclosefile: () => void;
+    leftCollapsed: boolean;
+    rightCollapsed: boolean;
+    ontoggleleft: () => void;
+    ontoggleright: () => void;
     onnewwindow: () => void;
     onappearance: () => void;
     /** This window only. */
@@ -11,7 +21,21 @@
     onquit: () => void;
   };
 
-  let { onnewwindow, onappearance, onclosewindow, onquit }: Props = $props();
+  let {
+    hasFile,
+    onopen,
+    onsave,
+    onsaveas,
+    onclosefile,
+    leftCollapsed,
+    rightCollapsed,
+    ontoggleleft,
+    ontoggleright,
+    onnewwindow,
+    onappearance,
+    onclosewindow,
+    onquit,
+  }: Props = $props();
 
   type MenuName = "file" | "edit";
 
@@ -80,6 +104,38 @@
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKey} />
 
+{#snippet panelToggle(side: "left" | "right", collapsed: boolean, ontoggle: () => void)}
+  {@const label = `${collapsed ? "Show" : "Hide"} ${side} sidebar`}
+  <button
+    class="ctl"
+    class:mirrored={side === "right"}
+    onclick={ontoggle}
+    aria-expanded={!collapsed}
+    title={label}
+    aria-label={label}
+  >
+    <!-- A panel glyph whose side column is filled while that sidebar is open,
+         so the icon depicts the current state rather than the action. Drawn
+         for the left; the right one is the same glyph mirrored. -->
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <rect
+        x="1.6"
+        y="2.6"
+        width="12.8"
+        height="10.8"
+        rx="2"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.2"
+      />
+      <path d="M6.2 2.6 V13.4" stroke="currentColor" stroke-width="1.2" />
+      {#if !collapsed}
+        <path d="M3.4 2.6 H4.8 V13.4 H3.4 Z" fill="currentColor" opacity="0.75" />
+      {/if}
+    </svg>
+  </button>
+{/snippet}
+
 <!-- data-tauri-drag-region makes the empty areas behave like a real titlebar. -->
 <header class="titlebar" data-tauri-drag-region>
   <!-- A press on the menus must not take focus: the Edit entries act on the
@@ -100,11 +156,41 @@
 
       {#if openMenu === "file"}
         <div class="menu" role="menu">
-          <button class="menu-item" role="menuitem" onclick={() => run(onnewwindow)}>
-            New Window
+          <button class="menu-item" role="menuitem" onclick={() => run(onopen)}>
+            <span>Open File…</span>
+            <span class="hint">Ctrl+O</span>
           </button>
 
           <div class="sep"></div>
+
+          <button class="menu-item" role="menuitem" disabled={!hasFile} onclick={() => run(onsave)}>
+            <span>Save</span>
+            <span class="hint">Ctrl+S</span>
+          </button>
+          <button
+            class="menu-item"
+            role="menuitem"
+            disabled={!hasFile}
+            onclick={() => run(onsaveas)}
+          >
+            <span>Save As…</span>
+            <span class="hint">Ctrl+Shift+S</span>
+          </button>
+          <button
+            class="menu-item"
+            role="menuitem"
+            disabled={!hasFile}
+            onclick={() => run(onclosefile)}
+          >
+            <span>Close File</span>
+            <span class="hint">Ctrl+W</span>
+          </button>
+
+          <div class="sep"></div>
+
+          <button class="menu-item" role="menuitem" onclick={() => run(onnewwindow)}>
+            New Window
+          </button>
 
           <button class="menu-item" role="menuitem" onclick={() => run(onclosewindow)}>
             Close Window
@@ -156,6 +242,10 @@
   <div class="drag" data-tauri-drag-region></div>
 
   <div class="controls">
+    {@render panelToggle("left", leftCollapsed, ontoggleleft)}
+    {@render panelToggle("right", rightCollapsed, ontoggleright)}
+    <span class="gap"></span>
+
     <button class="ctl" title="Minimize" onclick={() => appWindow.minimize()}>
       <svg width="8" height="8" viewBox="0 0 10 10" aria-hidden="true">
         <path d="M0 5 h10" stroke="currentColor" stroke-width="1.2" />
@@ -284,6 +374,16 @@
     background: var(--hover);
     color: var(--fg);
   }
+  .ctl.mirrored svg {
+    transform: scaleX(-1);
+  }
+
+  /* Sets the sidebar toggles apart from the window buttons: beside them, but
+     not one of them. */
+  .gap {
+    width: 8px;
+  }
+
   .ctl.close:hover {
     background: #f38ba8;
     color: var(--accent-ink);

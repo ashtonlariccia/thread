@@ -2,6 +2,8 @@
   import type { SidebarItem } from "./types";
 
   type Props = {
+    /** Which edge of the window it sits on; everything that points mirrors. */
+    side: "left" | "right";
     items: SidebarItem[];
     activeKey: number | null;
     width: number;
@@ -10,13 +12,21 @@
     resizing: boolean;
     onselect: (key: number) => void;
     onclose: (key: number) => void;
-    ontoggle: () => void;
     /** Right-click on a row. App owns the menu, so only one is ever open. */
     oncontext: (event: MouseEvent, item: SidebarItem) => void;
   };
 
-  let { items, activeKey, width, collapsed, resizing, onselect, onclose, ontoggle, oncontext }: Props =
-    $props();
+  let {
+    side,
+    items,
+    activeKey,
+    width,
+    collapsed,
+    resizing,
+    onselect,
+    onclose,
+    oncontext,
+  }: Props = $props();
 
   // --- hover card ------------------------------------------------------------
   //
@@ -32,7 +42,7 @@
   const HOVER_DELAY_MS = 260;
 
   let aside = $state<HTMLElement | undefined>();
-  let tip = $state<{ title: string; x: number; y: number } | null>(null);
+  let tip = $state<{ item: SidebarItem; x: number; y: number } | null>(null);
   let tipTimer: ReturnType<typeof setTimeout> | undefined;
 
   function showTipSoon(event: MouseEvent, item: SidebarItem) {
@@ -42,10 +52,11 @@
       const box = row.getBoundingClientRect();
       const rail = aside?.getBoundingClientRect();
       tip = {
-        title: item.title,
+        item,
         // Beside the sidebar rather than beside the row: rows are inset, and a
         // card that tracked them would step in and out as the list scrolled.
-        x: (rail?.right ?? box.right) + 6,
+        // On the stage side of it, whichever side that is.
+        x: side === "left" ? (rail?.right ?? box.right) + 6 : (rail?.left ?? box.left) - 6,
         y: box.top + box.height / 2,
       };
     }, HOVER_DELAY_MS);
@@ -60,13 +71,19 @@
   $effect(() => () => clearTimeout(tipTimer));
 </script>
 
-<aside style="width: {width}px" class:collapsed class:resizing bind:this={aside}>
+<aside
+  style="width: {width}px"
+  class:collapsed
+  class:resizing
+  class:right={side === "right"}
+  bind:this={aside}
+>
   <!-- Scrolling moves every row out from under its card. -->
   <ul onscroll={hideTip}>
     {#each items as item (item.key)}
       <li>
         <!-- Collapsed, the name is off the screen, so the hover card has to
-             carry it -- otherwise the rail is a column of anonymous dots. -->
+             carry it -- otherwise the rail is a column of anonymous icons. -->
         <div
           class="row"
           class:active={item.key === activeKey}
@@ -86,9 +103,23 @@
           onmouseleave={hideTip}
           onpointerdown={hideTip}
         >
-          <span class="dot"></span>
+          <span class="glyph">
+            {#if item.icon}
+              <img src={item.icon} alt="" width="16" height="16" draggable="false" />
+            {:else}
+              <span class="dot"></span>
+            {/if}
+            <!-- Collapsed, there is no label to carry the marker, so it rides
+                 on the icon's corner instead. -->
+            {#if item.dirty && collapsed}
+              <span class="dirty badge"></span>
+            {/if}
+          </span>
           {#if !collapsed}
             <span class="label">{item.title}</span>
+            {#if item.dirty}
+              <span class="dirty" aria-label="Unsaved changes"></span>
+            {/if}
             <!-- aria-label, not `title`: a native tooltip here would fight the
                  hover card the row is already showing. -->
             <button
@@ -106,35 +137,6 @@
       </li>
     {/each}
   </ul>
-
-  <footer>
-    <button
-      class="toggle"
-      onclick={ontoggle}
-      aria-expanded={!collapsed}
-      title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-      aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-    >
-      <!-- A panel glyph whose left column is filled while the sidebar is open,
-           so the icon depicts the current state rather than the action. -->
-      <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-        <rect
-          x="1.6"
-          y="2.6"
-          width="12.8"
-          height="10.8"
-          rx="2"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.2"
-        />
-        <path d="M6.2 2.6 V13.4" stroke="currentColor" stroke-width="1.2" />
-        {#if !collapsed}
-          <path d="M3.4 2.6 H4.8 V13.4 H3.4 Z" fill="currentColor" opacity="0.75" />
-        {/if}
-      </svg>
-    </button>
-  </footer>
 </aside>
 
 {#if tip}
@@ -142,11 +144,14 @@
        full list still gets a card that is entirely on screen. -->
   <div
     class="tip"
+    class:right={side === "right"}
     role="tooltip"
     style="left: {tip.x}px; top: {Math.min(Math.max(tip.y, 20), window.innerHeight - 20)}px"
   >
-    <span class="dot"></span>
-    <span class="tip-name">{tip.title}</span>
+    <span class="tip-name">{tip.item.title}</span>
+    {#if tip.item.detail}
+      <span class="tip-detail">{tip.item.detail}</span>
+    {/if}
   </div>
 {/if}
 
@@ -208,12 +213,37 @@
     background: var(--accent-soft);
   }
 
+  .glyph {
+    position: relative;
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+  }
+  .glyph img {
+    display: block;
+  }
+
   .dot {
     width: 7px;
     height: 7px;
     border-radius: 50%;
     background: var(--accent);
+  }
+
+  /* Unsaved changes: the same mark VS Code puts on a tab. */
+  .dirty {
     flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--fg-dim);
+  }
+  .dirty.badge {
+    position: absolute;
+    top: -3px;
+    right: -4px;
   }
   .label {
     flex: 1;
@@ -243,49 +273,22 @@
 
   .collapsed ul {
     padding: 0.3rem 0;
+    /* Centred in what the eye reads as the rail: the band between the window
+       edge and the viewport's border, which is the rail *plus* the viewport's
+       inset. Centring in the rail alone leaves the icons visibly nearer the
+       window edge, so they are nudged half the inset towards the viewport. */
+    position: relative;
+    left: calc(var(--viewport-inset) / 2);
+  }
+  .right.collapsed ul {
+    left: calc(var(--viewport-inset) / -2);
   }
 
-  /* The dot is the whole row, so centre it and drop the text-sized padding. */
+  /* The icon is the whole row, so centre it and drop the text-sized padding. */
   .collapsed .row {
     justify-content: center;
-    padding: 0.55rem 0;
+    padding: 0.4rem 0;
     margin: 0 0.25rem;
-  }
-
-  /* --- footer ------------------------------------------------------------- */
-
-  footer {
-    flex: none;
-    display: flex;
-    /* Bottom left when expanded; the rail is narrow enough that centring is
-       the only thing that looks deliberate. */
-    justify-content: flex-start;
-    padding: 0.25rem 0.35rem;
-  }
-  .collapsed footer {
-    justify-content: center;
-    padding: 0.25rem 0;
-  }
-
-  .toggle {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 22px;
-    background: transparent;
-    border: none;
-    border-radius: var(--chip-radius);
-    color: var(--fg-dim);
-    cursor: pointer;
-  }
-  .toggle:hover {
-    background: var(--hover);
-    color: var(--fg);
-  }
-  .toggle:focus-visible {
-    outline: 1px solid var(--accent);
-    outline-offset: -1px;
-    color: var(--fg);
   }
 
   /* --- hover card --------------------------------------------------------- */
@@ -298,9 +301,9 @@
     z-index: 1400;
     transform: translateY(-50%);
     display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    max-width: 320px;
+    flex-direction: column;
+    gap: 1px;
+    max-width: 420px;
     padding: 0.35rem 0.55rem;
     background: var(--bg-menu);
     border: 1px solid var(--border);
@@ -312,10 +315,23 @@
     animation: tip-in 110ms ease-out;
   }
 
+  /* `left` is the sidebar's inner edge either way; on the right the card
+     hangs back from it instead of forward. */
+  .tip.right {
+    transform: translate(-100%, -50%);
+    animation-name: tip-in-right;
+  }
+
   @keyframes tip-in {
     from {
       opacity: 0;
       transform: translateY(-50%) translateX(-3px);
+    }
+  }
+  @keyframes tip-in-right {
+    from {
+      opacity: 0;
+      transform: translate(calc(-100% + 3px), -50%);
     }
   }
 
@@ -328,6 +344,14 @@
   .tip-name {
     font-size: 0.8rem;
     color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tip-detail {
+    font-size: 0.68rem;
+    color: var(--fg-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

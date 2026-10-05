@@ -5,6 +5,8 @@
 
 <script lang="ts">
   type Props = {
+    /** Which sidebar this is the inner edge of. */
+    side: "left" | "right";
     width: number;
     /** Reports a new width. The parent owns the value; this only asks. */
     onresize: (width: number) => void;
@@ -12,7 +14,7 @@
     ondragging: (dragging: boolean) => void;
   };
 
-  let { width, onresize, ondragging }: Props = $props();
+  let { side, width, onresize, ondragging }: Props = $props();
 
   let resizing = false;
 
@@ -29,8 +31,9 @@
 
   function move(event: PointerEvent) {
     if (!resizing) return;
-    // The sidebar starts at x=0, so the pointer's x *is* the desired width.
-    onresize(clamp(event.clientX));
+    // Each sidebar runs from its window edge to the pointer, so the distance
+    // to that edge *is* the desired width.
+    onresize(clamp(side === "left" ? event.clientX : window.innerWidth - event.clientX));
   }
 
   function end(event: PointerEvent) {
@@ -42,14 +45,12 @@
 
   // Keyboard-accessible resizing, since a drag handle is otherwise mouse-only.
   function onKey(event: KeyboardEvent) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     const step = event.shiftKey ? 40 : 10;
-    if (event.key === "ArrowLeft") {
-      onresize(clamp(width - step));
-      event.preventDefault();
-    } else if (event.key === "ArrowRight") {
-      onresize(clamp(width + step));
-      event.preventDefault();
-    }
+    // The arrow moves the handle, so which one widens depends on the side.
+    const widens = event.key === (side === "left" ? "ArrowRight" : "ArrowLeft");
+    onresize(clamp(width + (widens ? step : -step)));
+    event.preventDefault();
   }
 </script>
 
@@ -60,6 +61,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="resizer"
+  class:right={side === "right"}
   role="separator"
   aria-orientation="vertical"
   aria-label="Resize sidebar"
@@ -93,7 +95,7 @@
      hold of the edge you are actually moving.
      
      `right: -1px` puts it over the card's 1px border, which begins where this
-     element ends. The radius is subtracted top and bottom so it covers only
+     element ends (`left`, for the sidebar on the other side). The radius is subtracted top and bottom so it covers only
      the straight run between the card's rounded corners -- a straight line
      carried on past them would cut the curve. */
   .resizer::after {
@@ -105,6 +107,11 @@
     width: 1px;
     background: transparent;
     transition: background 120ms ease;
+  }
+
+  .resizer.right::after {
+    right: auto;
+    left: -1px;
   }
 
   .resizer:hover::after,

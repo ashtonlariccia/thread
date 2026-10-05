@@ -1,10 +1,13 @@
-//! Tauri command surface: windows, appearance, and the pinned strip.
+//! Tauri command surface: windows, files, appearance, and the pinned strip.
 //!
 //! This layer owns the windows and the IPC transport. Anything that can be
 //! decided without a window lives in `thread-core`.
 
-use tauri::{AppHandle, LogicalSize, Manager, PhysicalSize, WebviewWindow};
-use thread_core::{settings, Appearance, Material, Pin, PinStore};
+use std::path::Path;
+use std::sync::Mutex;
+use tauri::{AppHandle, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
+
+use thread_core::{document, settings, Appearance, Document, Eol, Material, Pin, PinStore};
 
 /// A window's size at 100% scale. Matches the window in tauri.conf.json.
 const BASE_SIZE: (f64, f64) = (960.0, 600.0);
@@ -116,10 +119,66 @@ pub async fn new_window(app: AppHandle) -> Result<String, String> {
 }
 
 /// Quit the application (File -> Exit).
+///
+/// By closing every window rather than exiting the process: each window then
+/// gets to ask about its own unsaved files, and one that is told "Cancel"
+/// stays open. The app exits by itself once the last window has gone.
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
-    tracing::info!("exiting on user request");
-    app.exit(0);
+    tracing::info!("closing every window on user request");
+    for window in app.webview_windows().values() {
+        let _ = window.close();
+    }
+}
+
+// --- files ------------------------------------------------------------------
+//
+// `async` so the disk is never touched on the main thread: a slow drive or a
+// large file must cost the open, not the window's event loop.
+
+/// Files named on the command line (`thread.exe notes.txt`, or "Open with").
+///
+/// Held until a window asks, because the window that should open them does
+/// not exist yet when the process starts.
+pub struct StartupFiles(Mutex<Vec<String>>);
+
+impl StartupFiles {
+    pub fn from_args() -> Self {
+        let files = std::env::args_os()
+            .skip(1)
+            // Relative to where the command was run, which the dialogs and the
+            // webview will not remember later.
+            .filter_map(|arg| std::path::absolute(arg).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        Self(Mutex::new(files))
+    }
+}
+
+/// Hand the command-line files to the first window that asks, once.
+#[tauri::command]
+pub fn startup_files(files: State<'_, StartupFiles>) -> Vec<String> {
+    files
+        .0
+        .lock()
+        .map(|mut files| std::mem::take(&mut *files))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn read_file(path: String) -> Result<Document, String> {
+    let doc = document::read(Path::new(&path)).map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "OPENED {path} ({} bytes)", doc.text.len());
+    Ok(doc)
+}
+
+/// `text` is `\n`-separated; `eol` and `bom` are what the file had when it was
+/// opened, and are restored here.
+#[tauri::command]
+pub async fn write_file(path: String, text: String, eol: Eol, bom: bool) -> Result<(), String> {
+    document::write(Path::new(&path), &text, eol, bom).map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "SAVED {path}");
+    Ok(())
 }
 
 // --- appearance -------------------------------------------------------------

@@ -96,6 +96,8 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(commands::StartupFiles::from_args())
         .on_page_load(|webview, payload| {
             tracing::info!(
                 target: "thread::ui",
@@ -116,6 +118,9 @@ fn main() {
             commands::appearance,
             commands::set_appearance,
             commands::new_window,
+            commands::startup_files,
+            commands::read_file,
+            commands::write_file,
             commands::pins,
             commands::add_pin,
             commands::remove_pin,

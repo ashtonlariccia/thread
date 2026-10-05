@@ -19,3 +19,4 @@ tauri = { version = "2", features = [] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tauri-plugin-clipboard-manager = "2.3.2"
+tauri-plugin-dialog = "2"

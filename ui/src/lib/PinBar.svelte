@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
+
   import { dropGap, dropIndex } from "./pins";
   import type { Pin } from "./types";
 
@@ -8,9 +10,11 @@
     onunpin: (pin: Pin) => void;
     /** Drop a pin at a new position. `index` counts the reordered strip. */
     onmove: (pin: Pin, index: number) => void;
+    /** Status for the right-hand end of the bar. */
+    info?: Snippet;
   };
 
-  let { pins, onopen, onunpin, onmove }: Props = $props();
+  let { pins, onopen, onunpin, onmove, info }: Props = $props();
 
   // The context menu is positioned in *viewport* coordinates rather than inside
   // the row, because the strip scrolls horizontally -- and `overflow` clips any
@@ -213,6 +217,10 @@
       {/each}
     </ul>
   {/if}
+
+  {#if info}
+    <div class="info">{@render info()}</div>
+  {/if}
 </footer>
 
 {#if menu}
@@ -252,6 +260,19 @@
     padding-right: 2px;
     user-select: none;
     overflow: hidden;
+  }
+
+  /* Pushed to the right-hand end whether or not there are pins before it. */
+  .info {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    min-width: 0;
+    margin-left: auto;
+    padding: 0 0.6rem;
+    color: var(--fg-dim);
+    font-size: 0.71rem;
+    white-space: nowrap;
   }
 
   .strip {

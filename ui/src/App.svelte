@@ -5,43 +5,59 @@
 
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
+  import Editor from "./lib/Editor.svelte";
   import PinBar from "./lib/PinBar.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import SidebarResizer from "./lib/SidebarResizer.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
+  import UnsavedDialog from "./lib/UnsavedDialog.svelte";
 
   import { item, SEP, type ContextMenuState } from "./lib/contextMenu";
+  import { setEditor } from "./lib/edit";
+  import { languageOf } from "./lib/languages";
   import { RAIL_WIDTH } from "./lib/layout";
   import { AppearanceStore } from "./lib/state/appearance.svelte";
+  import { Documents } from "./lib/state/documents.svelte";
+  import { fileIcon, loadIcons } from "./lib/state/icons.svelte";
   import { Pins } from "./lib/state/pins.svelte";
   import type { Pin, SidebarItem } from "./lib/types";
 
   const pins = new Pins();
   const appearance = new AppearanceStore();
+  const docs = new Documents();
 
   const appWindow = getCurrentWindow();
 
   let appearanceOpen = $state(false);
 
-  // Nothing fills the sidebar yet; the list, selection and close are wired so
-  // the first thing that does only has to push rows.
-  let items = $state<SidebarItem[]>([]);
-  let activeKey = $state<number | null>(null);
+  // --- sidebars ---------------------------------------------------------------
+  //
+  // Left is the file tree, which does not exist yet, so it has nothing to
+  // list. Right is the files open in this window.
+  //
+  // Each `*Width` stays the *expanded* width while collapsed, so expanding
+  // returns to the width you dragged rather than a default. Both start as
+  // rails: an empty list is a quarter of the window spent on nothing.
 
-  function closeItem(key: number) {
-    items = items.filter((i) => i.key !== key);
-    if (activeKey === key) activeKey = items.at(-1)?.key ?? null;
-  }
-
-  // `sidebarWidth` stays the *expanded* width while collapsed, so expanding
-  // returns to the width you dragged rather than a default.
-  let sidebarWidth = $state(230);
-  // Starts as the rail: 230px of empty list is a quarter of the window spent
-  // on nothing until something is open.
-  let sidebarCollapsed = $state(true);
+  let leftWidth = $state(230);
+  let leftCollapsed = $state(true);
+  let rightWidth = $state(230);
+  let rightCollapsed = $state(true);
   let resizing = $state(false);
 
-  const effectiveSidebarWidth = $derived(sidebarCollapsed ? RAIL_WIDTH : sidebarWidth);
+  const treeItems: SidebarItem[] = [];
+
+  const openFiles = $derived(
+    docs.list.map(
+      (doc): SidebarItem => ({
+        key: doc.key,
+        title: doc.name,
+        detail: doc.path,
+        icon: fileIcon(doc.name),
+        dirty: doc.dirty,
+      }),
+    ),
+  );
 
   // --- pins -------------------------------------------------------------------
 
@@ -58,6 +74,7 @@
     }
   }
 
+  /** File → Exit. Closes every window; each asks about its own unsaved files. */
   async function quit() {
     try {
       await invoke("quit_app");
@@ -68,10 +85,28 @@
 
   /**
    * Close this window and nothing else: with two windows open, the other one
-   * carries on. Only File → Exit means the whole application.
+   * carries on. Goes through the close request below, the same as Alt+F4.
    */
   function closeWindow() {
     void appWindow.close();
+  }
+
+  // Ctrl+C/X/V/Z/A are the editor's and the text fields' own; these are the
+  // ones the File menu advertises. `preventDefault` matters as much as the
+  // handler: the webview has its own ideas about Ctrl+O and Ctrl+S.
+  function onKeydown(event: KeyboardEvent) {
+    if (!event.ctrlKey || event.altKey || event.metaKey) return;
+    const key = event.key.toLowerCase();
+    if (key !== "o" && key !== "s" && key !== "w") return;
+    event.preventDefault();
+
+    // A dialog is up; the window behind it is not taking commands.
+    if (docs.asking || appearanceOpen || event.repeat) return;
+
+    if (key === "o") void docs.openDialog();
+    else if (key === "w") void docs.close();
+    else if (event.shiftKey) void docs.saveAs();
+    else void docs.save();
   }
 
   // --- right-click menu -------------------------------------------------------
@@ -87,8 +122,9 @@
 
   let ctx = $state<ContextMenuState | null>(null);
 
-  function refreshPage() {
-    location.reload();
+  /** Reload the frontend. The open files live only in this page, so ask first. */
+  async function refreshPage() {
+    if (await docs.confirm()) location.reload();
   }
 
   /** True for anything where the browser's own Cut/Copy/Paste menu is right. */
@@ -107,12 +143,18 @@
     ctx = { x: event.clientX, y: event.clientY, items: [item("Refresh Page", refreshPage)] };
   }
 
-  /** A row in the sidebar: the same menu, plus the one thing a row can do. */
-  function onItemContextMenu(event: MouseEvent, row: SidebarItem) {
+  /** A row in the open-files list. */
+  function onFileContextMenu(event: MouseEvent, row: SidebarItem) {
     ctx = {
       x: event.clientX,
       y: event.clientY,
-      items: [item("Close", () => closeItem(row.key)), SEP, item("Refresh Page", refreshPage)],
+      items: [
+        item("Save", () => void docs.save(row.key)),
+        item("Save As…", () => void docs.saveAs(row.key)),
+        item("Close", () => void docs.close(row.key)),
+        SEP,
+        item("Refresh Page", refreshPage),
+      ],
     };
   }
 
@@ -124,6 +166,8 @@
   });
 
   onMount(() => {
+    setEditor(docs.editor);
+
     void (async () => {
       await Promise.all([pins.refresh(), appearance.load()]);
 
@@ -131,14 +175,41 @@
       void invoke("ui_ready", {
         detail: `APP_READY pins=${pins.list.length} scale=${appearance.current.scale}`,
       }).catch(() => {});
+
+      // Not needed until a file is open, so not paid for before the window is up.
+      loadIcons();
+
+      // `thread.exe some-file`, or "Open with" from Explorer.
+      const startup = await invoke<string[]>("startup_files").catch(() => []);
+      for (const path of startup) await docs.open(path);
     })();
+
+    // The × in the bar, Alt+F4, the taskbar's Close and File → Exit all arrive
+    // here, so unsaved files are asked about however the window is shut.
+    const stopClose = appWindow.onCloseRequested(async (event) => {
+      if (!(await docs.confirm())) event.preventDefault();
+    });
+
+    return () => {
+      setEditor(null);
+      void stopClose.then((unlisten) => unlisten());
+    };
   });
 </script>
 
-<svelte:window oncontextmenu={onWindowContextMenu} />
+<svelte:window onkeydown={onKeydown} oncontextmenu={onWindowContextMenu} />
 
 <div class="app">
   <TitleBar
+    hasFile={docs.active !== null}
+    onopen={() => void docs.openDialog()}
+    onsave={() => void docs.save()}
+    onsaveas={() => void docs.saveAs()}
+    onclosefile={() => void docs.close()}
+    {leftCollapsed}
+    {rightCollapsed}
+    ontoggleleft={() => (leftCollapsed = !leftCollapsed)}
+    ontoggleright={() => (rightCollapsed = !rightCollapsed)}
     onnewwindow={newWindow}
     onappearance={() => (appearanceOpen = true)}
     onclosewindow={closeWindow}
@@ -147,30 +218,57 @@
 
   <main class:resizing>
     <Sidebar
-      {items}
-      {activeKey}
-      width={effectiveSidebarWidth}
-      collapsed={sidebarCollapsed}
+      side="left"
+      items={treeItems}
+      activeKey={null}
+      width={leftCollapsed ? RAIL_WIDTH : leftWidth}
+      collapsed={leftCollapsed}
       {resizing}
-      onselect={(key) => (activeKey = key)}
-      onclose={closeItem}
-      ontoggle={() => (sidebarCollapsed = !sidebarCollapsed)}
-      oncontext={onItemContextMenu}
+      onselect={() => {}}
+      onclose={() => {}}
+      oncontext={() => {}}
     />
 
     <!-- No handle while collapsed: the rail has one width, and a drag that
-         silently expanded it would fight the toggle. -->
-    {#if !sidebarCollapsed}
+         silently expanded it would fight the toggle in the title bar. -->
+    {#if !leftCollapsed}
       <SidebarResizer
-        width={sidebarWidth}
-        onresize={(w) => (sidebarWidth = w)}
+        side="left"
+        width={leftWidth}
+        onresize={(w) => (leftWidth = w)}
         ondragging={(d) => (resizing = d)}
       />
     {/if}
 
-    <!-- The resizer normally provides the gap on this side; collapsed, it is
-         not rendered, so the stage supplies its own. -->
-    <section class="stage" class:railed={sidebarCollapsed}></section>
+    <!-- A resizer normally provides the gap on its side; where a sidebar is
+         collapsed it is not rendered, so the stage supplies its own. -->
+    <section class="stage" class:railed-left={leftCollapsed} class:railed-right={rightCollapsed}>
+      <Editor host={docs.editor} />
+      {#if docs.list.length === 0}
+        <p class="empty">Open a file with Ctrl+O</p>
+      {/if}
+    </section>
+
+    {#if !rightCollapsed}
+      <SidebarResizer
+        side="right"
+        width={rightWidth}
+        onresize={(w) => (rightWidth = w)}
+        ondragging={(d) => (resizing = d)}
+      />
+    {/if}
+
+    <Sidebar
+      side="right"
+      items={openFiles}
+      activeKey={docs.activeKey}
+      width={rightCollapsed ? RAIL_WIDTH : rightWidth}
+      collapsed={rightCollapsed}
+      {resizing}
+      onselect={(key) => docs.select(key)}
+      onclose={(key) => void docs.close(key)}
+      oncontext={onFileContextMenu}
+    />
   </main>
 
   {#if ctx}
@@ -182,13 +280,25 @@
     onopen={openPin}
     onunpin={(pin) => void pins.remove(pin)}
     onmove={(pin, index) => void pins.move(pin, index)}
-  />
+  >
+    {#snippet info()}
+      {#if docs.active}
+        <span class="info-path" title={docs.active.path}>{docs.active.path}</span>
+        <span>Ln {docs.cursor.line}, Col {docs.cursor.col}</span>
+        <span>{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
+        <span>{docs.active.bom ? "UTF-8 with BOM" : "UTF-8"}</span>
+        <span>{languageOf(docs.active.name)}</span>
+      {/if}
+    {/snippet}
+  </PinBar>
 
   <AppearanceDialog
     open={appearanceOpen}
     {appearance}
     onclose={() => (appearanceOpen = false)}
   />
+
+  <UnsavedDialog docs={docs.asking?.docs ?? null} onanswer={(choice) => void docs.answer(choice)} />
 </div>
 
 <style>
@@ -216,29 +326,56 @@
 
   /* The one bordered thing in the window. The chrome around it is seamless, so
      this line is what separates "the app" from "what the app is showing" --
-     the same trick a browser plays with its content area. */
+     the same trick a browser plays with its content area.
+
+     It is also the painted surface for the editor, which draws no background
+     of its own: one layer here is what keeps the window a single opacity. */
   .stage {
     position: relative;
     flex: 1;
     min-width: 0;
     min-height: 0;
-    margin: var(--viewport-inset) var(--viewport-inset) var(--viewport-inset) 0;
+    margin: var(--viewport-inset) 0;
     background: var(--bg-viewport-wash);
     border: 1px solid var(--border);
     border-radius: var(--viewport-radius);
-    transition: margin-left 170ms cubic-bezier(0.2, 0.7, 0.3, 1);
+    transition: margin 170ms cubic-bezier(0.2, 0.7, 0.3, 1);
     /* Keeps the content inside the rounded corners. Safe here, unlike on the
-       sidebar: nothing in the stage needs to escape it. */
+       sidebars: nothing in the stage needs to escape it. */
     overflow: hidden;
   }
 
-  .stage.railed {
+  .stage.railed-left {
     margin-left: var(--viewport-inset);
+  }
+  .stage.railed-right {
+    margin-right: var(--viewport-inset);
   }
 
   @media (prefers-reduced-motion: reduce) {
     .stage {
       transition: none;
     }
+  }
+
+  /* Over the blank editor, and out of the way of anything aimed at it. */
+  .empty {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    color: var(--fg-faint);
+    font-size: 0.8rem;
+    user-select: none;
+    pointer-events: none;
+  }
+
+  /* The path is the one part of the status that can be any length, so it is
+     the part that gives way. */
+  .info-path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>
