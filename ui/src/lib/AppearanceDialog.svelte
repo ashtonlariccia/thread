@@ -103,6 +103,7 @@
       needs: () => editor.line_numbers,
     },
     { key: "word_wrap", label: "Word wrap" },
+    { key: "smooth_caret", label: "Smooth caret" },
   ];
 </script>
 

@@ -56,6 +56,8 @@ line_numbers = true
 # showing its real number.
 relative_line_numbers = false
 word_wrap = false
+# Glide the caret to where it is going instead of jumping there.
+smooth_caret = true
 
 [files]
 # Names the file tree leaves out. `*` is any run of characters and `?` is any
@@ -148,6 +150,8 @@ pub struct Editor {
     /// Counted from the cursor's line. Only applies while `line_numbers` is on.
     pub relative_line_numbers: bool,
     pub word_wrap: bool,
+    /// Animate the caret between positions.
+    pub smooth_caret: bool,
 }
 
 impl Default for Editor {
@@ -162,6 +166,7 @@ impl Default for Editor {
             line_numbers: true,
             relative_line_numbers: false,
             word_wrap: false,
+            smooth_caret: true,
         }
     }
 }

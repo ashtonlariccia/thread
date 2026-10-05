@@ -62,6 +62,8 @@ export type EditorLook = {
   /** Number lines by their distance from the cursor. */
   relativeLineNumbers: boolean;
   wordWrap: boolean;
+  /** Glide the caret between positions rather than jumping. */
+  smoothCaret: boolean;
 };
 
 type Events = {
@@ -81,7 +83,15 @@ const chrome = EditorView.theme(
       backgroundColor: "transparent",
       color: "var(--fg-faint)",
       border: "none",
+      // The numbers are furniture, not text: a drag that starts or strays
+      // here must not select them, and Ctrl+A must not sweep them up.
+      userSelect: "none",
+      WebkitUserSelect: "none",
+      cursor: "default",
     },
+    // Belt and braces: `user-select` is not inherited by every engine's
+    // reckoning, and a number that can be selected can be copied.
+    ".cm-gutter, .cm-gutterElement": { userSelect: "none", WebkitUserSelect: "none" },
     ".cm-lineNumbers .cm-gutterElement": { padding: "0 10px 0 14px" },
     ".cm-activeLine": { backgroundColor: "#ffffff0a" },
     ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--fg-dim)" },
@@ -138,6 +148,17 @@ function lookExtension(look: EditorLook): Extension {
     EditorView.theme({
       "&": { fontSize: `${look.fontSize}px` },
       ".cm-scroller": { fontFamily: look.fontFamily, lineHeight: String(look.lineHeight) },
+      // The caret is an element that is moved, not redrawn, so easing its
+      // position is all a smooth caret takes. Short, and fast at the start:
+      // long enough to see where it went, not long enough to lag behind
+      // typing.
+      ...(look.smoothCaret
+        ? {
+            ".cm-cursor": {
+              transition: "left 80ms cubic-bezier(0.2, 0.9, 0.3, 1), top 80ms cubic-bezier(0.2, 0.9, 0.3, 1)",
+            },
+          }
+        : {}),
     }),
     look.lineNumbers ? [numbers, highlightActiveLineGutter()] : [],
     look.wordWrap ? EditorView.lineWrapping : [],

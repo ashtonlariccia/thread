@@ -30,6 +30,7 @@ export type EditorConfig = {
   line_numbers: boolean;
   relative_line_numbers: boolean;
   word_wrap: boolean;
+  smooth_caret: boolean;
 };
 
 export type LanguageOverride = { tab_width?: number; insert_spaces?: boolean };
@@ -56,6 +57,7 @@ export const DEFAULTS: Config = {
     line_numbers: true,
     relative_line_numbers: false,
     word_wrap: false,
+    smooth_caret: true,
   },
   files: { exclude: [".*"] },
   theme: { syntax: "catppuccin" },

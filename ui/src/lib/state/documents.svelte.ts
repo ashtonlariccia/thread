@@ -123,6 +123,7 @@ export class Documents {
       lineNumbers: config.editor.line_numbers,
       relativeLineNumbers: config.editor.relative_line_numbers,
       wordWrap: config.editor.word_wrap,
+      smoothCaret: config.editor.smooth_caret,
     });
     this.editor.setHighlightStyle(syntaxTheme(config.theme.syntax));
     for (const doc of this.list) this.#dress(doc);
