@@ -10,7 +10,7 @@ pub mod document;
 pub mod pins;
 pub mod settings;
 
-pub use document::{Document, Eol};
+pub use document::{Document, Eol, Stamp};
 pub use pins::{Pin, Store as PinStore};
 pub use settings::{Appearance, Material};
 

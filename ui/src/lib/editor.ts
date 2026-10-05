@@ -157,6 +157,34 @@ export class EditorHost {
     this.events.ondirty(key, false);
   }
 
+  /** Nothing on disk matches this file any more, whatever its text. */
+  markUnsaved(key: number) {
+    this.saved.delete(key);
+    this.events.ondirty(key, true);
+  }
+
+  /**
+   * Swap a file's whole text, for when it has changed on disk.
+   *
+   * An ordinary edit rather than a fresh state, so it lands on the undo stack:
+   * Ctrl+Z after a reload brings back what was there before it.
+   */
+  replace(key: number, text: string) {
+    const state = this.states.get(key);
+    const live = key === this.current && this.view ? this.view : null;
+    const from = live?.state ?? state;
+    if (!from) return;
+
+    const doc = from.toText(text);
+    const spec = {
+      changes: { from: 0, to: from.doc.length, insert: doc },
+      // Roughly where it was; the text around it may be entirely different.
+      selection: { anchor: Math.min(from.selection.main.head, doc.length) },
+    };
+    if (live) live.dispatch(spec);
+    else this.states.set(key, from.update(spec).state);
+  }
+
   hasFocus(): boolean {
     return this.view?.hasFocus ?? false;
   }

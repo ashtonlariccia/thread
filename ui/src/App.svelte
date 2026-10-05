@@ -4,6 +4,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
+  import ChangedDialog from "./lib/ChangedDialog.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
   import Editor from "./lib/Editor.svelte";
   import PinBar from "./lib/PinBar.svelte";
@@ -27,6 +28,9 @@
   const docs = new Documents();
 
   const appWindow = getCurrentWindow();
+
+  /** How often open files are compared with the disk. */
+  const DISK_POLL_MS = 1000;
 
   let appearanceOpen = $state(false);
 
@@ -52,7 +56,7 @@
       (doc): SidebarItem => ({
         key: doc.key,
         title: doc.name,
-        detail: doc.path,
+        detail: doc.path ?? "Not saved yet",
         icon: fileIcon(doc.name),
         dirty: doc.dirty,
       }),
@@ -92,18 +96,28 @@
   }
 
   // Ctrl+C/X/V/Z/A are the editor's and the text fields' own; these are the
-  // ones the File menu advertises. `preventDefault` matters as much as the
-  // handler: the webview has its own ideas about Ctrl+O and Ctrl+S.
+  // ones the File menu advertises, plus Ctrl+Tab. `preventDefault` matters as
+  // much as the handler: the webview has its own ideas about most of them.
+  const SHORTCUTS = new Set(["n", "o", "s", "w", "tab"]);
+
   function onKeydown(event: KeyboardEvent) {
     if (!event.ctrlKey || event.altKey || event.metaKey) return;
     const key = event.key.toLowerCase();
-    if (key !== "o" && key !== "s" && key !== "w") return;
+    if (!SHORTCUTS.has(key)) return;
     event.preventDefault();
 
     // A dialog is up; the window behind it is not taking commands.
-    if (docs.asking || appearanceOpen || event.repeat) return;
+    if (docs.busy || appearanceOpen) return;
 
-    if (key === "o") void docs.openDialog();
+    if (key === "tab") {
+      docs.cycle(event.shiftKey ? -1 : 1);
+      return;
+    }
+    // Holding the others down should not open a stack of dialogs or files.
+    if (event.repeat) return;
+
+    if (key === "n") docs.newFile();
+    else if (key === "o") void docs.openDialog();
     else if (key === "w") void docs.close();
     else if (event.shiftKey) void docs.saveAs();
     else void docs.save();
@@ -190,18 +204,31 @@
       if (!(await docs.confirm())) event.preventDefault();
     });
 
+    // Files change on disk while the window is in the background as often as
+    // not -- that is when other tools are running -- so this does not wait for
+    // focus. It is one `stat` per open file.
+    const diskPoll = setInterval(() => void docs.checkDisk(), DISK_POLL_MS);
+
     return () => {
       setEditor(null);
+      clearInterval(diskPoll);
       void stopClose.then((unlisten) => unlisten());
     };
   });
 </script>
 
-<svelte:window onkeydown={onKeydown} oncontextmenu={onWindowContextMenu} />
+<!-- Coming back to the window is when a stale file would be noticed, so that
+     moment does not wait for the next tick of the poll. -->
+<svelte:window
+  onkeydown={onKeydown}
+  oncontextmenu={onWindowContextMenu}
+  onfocus={() => void docs.checkDisk()}
+/>
 
 <div class="app">
   <TitleBar
     hasFile={docs.active !== null}
+    onnew={() => docs.newFile()}
     onopen={() => void docs.openDialog()}
     onsave={() => void docs.save()}
     onsaveas={() => void docs.saveAs()}
@@ -245,7 +272,7 @@
     <section class="stage" class:railed-left={leftCollapsed} class:railed-right={rightCollapsed}>
       <Editor host={docs.editor} />
       {#if docs.list.length === 0}
-        <p class="empty">Open a file with Ctrl+O</p>
+        <p class="empty">Ctrl+O to open a file, Ctrl+N for a new one</p>
       {/if}
     </section>
 
@@ -283,7 +310,9 @@
   >
     {#snippet info()}
       {#if docs.active}
-        <span class="info-path" title={docs.active.path}>{docs.active.path}</span>
+        <span class="info-path" title={docs.active.path}>
+          {docs.active.path ?? docs.active.name}
+        </span>
         <span>Ln {docs.cursor.line}, Col {docs.cursor.col}</span>
         <span>{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
         <span>{docs.active.bom ? "UTF-8 with BOM" : "UTF-8"}</span>
@@ -299,6 +328,8 @@
   />
 
   <UnsavedDialog docs={docs.asking?.docs ?? null} onanswer={(choice) => void docs.answer(choice)} />
+
+  <ChangedDialog doc={docs.changed?.doc ?? null} onanswer={(reload) => docs.answerChanged(reload)} />
 </div>
 
 <style>

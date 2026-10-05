@@ -5,6 +5,7 @@
   type Props = {
     /** Whether a file is open, so entries that need one can be disabled. */
     hasFile: boolean;
+    onnew: () => void;
     onopen: () => void;
     onsave: () => void;
     onsaveas: () => void;
@@ -23,6 +24,7 @@
 
   let {
     hasFile,
+    onnew,
     onopen,
     onsave,
     onsaveas,
@@ -156,6 +158,10 @@
 
       {#if openMenu === "file"}
         <div class="menu" role="menu">
+          <button class="menu-item" role="menuitem" onclick={() => run(onnew)}>
+            <span>New File</span>
+            <span class="hint">Ctrl+N</span>
+          </button>
           <button class="menu-item" role="menuitem" onclick={() => run(onopen)}>
             <span>Open File…</span>
             <span class="hint">Ctrl+O</span>

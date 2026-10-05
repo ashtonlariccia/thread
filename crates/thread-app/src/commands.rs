@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use tauri::{AppHandle, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
 
-use thread_core::{document, settings, Appearance, Document, Eol, Material, Pin, PinStore};
+use thread_core::{document, settings, Appearance, Document, Eol, Material, Pin, PinStore, Stamp};
 
 /// A window's size at 100% scale. Matches the window in tauri.conf.json.
 const BASE_SIZE: (f64, f64) = (960.0, 600.0);
@@ -175,10 +175,27 @@ pub async fn read_file(path: String) -> Result<Document, String> {
 /// `text` is `\n`-separated; `eol` and `bom` are what the file had when it was
 /// opened, and are restored here.
 #[tauri::command]
-pub async fn write_file(path: String, text: String, eol: Eol, bom: bool) -> Result<(), String> {
-    document::write(Path::new(&path), &text, eol, bom).map_err(|e| e.to_string())?;
+pub async fn write_file(
+    path: String,
+    text: String,
+    eol: Eol,
+    bom: bool,
+) -> Result<Option<Stamp>, String> {
+    let stamp = document::write(Path::new(&path), &text, eol, bom).map_err(|e| e.to_string())?;
     tracing::info!(target: "thread::files", "SAVED {path}");
-    Ok(())
+    Ok(stamp)
+}
+
+/// The current stamp of each path, in order; `None` where the file is gone.
+///
+/// The frontend polls this for its open files to notice changes made outside
+/// the editor. One `stat` per file, and no file is read unless its stamp moved.
+#[tauri::command]
+pub async fn file_stamps(paths: Vec<String>) -> Vec<Option<Stamp>> {
+    paths
+        .iter()
+        .map(|path| document::stamp(Path::new(path)))
+        .collect()
 }
 
 // --- appearance -------------------------------------------------------------

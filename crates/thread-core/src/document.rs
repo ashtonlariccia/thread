@@ -4,8 +4,12 @@
 //! on disk beyond that — its line ending and whether it led with a byte-order
 //! mark — is carried alongside the text and put back on save, so opening a
 //! file and saving it unchanged leaves it byte-identical.
+//!
+//! A [`Stamp`] is taken whenever a file is read or written, so the editor can
+//! later tell that something else has changed it on disk.
 
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +26,33 @@ pub enum Eol {
     Crlf,
 }
 
+/// What a file looked like on disk at one moment: enough to notice that it
+/// has been written since, without reading it.
+///
+/// Modification time alone is not trusted — some tools restore it — so the
+/// length is compared too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stamp {
+    /// Milliseconds since the Unix epoch.
+    pub modified: u64,
+    pub len: u64,
+}
+
+/// The file's current stamp, or `None` if it cannot be read — which for an
+/// open file almost always means it has been deleted or moved.
+pub fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some(Stamp {
+        modified: modified.as_millis() as u64,
+        len: meta.len(),
+    })
+}
+
 /// A file as the editor sees it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +64,8 @@ pub struct Document {
     pub text: String,
     pub eol: Eol,
     pub bom: bool,
+    /// The file as it was when this was read.
+    pub stamp: Option<Stamp>,
 }
 
 /// Split a file's bytes into editor text and what must be restored on save.
@@ -90,11 +123,14 @@ pub fn read(path: &Path) -> Result<Document> {
         text,
         eol,
         bom,
+        stamp: stamp(path),
     })
 }
 
-pub fn write(path: &Path, text: &str, eol: Eol, bom: bool) -> Result<()> {
-    std::fs::write(path, encode(text, eol, bom)).map_err(|e| describe(path, "save", e))
+/// Write a file, returning its stamp as written.
+pub fn write(path: &Path, text: &str, eol: Eol, bom: bool) -> Result<Option<Stamp>> {
+    std::fs::write(path, encode(text, eol, bom)).map_err(|e| describe(path, "save", e))?;
+    Ok(stamp(path))
 }
 
 #[cfg(test)]
@@ -155,6 +191,41 @@ mod tests {
 
         write(&path, "a\nb\nc", doc.eol, doc.bom).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\r\nc");
+    }
+
+    #[test]
+    fn a_stamp_notices_a_file_being_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "short").unwrap();
+
+        let opened = read(&path).unwrap().stamp;
+        assert_eq!(opened, stamp(&path), "untouched, so unchanged");
+
+        // A different length, so this does not depend on the clock's resolution.
+        std::fs::write(&path, "rather longer").unwrap();
+        assert_ne!(opened, stamp(&path));
+    }
+
+    #[test]
+    fn saving_returns_the_stamp_the_file_now_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+
+        let written = write(&path, "hello", Eol::Lf, false).unwrap();
+        assert!(written.is_some());
+        assert_eq!(written, stamp(&path));
+    }
+
+    #[test]
+    fn a_deleted_file_has_no_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.txt");
+        std::fs::write(&path, "x").unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(stamp(&path), None);
+        assert_eq!(stamp(dir.path()), None, "a directory is not a file");
     }
 
     #[test]

@@ -121,6 +121,7 @@ fn main() {
             commands::startup_files,
             commands::read_file,
             commands::write_file,
+            commands::file_stamps,
             commands::pins,
             commands::add_pin,
             commands::remove_pin,
