@@ -1,12 +1,16 @@
 /**
  * Catppuccin, as a syntax palette.
  *
- * The colours and the italics are the ones the Catppuccin Charcoal VS Code
- * theme gives each kind of token, so a file reads the same here as it does
- * there. Only the mapping differs: VS Code themes address TextMate scopes,
- * CodeMirror addresses the tags below, and the two do not line up one to one.
- * Where a scope has no tag (a function's parameters, Rust lifetimes) the token
- * falls back to the nearest thing that does.
+ * Two VS Code themes go into it. The *colours* are the ones Catppuccin
+ * Charcoal gives each kind of token. The *font styles* — what is italic and
+ * what is bold — are Monokai Pro Charcoal's, which italicises the words that
+ * declare things (`fn`, `let`, `pub`), primitive types, macros and attributes,
+ * and leaves function and type names upright.
+ *
+ * VS Code themes address TextMate scopes and CodeMirror addresses the tags
+ * below, and the two do not line up one to one. Where a scope has no tag (a
+ * function's parameters, Rust lifetimes) the token falls back to the nearest
+ * thing that does.
  */
 import { HighlightStyle } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
@@ -34,17 +38,15 @@ export const catppuccin = HighlightStyle.define([
 
   { tag: [t.number, t.bool, t.null, t.atom, t.constant(t.variableName)], color: peach },
 
-  { tag: [t.keyword, t.modifier, t.operatorKeyword], color: mauve },
+  { tag: [t.keyword, t.operatorKeyword], color: mauve },
+  // The words that declare and qualify: Monokai's `storage` scopes.
+  { tag: [t.definitionKeyword, t.modifier], color: mauve, fontStyle: "italic" },
   { tag: t.operator, color: teal },
 
-  { tag: t.standard(t.typeName), color: sapphire },
-  { tag: [t.typeName, t.className, t.namespace], color: yellow, fontStyle: "italic" },
+  { tag: t.standard(t.typeName), color: sapphire, fontStyle: "italic" },
+  { tag: [t.typeName, t.className, t.namespace], color: yellow },
 
-  {
-    tag: [t.function(t.variableName), t.function(t.propertyName)],
-    color: blue,
-    fontStyle: "italic",
-  },
+  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: blue },
   { tag: [t.macroName, t.standard(t.function(t.variableName))], color: sapphire, fontStyle: "italic" },
 
   { tag: t.propertyName, color: lavender },
@@ -53,10 +55,10 @@ export const catppuccin = HighlightStyle.define([
 
   // Markup: the element, then what is said about it.
   { tag: t.tagName, color: mauve },
-  { tag: t.attributeName, color: peach },
+  { tag: t.attributeName, color: peach, fontStyle: "italic" },
 
   // Decorators and attributes, and the preprocessor's own little language.
-  { tag: [t.meta, t.annotation], color: peach },
+  { tag: [t.meta, t.annotation], color: peach, fontStyle: "italic" },
   { tag: t.processingInstruction, color: sky },
 
   { tag: [t.punctuation, t.bracket, t.separator], color: punctuation },

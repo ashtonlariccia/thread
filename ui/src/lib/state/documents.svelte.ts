@@ -121,6 +121,7 @@ export class Documents {
       fontSize: config.editor.font_size,
       lineHeight: config.editor.line_height,
       lineNumbers: config.editor.line_numbers,
+      relativeLineNumbers: config.editor.relative_line_numbers,
       wordWrap: config.editor.word_wrap,
     });
     this.editor.setHighlightStyle(syntaxTheme(config.theme.syntax));

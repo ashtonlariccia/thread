@@ -35,6 +35,8 @@ import {
   type Command,
   drawSelection,
   EditorView,
+  gutter,
+  GutterMarker,
   highlightActiveLine,
   highlightActiveLineGutter,
   keymap,
@@ -57,6 +59,8 @@ export type EditorLook = {
   /** A multiple of the font size. */
   lineHeight: number;
   lineNumbers: boolean;
+  /** Number lines by their distance from the cursor. */
+  relativeLineNumbers: boolean;
   wordWrap: boolean;
 };
 
@@ -88,13 +92,54 @@ const chrome = EditorView.theme(
   { dark: true },
 );
 
+class NumberMarker extends GutterMarker {
+  constructor(readonly text: string) {
+    super();
+  }
+  override eq(other: NumberMarker) {
+    return this.text === other.text;
+  }
+  override toDOM() {
+    return document.createTextNode(this.text);
+  }
+}
+
+/** As many zeros as the last line's number has digits: the width to reserve. */
+const widest = (state: EditorState) => "0".repeat(String(state.doc.lines).length);
+
+/**
+ * Line numbers counted from the cursor: the cursor's line shows its real
+ * number, every other line how far away it is. What a count before a motion
+ * (`5j`, `3dd`) needs to be read straight off the gutter.
+ *
+ * A gutter of its own because the built-in one only renumbers when the text
+ * changes, and this has to renumber every time the cursor changes line. It
+ * wears the built-in one's class, so it is styled as the same gutter.
+ */
+const relativeLineNumbers = gutter({
+  class: "cm-lineNumbers",
+  lineMarker(view, line) {
+    const { doc, selection } = view.state;
+    const cursor = doc.lineAt(selection.main.head).number;
+    const number = doc.lineAt(line.from).number;
+    return new NumberMarker(String(number === cursor ? number : Math.abs(number - cursor)));
+  },
+  lineMarkerChange: (update) => update.selectionSet || update.docChanged,
+  initialSpacer: (view) => new NumberMarker(widest(view.state)),
+  updateSpacer: (spacer, update) => {
+    const width = widest(update.state);
+    return (spacer as NumberMarker).text === width ? spacer : new NumberMarker(width);
+  },
+});
+
 function lookExtension(look: EditorLook): Extension {
+  const numbers = look.relativeLineNumbers ? relativeLineNumbers : lineNumbers();
   return [
     EditorView.theme({
       "&": { fontSize: `${look.fontSize}px` },
       ".cm-scroller": { fontFamily: look.fontFamily, lineHeight: String(look.lineHeight) },
     }),
-    look.lineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : [],
+    look.lineNumbers ? [numbers, highlightActiveLineGutter()] : [],
     look.wordWrap ? EditorView.lineWrapping : [],
   ];
 }

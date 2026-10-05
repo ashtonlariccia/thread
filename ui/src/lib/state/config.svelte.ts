@@ -28,6 +28,7 @@ export type EditorConfig = {
   insert_spaces: boolean;
   detect_indentation: boolean;
   line_numbers: boolean;
+  relative_line_numbers: boolean;
   word_wrap: boolean;
 };
 
@@ -53,12 +54,16 @@ export const DEFAULTS: Config = {
     insert_spaces: true,
     detect_indentation: true,
     line_numbers: true,
+    relative_line_numbers: false,
     word_wrap: false,
   },
   files: { exclude: [".*"] },
   theme: { syntax: "catppuccin" },
   language: {},
 };
+
+/** The sections whose keys are plain values, settable one at a time. */
+type Settable = "appearance" | "editor" | "files" | "theme";
 
 export class ConfigStore {
   current = $state.raw<Config>(DEFAULTS);
@@ -81,28 +86,36 @@ export class ConfigStore {
   }
 
   /**
-   * Change some of the appearance. Returns once the backend has stored it.
+   * Change one setting. The backend writes it into the config file — the same
+   * change as editing that key by hand — and applies it everywhere.
    *
-   * The backend is the authority on the stored value: it clamps opacity and
-   * scale, so this adopts what comes back rather than what was sent.
+   * The backend is the authority on the stored value: it clamps, so this
+   * adopts what comes back rather than what was sent.
    */
-  async patchAppearance(change: Partial<Appearance>) {
-    const next = { ...this.current.appearance, ...change };
+  async set<S extends Settable, K extends keyof Config[S]>(section: S, key: K, value: Config[S][K]) {
     // Show it immediately: waiting for the round trip makes a dragged slider
     // feel like it is fighting back.
-    this.current = { ...this.current, appearance: next };
+    this.current = { ...this.current, [section]: { ...this.current[section], [key]: value } };
 
     try {
-      const stored = await invoke<Appearance>("set_appearance", { appearance: next });
-      this.current = { ...this.current, appearance: stored };
+      this.current = await invoke<Config>("set_config", { section, key, value });
     } catch (e) {
-      console.error("set_appearance failed", e);
+      console.error("set_config failed", e);
       // Whatever is actually stored is the truth; put it back.
       await this.load();
     }
   }
 
-  async resetAppearance() {
-    await this.patchAppearance({ ...DEFAULTS.appearance });
+  /** Put every setting the dialog shows back to its default. */
+  async reset() {
+    for (const section of ["appearance", "editor", "files", "theme"] as const) {
+      const defaults = DEFAULTS[section] as Record<string, unknown>;
+      const current = this.current[section] as Record<string, unknown>;
+      for (const key of Object.keys(defaults)) {
+        // Only what differs, so a reset does not rewrite the whole file.
+        if (JSON.stringify(current[key]) === JSON.stringify(defaults[key])) continue;
+        await this.set(section, key as never, defaults[key] as never);
+      }
+    }
   }
 }

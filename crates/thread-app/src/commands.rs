@@ -421,21 +421,23 @@ fn apply_config(app: &AppHandle, config: &Config) {
     );
 }
 
-/// Store the appearance in the config file and apply it.
+/// Change one setting in the config file and apply it.
 ///
-/// Returns what was actually written: opacity and scale are clamped, so the
-/// dialog must render the stored value rather than the one it sent.
+/// This is what the Appearance dialog does with every control: the same
+/// change as editing the key in the file and saving it, made for you.
+///
+/// Returns the config as it now stands. Values are clamped on the way in, so
+/// the dialog must show what came back rather than what it sent.
 #[tauri::command]
-pub fn set_appearance(app: AppHandle, appearance: Appearance) -> Result<Appearance, String> {
-    let stored = config::save_appearance(&appearance).map_err(|e| e.to_string())?;
-
-    // The rest comes from the file, so one window's dialog cannot push a stale
-    // copy of the editor settings onto the others. If the file has a mistake
-    // elsewhere in it, the appearance still applies, over the defaults.
-    let mut config = stored_config();
-    config.appearance = stored.clone();
+pub fn set_config(
+    app: AppHandle,
+    section: String,
+    key: String,
+    value: serde_json::Value,
+) -> Result<Config, String> {
+    let config = config::set(&section, &key, &value).map_err(|e| e.to_string())?;
     apply_config(&app, &config);
-    Ok(stored)
+    Ok(config)
 }
 
 // --- session ----------------------------------------------------------------

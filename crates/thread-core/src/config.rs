@@ -2,8 +2,9 @@
 //!
 //! One hand-editable file for everything that is a preference. It is read, not
 //! owned: Thread never rewrites it wholesale, so comments and layout survive.
-//! The one thing that writes to it — the Appearance dialog — patches the three
-//! keys it controls and leaves every other byte alone.
+//! The one thing that writes to it — the Appearance dialog — patches the single
+//! key being changed and leaves every other byte alone. The dialog and the file
+//! are two views of the same settings, and either can be used.
 //!
 //! Every key has a default, so an absent or partial file is not an error and a
 //! key added here does not invalidate an existing file. A key that is not
@@ -51,6 +52,9 @@ insert_spaces = true
 # and use that in preference to the two settings above.
 detect_indentation = true
 line_numbers = true
+# Number lines by their distance from the cursor, with the cursor's own line
+# showing its real number.
+relative_line_numbers = false
 word_wrap = false
 
 [files]
@@ -134,13 +138,15 @@ pub struct Editor {
     /// A CSS font list, passed through as written.
     pub font_family: String,
     /// Pixels, before the interface scale.
-    pub font_size: f32,
+    pub font_size: f64,
     /// A multiple of the font size.
-    pub line_height: f32,
+    pub line_height: f64,
     pub tab_width: u8,
     pub insert_spaces: bool,
     pub detect_indentation: bool,
     pub line_numbers: bool,
+    /// Counted from the cursor's line. Only applies while `line_numbers` is on.
+    pub relative_line_numbers: bool,
     pub word_wrap: bool,
 }
 
@@ -154,6 +160,7 @@ impl Default for Editor {
             insert_spaces: true,
             detect_indentation: true,
             line_numbers: true,
+            relative_line_numbers: false,
             word_wrap: false,
         }
     }
@@ -300,21 +307,77 @@ pub fn ensure_file() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Store the appearance, leaving the rest of the file — other keys, comments,
-/// layout — as it is.
-pub fn save_appearance(appearance: &Appearance) -> Result<Appearance> {
-    let sane = appearance.clone().sanitised();
+/// Change one setting, leaving the rest of the file — other keys, comments,
+/// layout — as it is. Returns the config as it now stands.
+///
+/// `value` arrives as JSON because that is what the frontend speaks; it is
+/// written as the TOML of the same shape.
+pub fn set(section: &str, key: &str, value: &serde_json::Value) -> Result<Config> {
     let path = ensure_file()?;
     let text = std::fs::read_to_string(&path)?;
+    let (text, config) = patched(strip_bom(&text), section, key, value)?;
+    std::fs::write(&path, text)?;
+    Ok(config)
+}
+
+/// `text` with one setting changed, and the config that results.
+fn patched(
+    text: &str,
+    section: &str,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(String, Config)> {
+    let refuse = |why: String| {
+        Error::Other(anyhow::anyhow!(
+            "{section}.{key} cannot be set to {value}: {why}"
+        ))
+    };
 
     // A file that will not parse is replaced: the dialog has to be able to dig
     // the app out of a bad config.
-    let mut doc = strip_bom(&text)
-        .parse::<DocumentMut>()
-        .unwrap_or_else(|_| template());
-    set_appearance(&mut doc, &sane);
-    std::fs::write(&path, doc.to_string())?;
-    Ok(sane)
+    let mut doc = text.parse::<DocumentMut>().unwrap_or_else(|_| template());
+    set_value(&mut doc, section, key, to_toml(value).map_err(refuse)?);
+    let config = parse(&doc.to_string()).map_err(|e| refuse(e.to_string()))?;
+
+    // What the setting came out as once it was read back: clamped, perhaps,
+    // or not there at all if this is not a setting the config has.
+    let stored = serde_json::to_value(&config)
+        .ok()
+        .and_then(|all| all.get(section)?.get(key).cloned())
+        .ok_or_else(|| refuse("there is no such setting".into()))?;
+
+    // The file should say what is in effect, so a value that was clamped is
+    // written as clamped. Compared as numbers where they are numbers: 14 and
+    // 14.0 are the same setting, and not worth rewriting the line over.
+    let same = match (stored.as_f64(), value.as_f64()) {
+        (Some(a), Some(b)) => a == b,
+        _ => &stored == value,
+    };
+    if !same {
+        set_value(&mut doc, section, key, to_toml(&stored).map_err(refuse)?);
+    }
+    Ok((doc.to_string(), config))
+}
+
+fn to_toml(value: &serde_json::Value) -> std::result::Result<toml_edit::Value, String> {
+    use serde_json::Value as Json;
+    match value {
+        Json::Bool(b) => Ok((*b).into()),
+        Json::String(s) => Ok(s.as_str().into()),
+        Json::Number(n) => n
+            .as_i64()
+            .map(toml_edit::Value::from)
+            .or_else(|| n.as_f64().map(toml_edit::Value::from))
+            .ok_or_else(|| "the number is out of range".to_string()),
+        Json::Array(items) => {
+            let mut array = toml_edit::Array::new();
+            for item in items {
+                array.push(to_toml(item)?);
+            }
+            Ok(array.into())
+        }
+        Json::Null | Json::Object(_) => Err("that kind of value cannot be a setting".into()),
+    }
 }
 
 fn template() -> DocumentMut {
@@ -324,11 +387,33 @@ fn template() -> DocumentMut {
 /// The template, with the settings the old format could hold filled in.
 fn render(config: &Config) -> String {
     let mut doc = template();
-    set_appearance(&mut doc, &config.appearance);
+    let appearance = &config.appearance;
+    set_value(
+        &mut doc,
+        "appearance",
+        "background_opacity",
+        i64::from(appearance.background_opacity).into(),
+    );
+    set_value(
+        &mut doc,
+        "appearance",
+        "material",
+        match appearance.material {
+            Material::None => "none",
+            Material::Acrylic => "acrylic",
+        }
+        .into(),
+    );
+    set_value(
+        &mut doc,
+        "appearance",
+        "scale",
+        i64::from(appearance.scale).into(),
+    );
 
     let mut exclude = toml_edit::Array::new();
     exclude.extend(config.files.exclude.iter().map(String::as_str));
-    table(&mut doc, "files")["exclude"] = toml_edit::value(exclude);
+    set_value(&mut doc, "files", "exclude", exclude.into());
 
     doc.to_string()
 }
@@ -346,32 +431,18 @@ fn table<'a>(doc: &'a mut DocumentMut, name: &str) -> &'a mut toml_edit::Table {
     }
 }
 
-fn set_appearance(doc: &mut DocumentMut, appearance: &Appearance) {
-    let section = table(doc, "appearance");
+fn set_value(doc: &mut DocumentMut, section: &str, key: &str, value: toml_edit::Value) {
+    let section = table(doc, section);
     // Assigned through the existing value where there is one, so a comment on
     // the same line as a key stays attached to it.
-    let mut set = |key: &str, value: toml_edit::Value| match section.get_mut(key) {
+    match section.get_mut(key) {
         Some(Item::Value(existing)) => {
             let decor = existing.decor().clone();
             *existing = value;
             *existing.decor_mut() = decor;
         }
         _ => section[key] = Item::Value(value),
-    };
-
-    set(
-        "background_opacity",
-        i64::from(appearance.background_opacity).into(),
-    );
-    set(
-        "material",
-        match appearance.material {
-            Material::None => "none",
-            Material::Acrylic => "acrylic",
-        }
-        .into(),
-    );
-    set("scale", i64::from(appearance.scale).into());
+    }
 }
 
 /// What `settings.json` held, if there is one to read.
@@ -498,40 +569,115 @@ mod tests {
         assert_eq!(half_again.scale_factor(), 1.5);
     }
 
+    fn json(value: serde_json::Value) -> serde_json::Value {
+        value
+    }
+
     /// The dialog must not cost anyone their comments or their other settings.
     #[test]
-    fn setting_the_appearance_touches_nothing_else() {
+    fn setting_one_key_touches_nothing_else() {
         let before = "# mine\n[appearance]\nscale = 100 # big screen\nmaterial = \"none\"\n\n\
                       [editor]\ntab_width = 2 # two\n";
-        let mut doc: DocumentMut = before.parse().unwrap();
-        set_appearance(
-            &mut doc,
-            &Appearance {
-                background_opacity: 80,
-                material: Material::Acrylic,
-                scale: 125,
-            },
-        );
-        let after = doc.to_string();
+        let (after, config) = patched(before, "appearance", "scale", &json(125.into())).unwrap();
 
         assert!(after.starts_with("# mine\n"), "got {after}");
         assert!(after.contains("scale = 125 # big screen"), "got {after}");
         assert!(after.contains("tab_width = 2 # two"), "got {after}");
-
-        let config = parse(&after).unwrap();
-        assert_eq!(config.appearance.background_opacity, 80);
-        assert_eq!(config.appearance.material, Material::Acrylic);
+        assert_eq!(config.appearance.scale, 125);
         assert_eq!(config.editor.tab_width, 2);
     }
 
     #[test]
-    fn setting_the_appearance_repairs_a_file_with_no_such_section() {
-        let mut doc: DocumentMut = "appearance = 3\n".parse().unwrap();
-        set_appearance(&mut doc, &Appearance::default());
+    fn every_kind_of_setting_can_be_set() {
+        let set = |section, key, value: serde_json::Value| {
+            patched(TEMPLATE, section, key, &value).unwrap().1
+        };
+
         assert_eq!(
-            parse(&doc.to_string()).unwrap().appearance,
-            Appearance::default()
+            set("appearance", "material", "acrylic".into())
+                .appearance
+                .material,
+            Material::Acrylic
         );
+        assert_eq!(
+            set("editor", "font_family", "Consolas".into())
+                .editor
+                .font_family,
+            "Consolas"
+        );
+        assert_eq!(
+            set("editor", "line_height", 1.4.into()).editor.line_height,
+            1.4
+        );
+        assert!(
+            set("editor", "relative_line_numbers", true.into())
+                .editor
+                .relative_line_numbers
+        );
+        assert!(
+            !set("editor", "insert_spaces", false.into())
+                .editor
+                .insert_spaces
+        );
+        assert_eq!(set("theme", "syntax", "other".into()).theme.syntax, "other");
+        assert_eq!(
+            set("files", "exclude", serde_json::json!([".*", "target"]))
+                .files
+                .exclude,
+            [".*", "target"]
+        );
+    }
+
+    /// The template's comments describe each key; setting one must keep them.
+    #[test]
+    fn setting_a_key_in_the_template_keeps_its_comments() {
+        let (after, _) = patched(TEMPLATE, "editor", "tab_width", &json(2.into())).unwrap();
+        assert!(
+            after.contains("# How wide a tab is, and how far Tab indents.\ntab_width = 2\n"),
+            "got {after}"
+        );
+        assert_eq!(
+            after.lines().count(),
+            TEMPLATE.lines().count(),
+            "no lines added or lost"
+        );
+    }
+
+    /// The file should say what is in effect, not what was asked for.
+    #[test]
+    fn a_value_out_of_range_is_written_as_clamped() {
+        let (after, config) = patched(TEMPLATE, "appearance", "scale", &json(900.into())).unwrap();
+        assert_eq!(config.appearance.scale, 200);
+        assert!(after.contains("scale = 200"), "got {after}");
+    }
+
+    #[test]
+    fn a_whole_number_stays_written_as_one() {
+        let (after, config) = patched(TEMPLATE, "editor", "font_size", &json(16.into())).unwrap();
+        assert_eq!(config.editor.font_size, 16.0);
+        assert!(after.contains("font_size = 16\n"), "got {after}");
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_kind_is_refused_and_says_which_setting() {
+        let err = patched(TEMPLATE, "editor", "tab_width", &json("wide".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("editor.tab_width"), "got {err}");
+    }
+
+    #[test]
+    fn a_setting_that_does_not_exist_is_refused() {
+        assert!(patched(TEMPLATE, "editor", "minimap", &json(true.into())).is_err());
+        assert!(patched(TEMPLATE, "nowhere", "scale", &json(1.into())).is_err());
+    }
+
+    #[test]
+    fn setting_a_key_repairs_a_file_with_no_such_section() {
+        let (after, config) =
+            patched("appearance = 3\n", "appearance", "scale", &json(125.into())).unwrap();
+        assert_eq!(config.appearance.scale, 125);
+        assert_eq!(parse(&after).unwrap().appearance.scale, 125);
     }
 
     #[test]
