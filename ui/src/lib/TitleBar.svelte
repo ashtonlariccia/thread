@@ -5,8 +5,8 @@
   type Props = {
     /** Whether a file is open, so entries that need one can be disabled. */
     hasFile: boolean;
-    /** Whether a folder is open in the file tree. */
-    hasFolder: boolean;
+    /** How many folders are open in the file tree. */
+    folderCount: number;
     onnew: () => void;
     onopen: () => void;
     onopenfolder: () => void;
@@ -26,7 +26,7 @@
 
   let {
     hasFile,
-    hasFolder,
+    folderCount,
     onnew,
     onopen,
     onopenfolder,
@@ -170,10 +170,12 @@
           <button
             class="menu-item"
             role="menuitem"
-            disabled={!hasFolder}
+            disabled={folderCount === 0}
             onclick={() => run(onclosefolder)}
           >
-            Close Folder
+            <!-- One folder is closed from here; one of several is closed by
+                 right-clicking it in the tree. -->
+            {folderCount > 1 ? "Close All Folders" : "Close Folder"}
           </button>
 
           <div class="sep"></div>

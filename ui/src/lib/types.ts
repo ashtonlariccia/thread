@@ -1,18 +1,20 @@
-/** Tree rows are keyed by their path. */
-export type SidebarKey = string;
-
-/** One row in the sidebar. */
+/** One row of the file tree, as the sidebar draws it. */
 export type SidebarItem = {
-  key: SidebarKey;
+  /**
+   * Unique among the rows. Not the path: a folder open as a root can also be
+   * on screen inside another root.
+   */
+  key: string;
+  path: string;
   title: string;
-  /** Second line of the hover card: for a file, its full path. */
-  detail?: string;
-  /** Icon URL. A row without one gets a plain dot. */
-  icon?: string;
-  /** In a tree: how many folders deep the row is. */
-  depth?: number;
-  /** In a tree: set on folders, saying whether theirs is unfolded. */
+  /** Icon URL. */
+  icon: string;
+  /** How many folders deep the row is; a root is 0. */
+  depth: number;
+  /** Set on folders, saying whether theirs is unfolded. */
   folder?: "open" | "closed";
+  /** One of the folders that was opened, rather than something inside one. */
+  root: boolean;
 };
 
 /**

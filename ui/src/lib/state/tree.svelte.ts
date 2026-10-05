@@ -1,5 +1,8 @@
 /**
- * The file tree: the folder open in this window, and what is unfolded in it.
+ * The file tree: the folders open in this window, and what is unfolded in them.
+ *
+ * Any number of folders can be open at once, each a root of its own. Opening
+ * another adds to them; a folder only goes away when it is closed.
  *
  * Folders are listed one at a time, when they are unfolded — opening a project
  * never walks the whole of it. What the listing leaves out (dotfiles, unless
@@ -8,14 +11,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { message, open } from "@tauri-apps/plugin-dialog";
 
-import { baseName, segmentsBelow } from "../paths";
+import { baseName, samePath, segmentsBelow } from "../paths";
 
 export type Entry = { name: string; path: string; dir: boolean };
 
 /** One visible row, in the order the tree draws them. */
 export type TreeRow = {
+  /**
+   * Unique among the rows. The path alone is not: with `C:\a` and `C:\a\b`
+   * both open as roots, `C:\a\b` is on screen twice.
+   */
+  id: string;
   entry: Entry;
-  /** The root is 0, its children 1, and so on. */
+  /** A root is 0, its children 1, and so on. */
   depth: number;
   /** For a folder, whether it is unfolded. */
   open: boolean;
@@ -23,8 +31,8 @@ export type TreeRow = {
 };
 
 export class Tree {
-  /** The folder the tree was opened at, or null when there is none. */
-  root = $state<Entry | null>(null);
+  /** The folders that have been opened, in the order they were. */
+  roots = $state<Entry[]>([]);
 
   /** Each listed folder's children, by path. */
   #children = $state<Record<string, Entry[]>>({});
@@ -34,27 +42,24 @@ export class Tree {
   #stamps = new Map<string, number | null>();
   #polling = false;
 
-  /** Every row the unfolded tree shows, root first. */
+  /** Every row the tree shows: each root, and whatever is unfolded under it. */
   get rows(): TreeRow[] {
-    if (!this.root) return [];
-
     const rows: TreeRow[] = [];
-    const walk = (entry: Entry, depth: number) => {
-      const open = entry.dir && this.#open[entry.path] === true;
-      rows.push({ entry, depth, open, root: depth === 0 });
-      if (open) for (const child of this.#children[entry.path] ?? []) walk(child, depth + 1);
-    };
-    walk(this.root, 0);
+    for (const root of this.roots) {
+      const walk = (entry: Entry, depth: number) => {
+        const open = entry.dir && this.#open[entry.path] === true;
+        rows.push({
+          id: `${root.path}\n${entry.path}`,
+          entry,
+          depth,
+          open,
+          root: depth === 0,
+        });
+        if (open) for (const child of this.#children[entry.path] ?? []) walk(child, depth + 1);
+      };
+      walk(root, 0);
+    }
     return rows;
-  }
-
-  /** What is directly inside the root: what the collapsed rail shows. */
-  get topLevel(): Entry[] {
-    return this.root ? (this.#children[this.root.path] ?? []) : [];
-  }
-
-  isOpen(path: string): boolean {
-    return this.#open[path] === true;
   }
 
   /** File → Open Folder. */
@@ -63,29 +68,40 @@ export class Tree {
     if (typeof picked === "string") await this.open(picked);
   }
 
-  /** Make `path` the tree's root, replacing whatever folder was open. */
+  /**
+   * Add `path` to the open folders, below the ones already there. A folder
+   * that is already open is unfolded rather than added twice.
+   */
   async open(path: string) {
     // `C:\src\thread\` and `C:\src\thread` are the same folder, and only one
     // of them has a last component to name it by.
     const trimmed = path.length > 3 ? path.replace(/[\\/]+$/, "") : path;
 
-    this.#children = {};
-    this.#open = { [trimmed]: true };
-    this.#stamps.clear();
-    this.root = { name: baseName(trimmed) || trimmed, path: trimmed, dir: true };
+    const existing = this.roots.find((root) => samePath(root.path, trimmed));
+    if (existing) {
+      await this.expand(existing.path);
+      return;
+    }
 
     const error = await this.#load(trimmed);
     if (error !== null) {
-      this.close();
+      this.#forget(trimmed);
       void message(error, { title: "Thread", kind: "error" });
+      return;
     }
+    this.#open[trimmed] = true;
+    this.roots.push({ name: baseName(trimmed) || trimmed, path: trimmed, dir: true });
   }
 
-  close() {
-    this.root = null;
-    this.#children = {};
-    this.#open = {};
-    this.#stamps.clear();
+  /** Close one open folder. What is unfolded under the others is untouched. */
+  close(path: string) {
+    this.roots = this.roots.filter((root) => root.path !== path);
+    this.#prune();
+  }
+
+  closeAll() {
+    this.roots = [];
+    this.#prune();
   }
 
   /** Fold or unfold a folder. */
@@ -97,20 +113,24 @@ export class Tree {
   /** Unfold a folder, listing it afresh: it was not being watched while folded. */
   async expand(path: string) {
     this.#open[path] = true;
-    if ((await this.#load(path)) !== null) this.#forget(path);
+    if ((await this.#load(path)) !== null && !this.#isRoot(path)) this.#forget(path);
   }
 
   /**
-   * Unfold whatever folders lie between the root and `path`, so its row is
-   * on screen. Does nothing for a file outside the open folder, or one the
-   * tree leaves out.
+   * Unfold whatever folders lie between a root and `path`, so its row is on
+   * screen. Does nothing for a file outside every open folder, or one the tree
+   * leaves out.
    */
   async reveal(path: string) {
-    if (!this.root) return;
-    const names = segmentsBelow(this.root.path, path);
+    // The deepest root that contains it: with a project and one of its own
+    // subfolders both open, the file belongs to the more specific one.
+    const root = this.roots
+      .filter((r) => segmentsBelow(r.path, path) !== null)
+      .sort((a, b) => b.path.length - a.path.length)[0];
+    const names = root && segmentsBelow(root.path, path);
     if (!names) return;
 
-    let dir = this.root.path;
+    let dir = root.path;
     // Every name but the last is a folder to unfold; the last is the file.
     for (const name of names.slice(0, -1)) {
       if (!this.#open[dir] || !(dir in this.#children)) await this.expand(dir);
@@ -141,20 +161,25 @@ export class Tree {
    * removed or renamed.
    */
   async poll() {
-    if (this.#polling || !this.root) return;
+    if (this.#polling || this.roots.length === 0) return;
     this.#polling = true;
     try {
       const dirs = this.#watched();
       const stamps = await invoke<(number | null)[]>("dir_stamps", { paths: dirs });
       for (const [index, dir] of dirs.entries()) {
         if (stamps[index] === this.#stamps.get(dir)) continue;
-        if ((await this.#load(dir)) !== null && dir !== this.root?.path) this.#forget(dir);
+        // A root that has gone keeps its row, so it can be seen and closed.
+        if ((await this.#load(dir)) !== null && !this.#isRoot(dir)) this.#forget(dir);
       }
     } catch (e) {
       console.error("checking folders on disk failed", e);
     } finally {
       this.#polling = false;
     }
+  }
+
+  #isRoot(path: string): boolean {
+    return this.roots.some((root) => root.path === path);
   }
 
   /** The folders whose listings are on screen: unfolded, and listed. */
@@ -182,5 +207,18 @@ export class Tree {
     delete this.#children[dir];
     delete this.#open[dir];
     this.#stamps.delete(dir);
+  }
+
+  /**
+   * Drop what is known about folders no longer under any root, so a closed
+   * project is not still being polled.
+   */
+  #prune() {
+    const kept = (dir: string) =>
+      this.roots.some((root) => root.path === dir || segmentsBelow(root.path, dir) !== null);
+
+    for (const dir of new Set([...Object.keys(this.#children), ...Object.keys(this.#open)])) {
+      if (!kept(dir)) this.#forget(dir);
+    }
   }
 }

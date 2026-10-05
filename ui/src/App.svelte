@@ -24,8 +24,8 @@
   import { samePath } from "./lib/paths";
   import { fileIcon, folderIcon, loadFolderIcons, loadIcons } from "./lib/state/icons.svelte";
   import { Pins } from "./lib/state/pins.svelte";
-  import { Tree, type Entry } from "./lib/state/tree.svelte";
-  import type { Pin, SidebarItem, SidebarKey } from "./lib/types";
+  import { Tree } from "./lib/state/tree.svelte";
+  import type { Pin, SidebarItem } from "./lib/types";
 
   const pins = new Pins();
   const appearance = new AppearanceStore();
@@ -43,37 +43,32 @@
   //
   // The file tree. `sidebarWidth` stays the *expanded* width while collapsed,
   // so expanding returns to the width you dragged rather than a default. It
-  // starts as a rail: an empty list is a quarter of the window spent on nothing.
+  // starts as a rail: an empty list is a quarter of the window spent on
+  // nothing. Collapsed it shows nothing at all -- the tree fades out with it.
 
   let sidebarWidth = $state(230);
   let sidebarCollapsed = $state(true);
   let resizing = $state(false);
 
-  function treeItem(entry: Entry, depth: number, open: boolean, root: boolean): SidebarItem {
-    return {
-      key: entry.path,
-      title: entry.name,
-      detail: entry.path,
-      icon: entry.dir ? folderIcon(entry.name, open, root) : fileIcon(entry.name),
-      depth,
-      folder: entry.dir ? (open ? "open" : "closed") : undefined,
-    };
-  }
-
-  // Unfolded, the whole tree. As a rail there is no room for nesting, so it
-  // shows one level -- what is directly inside the project -- as icons: enough
-  // to jump to a top-level file, or to a folder (which unfolds the sidebar).
   const treeItems = $derived(
-    sidebarCollapsed
-      ? tree.topLevel.map((entry) => treeItem(entry, 0, tree.isOpen(entry.path), false))
-      : tree.rows.map((row) => treeItem(row.entry, row.depth, row.open, row.root)),
+    tree.rows.map(
+      ({ id, entry, depth, open, root }): SidebarItem => ({
+        key: id,
+        path: entry.path,
+        title: entry.name,
+        icon: entry.dir ? folderIcon(entry.name, open, root) : fileIcon(entry.name),
+        depth,
+        folder: entry.dir ? (open ? "open" : "closed") : undefined,
+        root,
+      }),
+    ),
   );
 
   /** The tree row for the file being edited, so the two stay visibly in step. */
   const activeTreeKey = $derived.by(() => {
     const path = docs.active?.path;
     if (!path) return null;
-    return treeItems.find((row) => samePath(row.key, path))?.key ?? null;
+    return treeItems.find((row) => !row.folder && samePath(row.path, path))?.key ?? null;
   });
 
   // Whatever file is being edited is shown in the tree, unfolding down to it
@@ -82,28 +77,24 @@
   // away afterwards is the user's business.
   $effect(() => {
     const path = docs.active?.path;
-    if (path && tree.root) void tree.reveal(path);
+    if (path && tree.roots.length > 0) void tree.reveal(path);
   });
 
-  function onTreeSelect(key: SidebarKey) {
-    const path = key;
-    const row = treeItems.find((r) => r.key === key);
-    if (!row?.folder) {
-      void docs.open(path);
-    } else if (sidebarCollapsed) {
-      // On the rail a folder cannot unfold in place; open the sidebar to it.
-      sidebarCollapsed = false;
-      void tree.expand(path);
-    } else {
-      void tree.toggle(path);
-    }
+  function onTreeSelect(row: SidebarItem) {
+    if (row.folder) void tree.toggle(row.path);
+    else void docs.open(row.path);
   }
 
+  /**
+   * File → Open Folder. Adds to whatever folders are already open: nothing is
+   * swapped out, and a folder stays until it is closed.
+   */
   async function openFolder(path?: string) {
     loadFolderIcons();
+    const before = tree.roots.length;
     await (path === undefined ? tree.openDialog() : tree.open(path));
-    // A folder was asked for; show it.
-    if (tree.root) sidebarCollapsed = false;
+    // A folder was asked for; show it. Not if the dialog was cancelled.
+    if (tree.roots.length > before || path !== undefined) sidebarCollapsed = false;
   }
 
   // --- tabs -------------------------------------------------------------------
@@ -215,9 +206,14 @@
     ctx = { x: event.clientX, y: event.clientY, items: [item("Refresh Page", refreshPage)] };
   }
 
-  /** A row in the file tree. Nothing of its own to offer yet. */
-  function onTreeContextMenu(event: MouseEvent) {
-    ctx = { x: event.clientX, y: event.clientY, items: [item("Refresh Page", refreshPage)] };
+  /** A row in the file tree. Only the opened folders have anything to offer yet. */
+  function onTreeContextMenu(event: MouseEvent, row: SidebarItem) {
+    const refresh = item("Refresh Page", refreshPage);
+    ctx = {
+      x: event.clientX,
+      y: event.clientY,
+      items: row.root ? [item("Close Folder", () => tree.close(row.path)), SEP, refresh] : [refresh],
+    };
   }
 
   /** A tab. */
@@ -309,11 +305,11 @@
 <div class="app">
   <TitleBar
     hasFile={docs.active !== null}
-    hasFolder={tree.root !== null}
+    folderCount={tree.roots.length}
     onnew={() => docs.newFile()}
     onopen={() => void docs.openDialog()}
     onopenfolder={() => void openFolder()}
-    onclosefolder={() => tree.close()}
+    onclosefolder={() => tree.closeAll()}
     onsave={() => void docs.save()}
     onsaveas={() => void docs.saveAs()}
     onclosefile={() => void docs.close()}
@@ -332,7 +328,6 @@
       width={sidebarCollapsed ? RAIL_WIDTH : sidebarWidth}
       collapsed={sidebarCollapsed}
       {resizing}
-      tree
       empty="No folder open. File → Open Folder, or Ctrl+Shift+O."
       onselect={onTreeSelect}
       oncontext={onTreeContextMenu}
