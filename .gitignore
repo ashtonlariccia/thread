@@ -1,0 +1,9 @@
+/target
+/dist
+node_modules/
+
+# Tauri codegen
+crates/thread-app/gen/
+
+.env
+.env.*

@@ -1,0 +1,110 @@
+/* Catppuccin Charcoal.
+   Taken from the VSCode theme of the same name. Accent is Mocha Mauve
+   (#cba6f7). */
+
+:root {
+  /* How solid the window is, 0-1, written by the appearance settings. The
+     window itself is always transparent (tauri.conf.json), so these surfaces
+     are the only thing standing between you and the desktop -- which is what
+     lets the opacity slider and acrylic work without recreating the window. */
+  --bg-alpha: 1;
+
+  /* The window's *only* translucent layer, painted once on `.app`. Title bar,
+     sidebar and pinned strip paint nothing of their own and simply sit on it,
+     which is what makes them a single seamless frame -- and what keeps the
+     inset around the viewport the same colour as the chrome instead of a
+     black moat showing the empty window through. */
+  --bg-chrome: rgb(45 45 45 / var(--bg-alpha));
+
+  /* The viewport is the chrome *darkened*, not a second surface stacked on
+     it. A wash keeps the window one opacity: a `--bg-alpha` layer over a
+     `--bg-alpha` layer would make the viewport markedly more solid than the
+     bars around it at the same setting. */
+  --bg-viewport-wash: rgb(0 0 0 / 0.2);
+
+  /* The viewport sits inset from the chrome as a rounded card. */
+  --viewport-radius: 8px;
+  --viewport-inset: 5px;
+
+  /* Deliberately opaque, both of them. A translucent dropdown over a
+     translucent viewport is unreadable, and a text field you can see the
+     desktop through is worse. */
+  --bg-menu: #2a2a2a;
+  --bg-input: #2f2f2f;
+
+  --border: #383838;
+  --border-input: #4a4a4a;
+
+  --fg: #d8d8d8;
+  --fg-dim: #a3a3a3;
+  --fg-faint: #5c5c5c;
+
+  --accent: #cba6f7; /* mauve */
+  --accent-soft: #cba6f726; /* wash for filled backgrounds: selected rows */
+  --accent-ink: #1c1c1c; /* text on an accent-filled button */
+  --danger: #f38ba8;
+  --ok: #a6e3a1;
+
+  /* Hover is a neutral white wash rather than a fixed grey: the surfaces range
+     from #242424 to #2d2d2d, and a fixed grey that reads on the sidebar is
+     nearly invisible on the lighter title bar. Selection tints with the accent,
+     as VSCode does. */
+  --hover: #ffffff16;
+  --hover-strong: #cba6f733;
+
+  /* Chips float inside their bar rather than touching its edges. */
+  --chip-radius: 5px;
+  --chip-inset: 3px;
+
+  /* Where the first glyph in either bar begins, measured from the window's
+     left edge. Each bar subtracts its own chip padding from this, so "File" and
+     the first pin start on the same vertical line even though their chips are
+     padded differently. */
+  --bar-text-inset: 12px;
+
+  color-scheme: dark;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+/* Deliberately unpainted. Every region below paints itself at `--bg-alpha`,
+   and a translucent body underneath them all would compose with each one --
+   two 60% layers read as 84%, so the bars, the sidebar and the viewport would
+   each land on a different opacity than the slider says. One layer per
+   region, over nothing, is what makes the number mean what it claims. */
+body {
+  background: transparent;
+  color: var(--fg);
+  overflow: hidden;
+}
+
+/* Scrollbars, matched to the theme rather than left as bright Chromium defaults. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #5c5c5c40 transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #5c5c5c40;
+  border-radius: 5px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #5c5c5c66;
+}
