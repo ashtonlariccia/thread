@@ -5,8 +5,12 @@
   type Props = {
     /** Whether a file is open, so entries that need one can be disabled. */
     hasFile: boolean;
+    /** Whether a folder is open in the file tree. */
+    hasFolder: boolean;
     onnew: () => void;
     onopen: () => void;
+    onopenfolder: () => void;
+    onclosefolder: () => void;
     onsave: () => void;
     onsaveas: () => void;
     onclosefile: () => void;
@@ -24,8 +28,11 @@
 
   let {
     hasFile,
+    hasFolder,
     onnew,
     onopen,
+    onopenfolder,
+    onclosefolder,
     onsave,
     onsaveas,
     onclosefile,
@@ -166,6 +173,10 @@
             <span>Open File…</span>
             <span class="hint">Ctrl+O</span>
           </button>
+          <button class="menu-item" role="menuitem" onclick={() => run(onopenfolder)}>
+            <span>Open Folder…</span>
+            <span class="hint">Ctrl+Shift+O</span>
+          </button>
 
           <div class="sep"></div>
 
@@ -190,6 +201,14 @@
           >
             <span>Close File</span>
             <span class="hint">Ctrl+W</span>
+          </button>
+          <button
+            class="menu-item"
+            role="menuitem"
+            disabled={!hasFolder}
+            onclick={() => run(onclosefolder)}
+          >
+            Close Folder
           </button>
 
           <div class="sep"></div>

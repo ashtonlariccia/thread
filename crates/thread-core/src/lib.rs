@@ -9,10 +9,12 @@ use std::path::PathBuf;
 pub mod document;
 pub mod pins;
 pub mod settings;
+pub mod tree;
 
 pub use document::{Document, Eol, Stamp};
 pub use pins::{Pin, Store as PinStore};
-pub use settings::{Appearance, Material};
+pub use settings::{Appearance, Material, Settings};
+pub use tree::Entry;
 
 /// Errors surfaced by the core.
 #[derive(Debug, thiserror::Error)]

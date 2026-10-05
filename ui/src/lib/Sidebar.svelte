@@ -1,17 +1,26 @@
 <script lang="ts">
-  import type { SidebarItem } from "./types";
+  import type { SidebarItem, SidebarKey } from "./types";
 
   type Props = {
     /** Which edge of the window it sits on; everything that points mirrors. */
     side: "left" | "right";
     items: SidebarItem[];
-    activeKey: number | null;
+    activeKey: SidebarKey | null;
     width: number;
     collapsed: boolean;
     /** A drag is in flight, so the width must track the pointer, not glide. */
     resizing: boolean;
-    onselect: (key: number) => void;
-    onclose: (key: number) => void;
+    /**
+     * Rows are a tree: indented by `depth` with guide lines, folders carrying
+     * a chevron, and packed tight enough that the guides join up.
+     */
+    tree?: boolean;
+    /** Rows carry a close button. */
+    closable?: boolean;
+    /** What to say, expanded, when there is nothing to list. */
+    empty?: string;
+    onselect: (key: SidebarKey) => void;
+    onclose?: (key: SidebarKey) => void;
     /** Right-click on a row. App owns the menu, so only one is ever open. */
     oncontext: (event: MouseEvent, item: SidebarItem) => void;
   };
@@ -23,6 +32,9 @@
     width,
     collapsed,
     resizing,
+    tree = false,
+    closable = false,
+    empty,
     onselect,
     onclose,
     oncontext,
@@ -46,6 +58,10 @@
   let tipTimer: ReturnType<typeof setTimeout> | undefined;
 
   function showTipSoon(event: MouseEvent, item: SidebarItem) {
+    // An unfolded tree already says everything the card would, on every row
+    // the pointer crosses; the card is for the rail, where nothing is named.
+    if (tree && !collapsed) return;
+
     const row = event.currentTarget as HTMLElement;
     clearTimeout(tipTimer);
     tipTimer = setTimeout(() => {
@@ -69,17 +85,31 @@
 
   // Don't leave a card scheduled for a sidebar that is being torn down.
   $effect(() => () => clearTimeout(tipTimer));
+
+  // Keep the active row on screen: in a long tree the file just opened may be
+  // well below the fold. Keyed on the active row alone, so unfolding folders
+  // or the list changing under it never yanks the scroll position.
+  let list = $state<HTMLElement | undefined>();
+  $effect(() => {
+    if (activeKey === null) return;
+    list?.querySelector(".row.active")?.scrollIntoView({ block: "nearest" });
+  });
 </script>
 
 <aside
   style="width: {width}px"
   class:collapsed
   class:resizing
+  class:tree
   class:right={side === "right"}
   bind:this={aside}
 >
+  {#if items.length === 0 && empty && !collapsed}
+    <p class="empty">{empty}</p>
+  {/if}
+
   <!-- Scrolling moves every row out from under its card. -->
-  <ul onscroll={hideTip}>
+  <ul onscroll={hideTip} bind:this={list}>
     {#each items as item (item.key)}
       <li>
         <!-- Collapsed, the name is off the screen, so the hover card has to
@@ -89,11 +119,12 @@
           class:active={item.key === activeKey}
           role="button"
           tabindex="0"
+          aria-expanded={item.folder ? item.folder === "open" : undefined}
           onclick={() => onselect(item.key)}
           onkeydown={(e) => (e.key === "Enter" || e.key === " ") && onselect(item.key)}
           oncontextmenu={(e) => {
             // Stopped, not merely defaulted: the window-level handler in App
-            // opens the plain menu, and this row wants the one with Close on it.
+            // opens the plain menu, and a row may want one of its own.
             e.preventDefault();
             e.stopPropagation();
             hideTip();
@@ -103,6 +134,30 @@
           onmouseleave={hideTip}
           onpointerdown={hideTip}
         >
+          {#if tree && !collapsed}
+            <!-- One per level of nesting. Each draws a hairline where its
+                 ancestor's chevron sits, so the lines of consecutive rows
+                 join into one running down from the folder they belong to. -->
+            {#each { length: item.depth ?? 0 } as _, level (level)}
+              <span class="guide"></span>
+            {/each}
+            <!-- Files keep the chevron's space, so their icons line up with
+                 the folders' rather than stepping left. -->
+            <span class="chevron" class:open={item.folder === "open"}>
+              {#if item.folder}
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                  <path
+                    d="M3.5 2 L6.5 5 L3.5 8"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.3"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              {/if}
+            </span>
+          {/if}
           <span class="glyph">
             {#if item.icon}
               <img src={item.icon} alt="" width="16" height="16" draggable="false" />
@@ -120,18 +175,20 @@
             {#if item.dirty}
               <span class="dirty" aria-label="Unsaved changes"></span>
             {/if}
-            <!-- aria-label, not `title`: a native tooltip here would fight the
-                 hover card the row is already showing. -->
-            <button
-              class="kill"
-              aria-label="Close"
-              onclick={(e) => {
-                e.stopPropagation();
-                onclose(item.key);
-              }}
-            >
-              ×
-            </button>
+            {#if closable}
+              <!-- aria-label, not `title`: a native tooltip here would fight
+                   the hover card the row is already showing. -->
+              <button
+                class="kill"
+                aria-label="Close"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  onclose?.(item.key);
+                }}
+              >
+                ×
+              </button>
+            {/if}
           {/if}
         </div>
       </li>
@@ -267,6 +324,65 @@
   .kill:hover {
     color: var(--danger);
     background: #f38ba81f;
+  }
+
+  /* --- tree ---------------------------------------------------------------- */
+
+  /* Rows touch, so the guide lines of one run straight into the next. */
+  .tree:not(.collapsed) li + li {
+    margin-top: 0;
+  }
+
+  /* Spacing comes from the pieces rather than a flex gap: a gap would open
+     up between the guides, and they have to sit on an exact grid. Stretched
+     rather than centred so each guide is the full height of its row. */
+  .tree:not(.collapsed) .row {
+    align-items: stretch;
+    gap: 0;
+    min-height: 22px;
+    padding: 0 0.35rem;
+  }
+  .tree:not(.collapsed) .row > * {
+    align-self: center;
+  }
+
+  /* One level of indent. The hairline sits where the centre of the parent's
+     chevron is -- half of the 14px the chevron takes up -- so it reads as
+     hanging from that folder. Faint: it is there to be followed by the eye
+     when needed, not looked at. */
+  .tree .row > .guide {
+    align-self: stretch;
+    flex: none;
+    width: 14px;
+    background: linear-gradient(#ffffff14, #ffffff14) 6.5px 0 / 1px 100% no-repeat;
+  }
+
+  .chevron {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    color: var(--fg-dim);
+  }
+  .chevron svg {
+    transition: transform 90ms ease;
+  }
+  .chevron.open svg {
+    transform: rotate(90deg);
+  }
+
+  .tree:not(.collapsed) .glyph {
+    margin: 0 0.4rem 0 0.15rem;
+  }
+
+  .empty {
+    margin: 0;
+    padding: 0.6rem 0.8rem 0;
+    color: var(--fg-faint);
+    font-size: 0.75rem;
+    line-height: 1.4;
+    user-select: none;
   }
 
   /* --- collapsed rail ----------------------------------------------------- */

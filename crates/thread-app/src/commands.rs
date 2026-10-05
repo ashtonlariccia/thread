@@ -3,11 +3,14 @@
 //! This layer owns the windows and the IPC transport. Anything that can be
 //! decided without a window lives in `thread-core`.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
-use tauri::{AppHandle, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
 
-use thread_core::{document, settings, Appearance, Document, Eol, Material, Pin, PinStore, Stamp};
+use thread_core::{
+    document, settings, tree, Appearance, Document, Entry, Eol, Material, Pin, PinStore, Stamp,
+};
 
 /// A window's size at 100% scale. Matches the window in tauri.conf.json.
 const BASE_SIZE: (f64, f64) = (960.0, 600.0);
@@ -92,15 +95,36 @@ pub fn open_main_window(app: &AppHandle) {
 /// work off the main thread.
 #[tauri::command]
 pub async fn new_window(app: AppHandle) -> Result<String, String> {
+    build_window(&app, Vec::new())
+}
+
+/// Open the settings file in a window of its own (Appearance -> Open Config File).
+///
+/// A new window rather than the current one, so the file can sit beside the
+/// window whose look it is changing.
+#[tauri::command]
+pub async fn open_config(app: AppHandle) -> Result<String, String> {
+    let path = settings::ensure_file().map_err(|e| e.to_string())?;
+    build_window(&app, vec![path.to_string_lossy().into_owned()])
+}
+
+/// Build a window, with `files` waiting for it to open once its page is up.
+fn build_window(app: &AppHandle, files: Vec<String>) -> Result<String, String> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(1);
 
     let label = format!("win-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    // Queued before the window exists, so a page that comes up fast cannot
+    // ask for its files before they are there.
+    if !files.is_empty() {
+        app.state::<PendingFiles>().queue(&label, files);
+    }
+
     let appearance = stored_appearance();
     let size = scaled(BASE_SIZE, &appearance);
     let min = scaled(MIN_SIZE, &appearance);
 
-    let window = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::default())
+    let window = tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::default())
         .title("Thread")
         .inner_size(size.width, size.height)
         .min_inner_size(min.width, min.height)
@@ -136,33 +160,99 @@ pub fn quit_app(app: AppHandle) {
 // `async` so the disk is never touched on the main thread: a slow drive or a
 // large file must cost the open, not the window's event loop.
 
-/// Files named on the command line (`thread.exe notes.txt`, or "Open with").
+/// Paths a window should open as soon as it is up, by window label.
 ///
-/// Held until a window asks, because the window that should open them does
-/// not exist yet when the process starts.
-pub struct StartupFiles(Mutex<Vec<String>>);
+/// Held until the window asks, because a window cannot be told anything
+/// before its page has loaded. The main window's are the ones named on the
+/// command line (`thread.exe notes.txt`, `thread.exe .`, or "Open with").
+pub struct PendingFiles(Mutex<HashMap<String, Vec<String>>>);
 
-impl StartupFiles {
+impl PendingFiles {
     pub fn from_args() -> Self {
-        let files = std::env::args_os()
+        let files: Vec<String> = std::env::args_os()
             .skip(1)
             // Relative to where the command was run, which the dialogs and the
             // webview will not remember later.
             .filter_map(|arg| std::path::absolute(arg).ok())
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
-        Self(Mutex::new(files))
+        Self(Mutex::new(HashMap::from([("main".to_owned(), files)])))
+    }
+
+    fn queue(&self, label: &str, files: Vec<String>) {
+        if let Ok(mut pending) = self.0.lock() {
+            pending.entry(label.to_owned()).or_default().extend(files);
+        }
     }
 }
 
-/// Hand the command-line files to the first window that asks, once.
+/// A path waiting for a window, and which of the two things it is.
+#[derive(serde::Serialize)]
+pub struct StartupPath {
+    path: String,
+    /// A folder opens in the file tree; anything else opens in the editor.
+    dir: bool,
+}
+
+/// Hand a window the paths waiting for it, once.
 #[tauri::command]
-pub fn startup_files(files: State<'_, StartupFiles>) -> Vec<String> {
+pub fn startup_files(window: WebviewWindow, files: State<'_, PendingFiles>) -> Vec<StartupPath> {
     files
         .0
         .lock()
-        .map(|mut files| std::mem::take(&mut *files))
+        .ok()
+        .and_then(|mut pending| pending.remove(window.label()))
         .unwrap_or_default()
+        .into_iter()
+        .map(|path| StartupPath {
+            dir: Path::new(&path).is_dir(),
+            path,
+        })
+        .collect()
+}
+
+// --- file tree --------------------------------------------------------------
+
+/// What the tree leaves out, per the settings file.
+fn excluded() -> Vec<String> {
+    settings::load_all()
+        .map(|settings| settings.exclude)
+        .unwrap_or_else(|e| {
+            tracing::warn!(target: "thread::ui", "could not read settings: {e}");
+            thread_core::Settings::default().exclude
+        })
+}
+
+/// One folder's children, for the tree to show when it is unfolded.
+#[tauri::command]
+pub async fn read_dir(path: String) -> Result<Vec<Entry>, String> {
+    tree::list(Path::new(&path), &excluded()).map_err(|e| e.to_string())
+}
+
+/// When each folder's contents last changed, in order; `None` where it is gone.
+///
+/// Polled for the folders the tree has unfolded, the same way `file_stamps` is
+/// for open files: a `stat` each, and a folder is only re-read once its stamp
+/// has moved.
+#[tauri::command]
+pub async fn dir_stamps(paths: Vec<String>) -> Vec<Option<u64>> {
+    paths
+        .iter()
+        .map(|path| tree::dir_stamp(Path::new(path)))
+        .collect()
+}
+
+/// Whether `path` is Thread's own settings file.
+fn is_settings_file(path: &Path) -> bool {
+    let Ok(settings) = settings::path() else {
+        return false;
+    };
+    // Canonical on both sides: the same file can be spelled with either slash,
+    // any case, or a short 8.3 name.
+    match (std::fs::canonicalize(path), std::fs::canonicalize(settings)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 #[tauri::command]
@@ -176,6 +266,7 @@ pub async fn read_file(path: String) -> Result<Document, String> {
 /// opened, and are restored here.
 #[tauri::command]
 pub async fn write_file(
+    app: AppHandle,
     path: String,
     text: String,
     eol: Eol,
@@ -183,6 +274,22 @@ pub async fn write_file(
 ) -> Result<Option<Stamp>, String> {
     let stamp = document::write(Path::new(&path), &text, eol, bom).map_err(|e| e.to_string())?;
     tracing::info!(target: "thread::files", "SAVED {path}");
+
+    // Saving the settings file is how it is edited by hand, so that is the
+    // moment it takes effect -- not the next launch.
+    if is_settings_file(Path::new(&path)) {
+        match settings::load() {
+            Ok(appearance) => {
+                apply_appearance(&app, &appearance);
+                // The rest of the file is read where it is used; this is for
+                // whatever is already on screen because of it -- the tree.
+                let _ = app.emit("settings-changed", ());
+            }
+            // Half-typed JSON is the normal state of a file being edited. Keep
+            // the look there is; the save itself still succeeded.
+            Err(e) => tracing::warn!(target: "thread::ui", "settings not applied: {e}"),
+        }
+    }
     Ok(stamp)
 }
 
@@ -231,33 +338,62 @@ fn rescale(window: &WebviewWindow, from: &Appearance, to: &Appearance) {
     ));
 }
 
-/// Store the appearance and apply the parts the backend owns.
+/// The appearance the windows are wearing right now.
 ///
-/// Applied to every window rather than the calling one: the appearance is
-/// global, and a second window left opaque while the first went frosted would
-/// look like a bug.
+/// Not the same as what is in the settings file: that can be edited by hand,
+/// and rescaling a window needs the scale it is *coming from*, which the file
+/// no longer says once it has been overwritten.
+pub struct Applied(Mutex<Appearance>);
+
+impl Applied {
+    pub fn load() -> Self {
+        Self(Mutex::new(stored_appearance()))
+    }
+}
+
+/// Put an appearance on every window, and tell their pages about it.
+///
+/// Every window rather than the calling one: the appearance is global, and a
+/// second window left opaque while the first went frosted would look like a bug.
+fn apply_appearance(app: &AppHandle, appearance: &Appearance) {
+    // Swapped and released before any window is touched. Window calls made
+    // off the main thread wait for it, and the main thread may itself be in
+    // here waiting for this lock -- holding it across them would deadlock.
+    let previous = {
+        let applied = app.state::<Applied>();
+        let Ok(mut applied) = applied.0.lock() else {
+            return;
+        };
+        std::mem::replace(&mut *applied, appearance.clone())
+    };
+
+    for window in app.webview_windows().values() {
+        dress(window, appearance);
+        if appearance.scale != previous.scale {
+            rescale(window, &previous, appearance);
+        }
+    }
+
+    // The opacity is the page's to paint, and the dialog shows all three.
+    let _ = app.emit("appearance-changed", appearance);
+
+    tracing::info!(
+        target: "thread::ui",
+        "APPEARANCE opacity={} material={:?} scale={}",
+        appearance.background_opacity,
+        appearance.material,
+        appearance.scale,
+    );
+}
+
+/// Store the appearance and apply it.
 ///
 /// Returns what was actually written: the store clamps opacity and scale, so
 /// the dialog must render the stored value rather than the one it sent.
 #[tauri::command]
 pub fn set_appearance(app: AppHandle, appearance: Appearance) -> Result<Appearance, String> {
-    let previous = stored_appearance();
     let stored = settings::save(&appearance).map_err(|e| e.to_string())?;
-
-    for window in app.webview_windows().values() {
-        dress(window, &stored);
-        if stored.scale != previous.scale {
-            rescale(window, &previous, &stored);
-        }
-    }
-
-    tracing::info!(
-        target: "thread::ui",
-        "APPEARANCE opacity={} material={:?} scale={}",
-        stored.background_opacity,
-        stored.material,
-        stored.scale,
-    );
+    apply_appearance(&app, &stored);
     Ok(stored)
 }
 

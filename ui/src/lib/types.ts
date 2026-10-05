@@ -1,6 +1,9 @@
+/** Open files are keyed by number, tree rows by their path. */
+export type SidebarKey = number | string;
+
 /** One row in a sidebar. */
 export type SidebarItem = {
-  key: number;
+  key: SidebarKey;
   title: string;
   /** Second line of the hover card: for a file, its full path. */
   detail?: string;
@@ -8,6 +11,10 @@ export type SidebarItem = {
   icon?: string;
   /** Has unsaved changes. */
   dirty?: boolean;
+  /** In a tree: how many folders deep the row is. */
+  depth?: number;
+  /** In a tree: set on folders, saying whether theirs is unfolded. */
+  folder?: "open" | "closed";
 };
 
 /**

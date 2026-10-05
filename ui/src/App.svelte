@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
@@ -17,27 +18,29 @@
   import { setEditor } from "./lib/edit";
   import { languageOf } from "./lib/languages";
   import { RAIL_WIDTH } from "./lib/layout";
-  import { AppearanceStore } from "./lib/state/appearance.svelte";
+  import { AppearanceStore, type Appearance } from "./lib/state/appearance.svelte";
   import { Documents } from "./lib/state/documents.svelte";
-  import { fileIcon, loadIcons } from "./lib/state/icons.svelte";
+  import { samePath } from "./lib/paths";
+  import { fileIcon, folderIcon, loadFolderIcons, loadIcons } from "./lib/state/icons.svelte";
   import { Pins } from "./lib/state/pins.svelte";
-  import type { Pin, SidebarItem } from "./lib/types";
+  import { Tree, type Entry } from "./lib/state/tree.svelte";
+  import type { Pin, SidebarItem, SidebarKey } from "./lib/types";
 
   const pins = new Pins();
   const appearance = new AppearanceStore();
   const docs = new Documents();
+  const tree = new Tree();
 
   const appWindow = getCurrentWindow();
 
-  /** How often open files are compared with the disk. */
+  /** How often open files and unfolded folders are compared with the disk. */
   const DISK_POLL_MS = 1000;
 
   let appearanceOpen = $state(false);
 
   // --- sidebars ---------------------------------------------------------------
   //
-  // Left is the file tree, which does not exist yet, so it has nothing to
-  // list. Right is the files open in this window.
+  // Left is the file tree. Right is the files open in this window.
   //
   // Each `*Width` stays the *expanded* width while collapsed, so expanding
   // returns to the width you dragged rather than a default. Both start as
@@ -49,7 +52,62 @@
   let rightCollapsed = $state(true);
   let resizing = $state(false);
 
-  const treeItems: SidebarItem[] = [];
+  function treeItem(entry: Entry, depth: number, open: boolean, root: boolean): SidebarItem {
+    return {
+      key: entry.path,
+      title: entry.name,
+      detail: entry.path,
+      icon: entry.dir ? folderIcon(entry.name, open, root) : fileIcon(entry.name),
+      depth,
+      folder: entry.dir ? (open ? "open" : "closed") : undefined,
+    };
+  }
+
+  // Unfolded, the whole tree. As a rail there is no room for nesting, so it
+  // shows one level -- what is directly inside the project -- as icons: enough
+  // to jump to a top-level file, or to a folder (which unfolds the sidebar).
+  const treeItems = $derived(
+    leftCollapsed
+      ? tree.topLevel.map((entry) => treeItem(entry, 0, tree.isOpen(entry.path), false))
+      : tree.rows.map((row) => treeItem(row.entry, row.depth, row.open, row.root)),
+  );
+
+  /** The tree row for the file being edited, so the two stay visibly in step. */
+  const activeTreeKey = $derived.by(() => {
+    const path = docs.active?.path;
+    if (!path) return null;
+    return treeItems.find((row) => samePath(String(row.key), path))?.key ?? null;
+  });
+
+  // Whatever file is being edited is shown in the tree, unfolding down to it
+  // if need be -- so opening one from a dialog or Ctrl+Tab still says where in
+  // the project it lives. Only when the *file* changes: folding its folder
+  // away afterwards is the user's business.
+  $effect(() => {
+    const path = docs.active?.path;
+    if (path && tree.root) void tree.reveal(path);
+  });
+
+  function onTreeSelect(key: SidebarKey) {
+    const path = String(key);
+    const row = treeItems.find((r) => r.key === key);
+    if (!row?.folder) {
+      void docs.open(path);
+    } else if (leftCollapsed) {
+      // On the rail a folder cannot unfold in place; open the sidebar to it.
+      leftCollapsed = false;
+      void tree.expand(path);
+    } else {
+      void tree.toggle(path);
+    }
+  }
+
+  async function openFolder(path?: string) {
+    loadFolderIcons();
+    await (path === undefined ? tree.openDialog() : tree.open(path));
+    // A folder was asked for; show it.
+    if (tree.root) leftCollapsed = false;
+  }
 
   const openFiles = $derived(
     docs.list.map(
@@ -117,6 +175,7 @@
     if (event.repeat) return;
 
     if (key === "n") docs.newFile();
+    else if (key === "o" && event.shiftKey) void openFolder();
     else if (key === "o") void docs.openDialog();
     else if (key === "w") void docs.close();
     else if (event.shiftKey) void docs.saveAs();
@@ -157,15 +216,21 @@
     ctx = { x: event.clientX, y: event.clientY, items: [item("Refresh Page", refreshPage)] };
   }
 
+  /** A row in the file tree. Nothing of its own to offer yet. */
+  function onTreeContextMenu(event: MouseEvent) {
+    ctx = { x: event.clientX, y: event.clientY, items: [item("Refresh Page", refreshPage)] };
+  }
+
   /** A row in the open-files list. */
   function onFileContextMenu(event: MouseEvent, row: SidebarItem) {
+    const key = row.key as number;
     ctx = {
       x: event.clientX,
       y: event.clientY,
       items: [
-        item("Save", () => void docs.save(row.key)),
-        item("Save As…", () => void docs.saveAs(row.key)),
-        item("Close", () => void docs.close(row.key)),
+        item("Save", () => void docs.save(key)),
+        item("Save As…", () => void docs.saveAs(key)),
+        item("Close", () => void docs.close(key)),
         SEP,
         item("Refresh Page", refreshPage),
       ],
@@ -178,6 +243,11 @@
   $effect(() => {
     document.documentElement.style.setProperty("--bg-alpha", String(appearance.alpha));
   });
+
+  function checkDisk() {
+    void docs.checkDisk();
+    void tree.poll();
+  }
 
   onMount(() => {
     setEditor(docs.editor);
@@ -193,9 +263,11 @@
       // Not needed until a file is open, so not paid for before the window is up.
       loadIcons();
 
-      // `thread.exe some-file`, or "Open with" from Explorer.
-      const startup = await invoke<string[]>("startup_files").catch(() => []);
-      for (const path of startup) await docs.open(path);
+      // `thread.exe some-file`, `thread.exe .`, or "Open with" from Explorer.
+      const startup = await invoke<{ path: string; dir: boolean }[]>("startup_files").catch(
+        () => [],
+      );
+      for (const { path, dir } of startup) await (dir ? openFolder(path) : docs.open(path));
     })();
 
     // The × in the bar, Alt+F4, the taskbar's Close and File → Exit all arrive
@@ -207,11 +279,22 @@
     // Files change on disk while the window is in the background as often as
     // not -- that is when other tools are running -- so this does not wait for
     // focus. It is one `stat` per open file.
-    const diskPoll = setInterval(() => void docs.checkDisk(), DISK_POLL_MS);
+    const diskPoll = setInterval(checkDisk, DISK_POLL_MS);
+
+    // The appearance is shared by every window and can be changed from any of
+    // them, or by saving the settings file, so each window is told.
+    const stopAppearance = listen<Appearance>("appearance-changed", (event) => {
+      appearance.current = event.payload;
+    });
+
+    // The settings file was saved. What the tree leaves out comes from it.
+    const stopSettings = listen("settings-changed", () => void tree.refresh());
 
     return () => {
       setEditor(null);
       clearInterval(diskPoll);
+      void stopAppearance.then((unlisten) => unlisten());
+      void stopSettings.then((unlisten) => unlisten());
       void stopClose.then((unlisten) => unlisten());
     };
   });
@@ -222,14 +305,17 @@
 <svelte:window
   onkeydown={onKeydown}
   oncontextmenu={onWindowContextMenu}
-  onfocus={() => void docs.checkDisk()}
+  onfocus={checkDisk}
 />
 
 <div class="app">
   <TitleBar
     hasFile={docs.active !== null}
+    hasFolder={tree.root !== null}
     onnew={() => docs.newFile()}
     onopen={() => void docs.openDialog()}
+    onopenfolder={() => void openFolder()}
+    onclosefolder={() => tree.close()}
     onsave={() => void docs.save()}
     onsaveas={() => void docs.saveAs()}
     onclosefile={() => void docs.close()}
@@ -247,13 +333,14 @@
     <Sidebar
       side="left"
       items={treeItems}
-      activeKey={null}
+      activeKey={activeTreeKey}
       width={leftCollapsed ? RAIL_WIDTH : leftWidth}
       collapsed={leftCollapsed}
       {resizing}
-      onselect={() => {}}
-      onclose={() => {}}
-      oncontext={() => {}}
+      tree
+      empty="No folder open. File → Open Folder, or Ctrl+Shift+O."
+      onselect={onTreeSelect}
+      oncontext={onTreeContextMenu}
     />
 
     <!-- No handle while collapsed: the rail has one width, and a drag that
@@ -292,8 +379,9 @@
       width={rightCollapsed ? RAIL_WIDTH : rightWidth}
       collapsed={rightCollapsed}
       {resizing}
-      onselect={(key) => docs.select(key)}
-      onclose={(key) => void docs.close(key)}
+      closable
+      onselect={(key) => docs.select(key as number)}
+      onclose={(key) => void docs.close(key as number)}
       oncontext={onFileContextMenu}
     />
   </main>

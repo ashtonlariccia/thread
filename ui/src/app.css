@@ -89,22 +89,30 @@ body {
   overflow: hidden;
 }
 
-/* Scrollbars, matched to the theme rather than left as bright Chromium defaults. */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: #5c5c5c40 transparent;
-}
+/* Scrollbars, matched to the theme rather than left as bright Chromium defaults.
+
+   A slim pill floating in a 10px track, not a bar filling it. A full-width
+   thumb down the viewport's right edge is nearly the chrome's colour, so it
+   read as part of the sidebar beside it and made that sidebar look wider than
+   the one on the left.
+
+   Only the `::-webkit-scrollbar` rules: setting the standard `scrollbar-width`
+   or `scrollbar-color` as well makes Chromium ignore these entirely. */
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
-*::-webkit-scrollbar-track {
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
   background: transparent;
 }
 *::-webkit-scrollbar-thumb {
-  background: #5c5c5c40;
+  /* The transparent border is the gap either side of the pill. */
+  border: 3px solid transparent;
   border-radius: 5px;
+  background: #8a8a8a59;
+  background-clip: padding-box;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: #5c5c5c66;
+  background-color: #8a8a8a99;
 }

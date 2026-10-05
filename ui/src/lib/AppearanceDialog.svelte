@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
+
   import Dialog from "./Dialog.svelte";
   import type { AppearanceStore } from "./state/appearance.svelte";
 
@@ -11,6 +13,12 @@
   let { open, appearance, onclose }: Props = $props();
 
   const a = $derived(appearance.current);
+
+  /** The same settings as a file, for editing by hand. Saving it applies it. */
+  function openConfig() {
+    onclose();
+    invoke("open_config").catch((e) => console.error("open_config failed", e));
+  }
 
   /**
    * Committed on `change`, not `input`: the window resizes with the scale, and
@@ -82,6 +90,7 @@
   </p>
 
   <div class="dlg-actions">
+    <button class="btn ghost config" onclick={openConfig}>Open Config File</button>
     <button class="btn ghost" onclick={() => void appearance.reset()}>Reset</button>
     <button class="btn primary" onclick={onclose}>Done</button>
   </div>
@@ -146,6 +155,11 @@
   .check input {
     accent-color: var(--accent);
     cursor: pointer;
+  }
+
+  /* Apart from the dialog's own buttons: it leaves the dialog, they act on it. */
+  .config {
+    margin-right: auto;
   }
 
   input[type="range"] {

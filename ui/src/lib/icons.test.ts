@@ -1,9 +1,29 @@
 import { describe, expect, it } from "vitest";
 
 import files from "./icons/files.json";
-import { fileIconId, type FileIconMap } from "./icons";
+import folders from "./icons/folders.json";
+import { fileIconId, folderIconId, type FileIconMap, type FolderIconMap } from "./icons";
 
 const map = files as unknown as FileIconMap;
+
+const folderMap = folders as unknown as FolderIconMap;
+
+describe("folderIconId", () => {
+  it("gives well-known folders their own icon, open and closed", () => {
+    expect(folderIconId(folderMap, "src", false)).toBe("folder-src");
+    expect(folderIconId(folderMap, "SRC", true)).toBe("folder-src-open");
+  });
+
+  it("falls back to the plain folder", () => {
+    expect(folderIconId(folderMap, "zzz-nothing-special", false)).toBe(folderMap.folder);
+    expect(folderIconId(folderMap, "zzz-nothing-special", true)).toBe(folderMap.folderOpen);
+  });
+
+  it("marks the root as the root, whatever it is called", () => {
+    expect(folderIconId(folderMap, "src", false, true)).toBe(folderMap.root);
+    expect(folderIconId(folderMap, "src", true, true)).toBe(folderMap.rootOpen);
+  });
+});
 
 describe("fileIconId", () => {
   it("matches common extensions from the imported pack", () => {

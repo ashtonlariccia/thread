@@ -33,6 +33,34 @@ export function fileIconId(map: FileIconMap, name: string): string {
   return map.file;
 }
 
+/** The shape of `icons/folders.json`. Keys are lower-case. */
+export type FolderIconMap = {
+  folder: string;
+  folderOpen: string;
+  /** The folder a project was opened at. */
+  root: string;
+  rootOpen: string;
+  names: Record<string, string>;
+  namesOpen: Record<string, string>;
+};
+
+/**
+ * The icon id for a folder.
+ *
+ * The root is always the root icon, whatever it is called: it marks where the
+ * project starts, which matters more than that the folder happens to be `src`.
+ */
+export function folderIconId(
+  map: FolderIconMap,
+  name: string,
+  open: boolean,
+  root = false,
+): string {
+  if (root) return open ? map.rootOpen : map.root;
+  const lower = name.toLowerCase();
+  return open ? (map.namesOpen[lower] ?? map.folderOpen) : (map.names[lower] ?? map.folder);
+}
+
 export function iconUrl(id: string): string {
   return `/icons/${id}.svg`;
 }

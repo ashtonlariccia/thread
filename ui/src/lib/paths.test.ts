@@ -1,6 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import { baseName, samePath } from "./paths";
+import { baseName, samePath, segmentsBelow } from "./paths";
+
+describe("segmentsBelow", () => {
+  it("lists the names from the root down to the file", () => {
+    expect(segmentsBelow("C:\\src", "C:\\src\\lib\\state\\a.ts")).toEqual(["lib", "state", "a.ts"]);
+  });
+
+  it("ignores case, slash direction and a trailing slash on the root", () => {
+    expect(segmentsBelow("c:/SRC/", "C:\\src\\Lib\\a.ts")).toEqual(["Lib", "a.ts"]);
+  });
+
+  it("is null for a path outside the root", () => {
+    expect(segmentsBelow("C:\\src", "C:\\other\\a.ts")).toBeNull();
+    // A sibling whose name merely starts the same way is not inside it.
+    expect(segmentsBelow("C:\\src", "C:\\src-old\\a.ts")).toBeNull();
+  });
+
+  it("is null for the root itself", () => {
+    expect(segmentsBelow("C:\\src", "C:\\src")).toBeNull();
+  });
+});
 
 describe("baseName", () => {
   it("takes the last component with either slash", () => {

@@ -1,7 +1,12 @@
-//! Appearance settings, stored in `%APPDATA%\thread\settings.json`.
+//! Settings, stored in `%APPDATA%\thread\settings.json`.
 //!
 //! Every field has a default, so an absent or partial `settings.json` is not
 //! an error and a new field added here does not invalidate an existing file.
+//!
+//! The file is one flat object. [`Appearance`] is the part the Appearance
+//! dialog edits; [`Settings`] is all of it.
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -76,36 +81,116 @@ impl Appearance {
     }
 }
 
-pub fn load() -> Result<Appearance> {
-    let path = data_dir()?.join(FILE);
+fn default_exclude() -> Vec<String> {
+    vec![".*".into()]
+}
+
+/// Everything in the settings file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    #[serde(flatten)]
+    pub appearance: Appearance,
+
+    /// File and folder names the file tree leaves out, as globs over the name
+    /// (see [`crate::tree::matches`]). Dotfiles, unless this says otherwise.
+    #[serde(default = "default_exclude")]
+    pub exclude: Vec<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            appearance: Appearance::default(),
+            exclude: default_exclude(),
+        }
+    }
+}
+
+/// Where the settings file lives, whether or not it exists yet.
+pub fn path() -> Result<PathBuf> {
+    Ok(data_dir()?.join(FILE))
+}
+
+/// The settings file's path, with every key written out in it.
+///
+/// For opening it in an editor. Until something is changed there is no file,
+/// and one written by an older build lacks the keys added since — either way
+/// the buffer would not show what there is to set. A file that does not parse
+/// is left exactly as it is: it is someone's work in progress.
+pub fn ensure_file() -> Result<PathBuf> {
+    if let Ok(settings) = load_all() {
+        write(&settings)?;
+    }
+    path()
+}
+
+/// The whole settings file.
+pub fn load_all() -> Result<Settings> {
+    let path = path()?;
     match std::fs::read_to_string(&path) {
         Ok(text) => {
-            let parsed: Appearance = serde_json::from_str(strip_bom(&text)).map_err(|e| {
+            let mut parsed: Settings = serde_json::from_str(strip_bom(&text)).map_err(|e| {
                 Error::Other(anyhow::anyhow!(
                     "{} is corrupt ({e}); move it aside to start fresh",
                     path.display()
                 ))
             })?;
-            Ok(parsed.sanitised())
+            parsed.appearance = parsed.appearance.sanitised();
+            Ok(parsed)
         }
         // No file yet is the normal first run, not a failure.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Appearance::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
         Err(e) => Err(Error::Io(e)),
     }
 }
 
+fn write(settings: &Settings) -> Result<()> {
+    let text = serde_json::to_string_pretty(settings)
+        .map_err(|e| Error::Other(anyhow::anyhow!("could not serialise settings: {e}")))?;
+    std::fs::write(path()?, text)?;
+    Ok(())
+}
+
+pub fn load() -> Result<Appearance> {
+    Ok(load_all()?.appearance)
+}
+
+/// Store the appearance, leaving the rest of the file as it is.
 pub fn save(appearance: &Appearance) -> Result<Appearance> {
     let sane = appearance.clone().sanitised();
-    let path = data_dir()?.join(FILE);
-    let text = serde_json::to_string_pretty(&sane)
-        .map_err(|e| Error::Other(anyhow::anyhow!("could not serialise settings: {e}")))?;
-    std::fs::write(&path, text)?;
+    // A file that will not parse is replaced: the dialog has to be able to
+    // dig the app out of a bad setting.
+    let mut settings = load_all().unwrap_or_default();
+    settings.appearance = sane.clone();
+    write(&settings)?;
     Ok(sane)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_file_is_one_flat_object() {
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(json["scale"], 100, "appearance keys sit at the top level");
+        assert_eq!(json["exclude"], serde_json::json!([".*"]));
+        assert!(json.get("appearance").is_none());
+    }
+
+    #[test]
+    fn a_file_from_before_exclude_existed_hides_dotfiles() {
+        let parsed: Settings = serde_json::from_str(r#"{"scale": 125}"#).unwrap();
+        assert_eq!(parsed.appearance.scale, 125);
+        assert_eq!(parsed.exclude, [".*"]);
+    }
+
+    #[test]
+    fn an_empty_exclude_list_is_respected_rather_than_defaulted() {
+        let parsed: Settings = serde_json::from_str(r#"{"exclude": []}"#).unwrap();
+        assert!(parsed.exclude.is_empty());
+    }
 
     #[test]
     fn an_empty_object_yields_the_shipped_defaults() {
