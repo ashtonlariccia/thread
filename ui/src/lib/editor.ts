@@ -158,6 +158,7 @@ export class EditorHost {
   private readonly language = new Compartment();
 
   private lookValue: Extension = [];
+  /** Empty until the config names a palette; grammars colour nothing before then. */
   private highlightValue: Extension = [];
 
   /** What the view holds while no file is open: nothing, and not typeable. */

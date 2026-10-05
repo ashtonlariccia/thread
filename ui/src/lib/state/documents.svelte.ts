@@ -16,6 +16,8 @@ import { EditorHost, type Cursor } from "../editor";
 import { detectIndent, resolveIndent, type Detected, type Indent } from "../indent";
 import { languageOf } from "../languages";
 import { baseName, samePath, segmentsBelow } from "../paths";
+import { loadSyntax } from "../syntax";
+import { syntaxTheme } from "../themes";
 import { DEFAULTS, type Config } from "./config.svelte";
 
 export type Eol = "lf" | "crlf";
@@ -83,6 +85,8 @@ export class Documents {
   #config: Config = DEFAULTS;
   #nextKey = 1;
   #nextUntitled = 1;
+  /** The language each file's grammar was last asked for, so it is asked once. */
+  #grammars = new Map<number, string>();
   /** Files being written right now, whose stamps are about to move on purpose. */
   #saving = new Set<number>();
   #checking = false;
@@ -119,6 +123,7 @@ export class Documents {
       lineNumbers: config.editor.line_numbers,
       wordWrap: config.editor.word_wrap,
     });
+    this.editor.setHighlightStyle(syntaxTheme(config.theme.syntax));
     for (const doc of this.list) this.#dress(doc);
   }
 
@@ -135,6 +140,19 @@ export class Documents {
   #dress(doc: Doc) {
     doc.indent = this.#indentFor(doc.name, doc.detected);
     this.editor.setIndent(doc.key, doc.indent);
+
+    const language = languageOf(doc.name);
+    if (this.#grammars.get(doc.key) === language) return;
+    this.#grammars.set(doc.key, language);
+
+    const key = doc.key;
+    // The grammar is fetched on first use, so the file shows as plain text
+    // for the moment that takes and is coloured when it lands.
+    void loadSyntax(language).then((grammar) => {
+      // Closed, or renamed into another language, while it was loading.
+      if (this.#grammars.get(key) !== language) return;
+      this.editor.setLanguage(key, grammar ?? []);
+    });
   }
 
   /** Step to the next or previous open file, wrapping at the ends. */
@@ -162,6 +180,7 @@ export class Documents {
       detected: null,
       indent,
     });
+    this.#dress(this.list.at(-1)!);
     this.select(key);
   }
 
@@ -204,6 +223,7 @@ export class Documents {
         detected,
         indent,
       });
+      this.#dress(this.list.at(-1)!);
       this.select(key);
     } catch (e) {
       if (!quiet) report(e);
@@ -292,6 +312,7 @@ export class Documents {
     if (index === -1) return;
     this.list.splice(index, 1);
     this.editor.drop(doc.key);
+    this.#grammars.delete(doc.key);
     // The neighbour that slid into its place, else the one before it.
     if (this.activeKey === doc.key) this.select((this.list[index] ?? this.list.at(-1))?.key ?? null);
   }
