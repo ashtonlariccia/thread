@@ -19,6 +19,7 @@ import { baseName, samePath, segmentsBelow } from "../paths";
 import { loadSyntax } from "../syntax";
 import { syntaxTheme } from "../themes";
 import { loadVim, type VimApi, type VimMode } from "../vim";
+import { substitutePreview } from "../vimSubstitute";
 import { DEFAULTS, type Config } from "./config.svelte";
 
 export type Eol = "lf" | "crlf";
@@ -163,7 +164,7 @@ export class Documents {
         // Switched off again while it was being fetched.
         if (!this.#vimWanted) return;
         this.#vim = vim;
-        this.editor.setVim(vim.extension);
+        this.editor.setVim([vim.extension, substitutePreview()]);
       })
       .catch((e) => {
         this.#vimWanted = false;
@@ -351,7 +352,22 @@ export class Documents {
     const doc = this.find(key);
     if (!doc) return;
     if (doc.dirty && !(await this.confirm([doc]))) return;
+    this.#remove(doc);
+  }
 
+  /**
+   * Close every open file for which `under` is true, asking once about all
+   * the unsaved ones among them. Returns false, having closed nothing, if
+   * that question was cancelled.
+   */
+  async closeWhere(under: (path: string) => boolean): Promise<boolean> {
+    const docs = this.list.filter((doc) => doc.path !== null && under(doc.path));
+    if (!(await this.confirm(docs.filter((doc) => doc.dirty)))) return false;
+    for (const doc of docs) this.#remove(doc);
+    return true;
+  }
+
+  #remove(doc: Doc) {
     const index = this.list.findIndex((d) => d.key === doc.key);
     if (index === -1) return;
     this.list.splice(index, 1);

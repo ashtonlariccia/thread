@@ -40,6 +40,8 @@ import {
   highlightActiveLine,
   highlightActiveLineGutter,
   keymap,
+  layer,
+  type LayerMarker,
   lineNumbers,
 } from "@codemirror/view";
 
@@ -83,7 +85,7 @@ const chrome = EditorView.theme(
   {
     "&": { height: "100%", color: "var(--fg)", backgroundColor: "transparent" },
     "&.cm-focused": { outline: "none" },
-    ".cm-content": { padding: "6px 0", caretColor: "var(--accent)" },
+    ".cm-content": { padding: "6px 0", caretColor: "var(--caret)" },
     ".cm-gutters": {
       backgroundColor: "transparent",
       color: "var(--fg-faint)",
@@ -100,18 +102,33 @@ const chrome = EditorView.theme(
     ".cm-lineNumbers .cm-gutterElement": { padding: "0 10px 0 14px" },
     ".cm-activeLine": { backgroundColor: "#ffffff0a" },
     ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--fg-dim)" },
-    ".cm-cursor": { borderLeftColor: "var(--accent)" },
-    // Vim's block cursor and command line, in the window's colours rather
-    // than the extension's pink and monospace-default. `!important` because
-    // the extension registers its own at the highest precedence.
-    ".cm-fat-cursor": {
-      background: "var(--accent) !important",
-      color: "var(--accent-ink) !important",
+    // Both stock carets are switched off -- CodeMirror's beam and the vim
+    // extension's block live in layers of this class -- in favour of the one
+    // caret drawn by `caretLayer` below, which can be either shape.
+    ".cm-cursorLayer": { display: "none !important" },
+    ".cm-threadCaret": {
+      position: "absolute",
+      width: "2px",
+      borderRadius: "1px",
+      backgroundColor: "var(--caret)",
     },
-    "&:not(.cm-focused) .cm-fat-cursor": {
-      background: "none !important",
-      outline: "solid 1px var(--accent) !important",
+    // The vim extension marks the scroller while a block cursor is called
+    // for: normal, visual and replace modes. The shape follows from that
+    // class alone, so changing mode is a CSS change and the transition on
+    // `width` is the whole of the box-to-beam animation.
+    ".cm-vimMode .cm-threadCaret": {
+      width: "var(--caret-cell)",
+      backgroundColor: "var(--caret-block)",
     },
+    // No caret in an editor that is not being typed into; a faint block in
+    // vim's modes, where it also marks the place commands will act on.
+    "&:not(.cm-focused) .cm-threadCaret": { opacity: "0" },
+    "&:not(.cm-focused) .cm-vimMode .cm-threadCaret": { opacity: "0.45" },
+
+    // Vim's command line and messages, in the window's colours and font
+    // rather than the extension's own. `!important` where the extension sets
+    // the colour inline: its messages are a hard red.
+    ".cm-vim-message": { color: "var(--fg-dim) !important" },
     ".cm-panels": {
       backgroundColor: "transparent",
       color: "var(--fg)",
@@ -121,10 +138,104 @@ const chrome = EditorView.theme(
     ".cm-vim-panel input": { color: "var(--fg)", fontFamily: "inherit", fontSize: "inherit" },
     ".cm-searchMatch": { backgroundColor: "var(--hover-strong) !important" },
     "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground":
-      { backgroundColor: "var(--hover-strong)" },
+      { backgroundColor: "var(--selection)" },
   },
   { dark: true },
 );
+
+// --- the caret ---------------------------------------------------------------
+
+/**
+ * One caret, at one cursor. It carries the position and the width of a
+ * character cell; whether it is drawn as a beam or as a block that wide is the
+ * stylesheet's business (see `.cm-threadCaret` above).
+ */
+class CaretMarker implements LayerMarker {
+  constructor(
+    readonly left: number,
+    readonly top: number,
+    readonly height: number,
+    readonly cell: number,
+  ) {}
+
+  eq(other: CaretMarker) {
+    return (
+      this.left === other.left &&
+      this.top === other.top &&
+      this.height === other.height &&
+      this.cell === other.cell
+    );
+  }
+
+  draw() {
+    const el = document.createElement("div");
+    el.className = "cm-threadCaret";
+    this.place(el);
+    return el;
+  }
+
+  // Moved rather than replaced, which is what lets its position and shape be
+  // eased from one to the next.
+  update(el: HTMLElement) {
+    this.place(el);
+    return true;
+  }
+
+  private place(el: HTMLElement) {
+    el.style.left = `${this.left}px`;
+    el.style.top = `${this.top}px`;
+    el.style.height = `${this.height}px`;
+    el.style.setProperty("--caret-cell", `${this.cell}px`);
+  }
+}
+
+/**
+ * The caret, drawn by Thread rather than by CodeMirror or the vim extension.
+ *
+ * Those two each draw their own — a beam and a block — as different elements
+ * in different layers, so there is nothing to animate between them: one
+ * vanishes and the other appears. A single element that is both is what makes
+ * the change of shape a transition.
+ *
+ * It sits *below* the text. A block can then be a solid colour without hiding
+ * the character it is on, and without redrawing that character on top of
+ * itself in a matching font, which is how the extension does it.
+ */
+const caretLayer = layer({
+  above: false,
+  class: "cm-threadCaretLayer",
+  update: (update) =>
+    update.docChanged ||
+    update.selectionSet ||
+    update.geometryChanged ||
+    update.viewportChanged ||
+    update.focusChanged,
+  markers(view) {
+    const scroller = view.scrollDOM;
+    const block = scroller.classList.contains("cm-vimMode");
+    const rect = scroller.getBoundingClientRect();
+    const baseLeft = rect.left - scroller.scrollLeft * view.scaleX;
+    const baseTop = rect.top - scroller.scrollTop * view.scaleY;
+
+    const carets: CaretMarker[] = [];
+    for (const range of view.state.selection.ranges) {
+      // In vim's visual mode the selection ends *after* the last character
+      // selected, and the block belongs on that character, not past it.
+      const at = block && !range.empty && range.head > range.anchor ? range.head - 1 : range.head;
+      const coords = view.coordsAtPos(at, 1);
+      if (!coords) continue;
+      carets.push(
+        new CaretMarker(
+          (coords.left - baseLeft) / view.scaleX,
+          (coords.top - baseTop) / view.scaleY,
+          (coords.bottom - coords.top) / view.scaleY,
+          view.defaultCharacterWidth,
+        ),
+      );
+    }
+    return carets;
+  },
+});
 
 class NumberMarker extends GutterMarker {
   constructor(readonly text: string) {
@@ -172,18 +283,24 @@ function lookExtension(look: EditorLook): Extension {
     EditorView.theme({
       "&": { fontSize: `${look.fontSize}px` },
       ".cm-scroller": { fontFamily: look.fontFamily, lineHeight: String(look.lineHeight) },
-      // The caret is an element that is moved, not redrawn, so easing its
-      // position is all a smooth caret takes. Short, and fast at the start:
-      // long enough to see where it went, not long enough to lag behind
-      // typing.
-      ...(look.smoothCaret
-        ? {
-            // Vim's block cursor is a different element, moved the same way.
-            ".cm-cursor, .cm-fat-cursor": {
-              transition: "left 80ms cubic-bezier(0.2, 0.9, 0.3, 1), top 80ms cubic-bezier(0.2, 0.9, 0.3, 1)",
-            },
-          }
-        : {}),
+      // The caret is an element that is moved and reshaped, not redrawn, so
+      // easing is all either animation takes. The change of shape between
+      // beam and block is always eased. Position is eased only for a smooth
+      // caret: short, and fast at the start -- long enough to see where it
+      // went, not long enough to lag behind typing.
+      ".cm-threadCaret": {
+        transition: [
+          "width 110ms cubic-bezier(0.2, 0.9, 0.3, 1)",
+          "background-color 110ms ease",
+          "opacity 110ms ease",
+          ...(look.smoothCaret
+            ? [
+                "left 80ms cubic-bezier(0.2, 0.9, 0.3, 1)",
+                "top 80ms cubic-bezier(0.2, 0.9, 0.3, 1)",
+              ]
+            : []),
+        ].join(", "),
+      },
     }),
     look.lineNumbers ? [numbers, highlightActiveLineGutter()] : [],
     look.wordWrap ? EditorView.lineWrapping : [],
@@ -286,6 +403,7 @@ export class EditorHost {
         highlightActiveLine(),
         history(),
         drawSelection(),
+        caretLayer,
         EditorState.allowMultipleSelections.of(true),
         keymap.of([
           { key: "Tab", run: insertIndent, shift: indentLess },

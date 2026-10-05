@@ -52,6 +52,19 @@
   --hover: #ffffff16;
   --hover-strong: #cba6f733;
 
+  /* The editor's caret and selection: neutral greys, and opaque, so they read
+     the same over any syntax colour and at any window opacity. The block is
+     drawn *behind* the character it is on, which is why it can be solid. */
+  --caret: #a8a8a8;
+  /* Dark enough that the dimmest text there is -- a comment, itself grey --
+     still reads on top of it. */
+  --caret-block: #585858;
+  --selection: #444444;
+
+  /* A `:s` being typed: what it will match, and what it will put there. */
+  --preview-match: #f38ba83d;
+  --preview-replace: #a6e3a140;
+
   /* Chips float inside their bar rather than touching its edges. */
   --chip-radius: 5px;
   --chip-inset: 3px;

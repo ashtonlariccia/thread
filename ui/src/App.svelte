@@ -2,11 +2,12 @@
   import { onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { ask, message } from "@tauri-apps/plugin-dialog";
+  import { message } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
   import ChangedDialog from "./lib/ChangedDialog.svelte";
+  import ConfirmDialog, { type Confirmation } from "./lib/ConfirmDialog.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
   import Editor from "./lib/Editor.svelte";
   import PinBar from "./lib/PinBar.svelte";
@@ -23,7 +24,7 @@
   import { RAIL_WIDTH } from "./lib/layout";
   import { ConfigStore, type Config } from "./lib/state/config.svelte";
   import { Documents } from "./lib/state/documents.svelte";
-  import { dirName, pathKey, samePath } from "./lib/paths";
+  import { dirName, pathKey, samePath, segmentsBelow } from "./lib/paths";
   import { fileIcon, folderIcon, loadFolderIcons, loadIcons } from "./lib/state/icons.svelte";
   import { Pins } from "./lib/state/pins.svelte";
   import { Tree } from "./lib/state/tree.svelte";
@@ -123,6 +124,23 @@
     if (path && tree.roots.length > 0) void tree.reveal(path);
   });
 
+  /**
+   * Close folders, and with them the files open from inside them. A file
+   * stays if it is also inside a folder that is staying open.
+   *
+   * The files go first: if there are unsaved ones and the question about them
+   * is cancelled, the folders stay open too, rather than leaving tabs behind
+   * for a project that has gone from the tree.
+   */
+  async function closeFolders(paths: string[]) {
+    const closing = (path: string) => paths.some((root) => segmentsBelow(root, path) !== null);
+    const staying = tree.roots.map((root) => root.path).filter((root) => !paths.includes(root));
+    const kept = (path: string) => staying.some((root) => segmentsBelow(root, path) !== null);
+
+    if (!(await docs.closeWhere((path) => closing(path) && !kept(path)))) return;
+    for (const path of paths) tree.close(path);
+  }
+
   function onTreeSelect(row: SidebarItem) {
     selectedKey = row.key;
     if (row.folder) void tree.toggle(row.path);
@@ -190,14 +208,36 @@
     }
   }
 
+  // --- yes-or-no questions ---------------------------------------------------------
+  //
+  // Asked in the app's own dialog. The system's message box is the wrong
+  // size, the wrong colours and the wrong font for this window, and cannot be
+  // told which button is the dangerous one.
+
+  let question = $state<{ ask: Confirmation; resolve: (confirmed: boolean) => void } | null>(null);
+
+  function confirm(ask: Confirmation): Promise<boolean> {
+    // One at a time; a second question while one is up is a "no".
+    if (question) return Promise.resolve(false);
+    return new Promise((resolve) => (question = { ask, resolve }));
+  }
+
+  function answerQuestion(confirmed: boolean) {
+    const asked = question;
+    question = null;
+    asked?.resolve(confirmed);
+  }
+
   async function deleteRow(row: SidebarItem) {
     if (row.root) return;
-    const what = row.folder ? `the folder "${row.title}" and everything in it` : `"${row.title}"`;
-    const confirmed = await ask(`Move ${what} to the Recycle Bin?`, {
-      title: "Delete",
-      kind: "warning",
-      okLabel: "Move to Recycle Bin",
-      cancelLabel: "Cancel",
+    const confirmed = await confirm({
+      title: row.folder ? "Delete folder" : "Delete file",
+      message: row.folder
+        ? `Delete the folder "${row.title}" and everything in it?`
+        : `Delete "${row.title}"?`,
+      note: "It goes to the Recycle Bin, and can be restored from there.",
+      confirm: "Delete",
+      danger: true,
     });
     if (!confirmed) return;
 
@@ -356,7 +396,7 @@
     event.stopPropagation();
 
     // A dialog is up; the window behind it is not taking commands.
-    if (docs.busy || appearanceOpen) return;
+    if (docs.busy || appearanceOpen || question) return;
 
     if (key === "tab") {
       docs.cycle(event.shiftKey ? -1 : 1);
@@ -427,7 +467,7 @@
     const own = !row
       ? []
       : row.root
-        ? [item("Close Folder", () => tree.close(row.path)), SEP]
+        ? [item("Close Folder", () => void closeFolders([row.path])), SEP]
         : [
             item("Rename", () => startRename(row)),
             item("Delete", () => void deleteRow(row), true),
@@ -560,7 +600,7 @@
     onnew={() => docs.newFile()}
     onopen={() => void docs.openDialog()}
     onopenfolder={() => void openFolder()}
-    onclosefolder={() => tree.closeAll()}
+    onclosefolder={() => void closeFolders(tree.roots.map((root) => root.path))}
     onsave={() => void docs.save()}
     onsaveas={() => void docs.saveAs()}
     onclosefile={() => void docs.close()}
@@ -662,6 +702,8 @@
   />
 
   <UnsavedDialog docs={docs.asking?.docs ?? null} onanswer={(choice) => void docs.answer(choice)} />
+
+  <ConfirmDialog question={question?.ask ?? null} onanswer={answerQuestion} />
 
   <ChangedDialog doc={docs.changed?.doc ?? null} onanswer={(reload) => docs.answerChanged(reload)} />
 </div>

@@ -120,11 +120,6 @@ export class Tree {
     this.#prune();
   }
 
-  closeAll() {
-    this.roots = [];
-    this.#prune();
-  }
-
   /** Fold or unfold a folder. */
   async toggle(path: string) {
     if (this.#open[path]) this.#open[path] = false;
