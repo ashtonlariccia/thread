@@ -813,8 +813,15 @@
   .mode {
     text-transform: capitalize;
   }
+
+  /* Vim's end of the bar is the one part of it that is typed into and that
+     changes what the next key does, so it takes the accent: same font and
+     size as the status opposite, but not something to hunt for among it. */
+  .mode,
+  .vim-line {
+    color: var(--accent);
+  }
   .vim-line :global(.cm-vim-message) {
-    color: var(--fg-dim) !important;
     overflow: hidden;
     text-overflow: ellipsis;
   }
