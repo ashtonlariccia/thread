@@ -12,9 +12,11 @@
     onmove: (pin: Pin, index: number) => void;
     /** Status for the right-hand end of the bar. */
     info?: Snippet;
+    /** What sits in the middle of the bar, centred on the window. */
+    center?: Snippet;
   };
 
-  let { pins, onopen, onunpin, onmove, info }: Props = $props();
+  let { pins, onopen, onunpin, onmove, info, center }: Props = $props();
 
   // The context menu is positioned in *viewport* coordinates rather than inside
   // the row, because the strip scrolls horizontally -- and `overflow` clips any
@@ -218,6 +220,10 @@
     </ul>
   {/if}
 
+  {#if center}
+    <div class="center">{@render center()}</div>
+  {/if}
+
   {#if info}
     <div class="info">{@render info()}</div>
   {/if}
@@ -260,9 +266,29 @@
     padding-right: 2px;
     user-select: none;
     overflow: hidden;
+    /* For the centred slot. */
+    position: relative;
   }
 
   /* Pushed to the right-hand end whether or not there are pins before it. */
+  /* Centred on the bar itself, not on whatever room the two ends leave: the
+     pins and the status are different widths, and centring between them would
+     put this visibly off the window's middle and shift it as they change.
+     Capped so the longest path stops short of both. */
+  .center {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: var(--viewport-inset);
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    max-width: 40%;
+    color: var(--fg-dim);
+    font-size: 0.71rem;
+    white-space: nowrap;
+  }
+
   .info {
     display: flex;
     align-items: center;

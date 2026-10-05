@@ -81,6 +81,9 @@
             </span>
             <img class="glyph" src={item.icon} alt="" width="16" height="16" draggable="false" />
             <span class="label">{item.title}</span>
+            {#if item.dirty}
+              <span class="dirty" aria-label="Unsaved changes"></span>
+            {/if}
           </div>
         </li>
       {/each}
@@ -205,6 +208,17 @@
     white-space: nowrap;
     font-size: 0.82rem;
     color: var(--fg);
+  }
+
+  /* Unsaved changes: the same dot the file's tab wears, at the row's far end
+     so a column of them can be scanned down the sidebar's edge. */
+  .dirty {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    margin: 0 0.2rem 0 0.4rem;
+    border-radius: 50%;
+    background: var(--fg-dim);
   }
 
   .empty {

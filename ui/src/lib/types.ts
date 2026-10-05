@@ -15,6 +15,8 @@ export type SidebarItem = {
   folder?: "open" | "closed";
   /** One of the folders that was opened, rather than something inside one. */
   root: boolean;
+  /** A file that is open with unsaved changes. */
+  dirty: boolean;
 };
 
 /**

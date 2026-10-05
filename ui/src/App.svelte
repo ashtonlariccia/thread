@@ -21,7 +21,7 @@
   import { RAIL_WIDTH } from "./lib/layout";
   import { AppearanceStore, type Appearance } from "./lib/state/appearance.svelte";
   import { Documents } from "./lib/state/documents.svelte";
-  import { samePath } from "./lib/paths";
+  import { pathKey, samePath } from "./lib/paths";
   import { fileIcon, folderIcon, loadFolderIcons, loadIcons } from "./lib/state/icons.svelte";
   import { Pins } from "./lib/state/pins.svelte";
   import { Tree } from "./lib/state/tree.svelte";
@@ -50,6 +50,11 @@
   let sidebarCollapsed = $state(true);
   let resizing = $state(false);
 
+  /** The files with unsaved changes, by [`pathKey`], for marking in the tree. */
+  const dirtyPaths = $derived(
+    new Set(docs.dirty.flatMap((doc) => (doc.path === null ? [] : [pathKey(doc.path)]))),
+  );
+
   const treeItems = $derived(
     tree.rows.map(
       ({ id, entry, depth, open, root }): SidebarItem => ({
@@ -60,6 +65,7 @@
         depth,
         folder: entry.dir ? (open ? "open" : "closed") : undefined,
         root,
+        dirty: !entry.dir && dirtyPaths.has(pathKey(entry.path)),
       }),
     ),
   );
@@ -377,11 +383,16 @@
     onunpin={(pin) => void pins.remove(pin)}
     onmove={(pin, index) => void pins.move(pin, index)}
   >
+    {#snippet center()}
+      {#if docs.active}
+        <!-- The left-to-right mark keeps a path that starts with punctuation
+             (`\\server\share`) reading in order inside the right-to-left box
+             the truncation needs; see `.path`. -->
+        <span class="path" title={docs.active.path}>&lrm;{docs.active.path ?? docs.active.name}</span>
+      {/if}
+    {/snippet}
     {#snippet info()}
       {#if docs.active}
-        <span class="info-path" title={docs.active.path}>
-          {docs.active.path ?? docs.active.name}
-        </span>
         <span>Ln {docs.cursor.line}, Col {docs.cursor.col}</span>
         <span>{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
         <span>{docs.active.bom ? "UTF-8 with BOM" : "UTF-8"}</span>
@@ -478,11 +489,15 @@
     pointer-events: none;
   }
 
-  /* The path is the one part of the status that can be any length, so it is
-     the part that gives way. */
-  .info-path {
+  /* A path too long for its slot loses its *start*: the drive and the first
+     few folders are the part you already know, and the end is the file. An
+     ellipsis only ever lands on the overflowing end of a box, so the box is
+     right-to-left -- which moves that end to the left without reordering the
+     text inside it. */
+  .path {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    direction: rtl;
   }
 </style>

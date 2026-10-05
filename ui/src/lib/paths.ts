@@ -20,13 +20,17 @@ export function segmentsBelow(root: string, path: string): string[] | null {
 }
 
 /**
- * Whether two paths name the same file.
+ * A path reduced to what identifies the file, for use as a lookup key.
  *
  * Windows paths: case-insensitive, and either slash. Not a full canonical
- * comparison — it will not see through a symlink or `..` — but it is what
- * stops the same file being picked twice from a dialog opening twice.
+ * form — it will not see through a symlink or `..` — but two spellings of one
+ * file from a dialog, the tree and the command line all come out the same.
  */
+export function pathKey(path: string): string {
+  return path.replaceAll("\\", "/").toLowerCase();
+}
+
+/** Whether two paths name the same file, by [`pathKey`]. */
 export function samePath(a: string, b: string): boolean {
-  const fold = (p: string) => p.replaceAll("\\", "/").toLowerCase();
-  return fold(a) === fold(b);
+  return pathKey(a) === pathKey(b);
 }
