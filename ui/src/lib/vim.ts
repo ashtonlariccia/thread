@@ -26,11 +26,17 @@ export type VimHooks = {
 export type VimApi = {
   extension: Extension;
   /**
-   * Follow the mode of whatever is in `view` now. Call again whenever the view
-   * is given a different file or its extensions change: the object the mode
-   * events come from is the view's, and may have been replaced.
+   * Follow whatever is in `view` now: report its mode, and show its command
+   * line and messages in `line()` rather than in a panel under the text. Call
+   * again whenever the view is given a different file or its extensions
+   * change: the object the events come from is the view's, and may have been
+   * replaced.
    */
-  watch: (view: EditorView, onmode: (mode: VimMode) => void) => void;
+  watch: (
+    view: EditorView,
+    onmode: (mode: VimMode) => void,
+    line: () => HTMLElement | null,
+  ) => void;
 };
 
 /** What the extension passes with `vim-mode-change`. */
@@ -61,12 +67,25 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
     return {
       // No status panel of its own: the bottom bar shows the mode.
       extension: vim({ status: false }),
-      watch(view, onmode) {
+      watch(view, onmode, line) {
         const cm = getCM(view);
         if (!cm) return;
         if (!watched.has(cm)) {
           watched.add(cm);
           cm.on("vim-mode-change", (change: ModeChange) => onmode(modeOf(change)));
+
+          // The extension shows its `:` line, `/` search and messages in a
+          // panel under the text, by putting one element -- `state.dialog` --
+          // into it and announcing the change. That element is self-contained
+          // (its own key handlers, its own focus), so it works wherever it is
+          // put. This runs after the extension's own handler, and moves it.
+          cm.on("dialog", () => {
+            const host = line();
+            if (!host) return;
+            const dialog = cm.state.dialog as HTMLElement | null | undefined;
+            if (dialog) host.replaceChildren(dialog);
+            else host.replaceChildren();
+          });
         }
         // And where it stands right now, which no event is going to announce.
         const state = cm.state.vim;

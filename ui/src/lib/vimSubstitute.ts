@@ -8,8 +8,10 @@
  * once there is one. Nothing is changed in the buffer until the command is
  * actually run; Escape leaves no trace.
  *
- * It keys off the extension's DOM (the `.cm-vim-panel` prompt), not its
- * internals, so it does not need the extension loaded to be imported.
+ * It keys off the prompt's DOM, not the extension's internals, so it does not
+ * need the extension loaded to be imported. The prompt is looked for by where
+ * it lives: the extension's own panel, or the element marked `data-vim-line`
+ * that Thread moves it to in the bottom bar.
  */
 import { type Extension, StateEffect, StateField, type Text } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
@@ -202,10 +204,11 @@ const watcher = ViewPlugin.fromClass(
     private showing = false;
 
     constructor(private readonly view: EditorView) {
-      const dom = view.dom;
-      dom.addEventListener("input", this.onInput, true);
-      dom.addEventListener("keydown", this.onKeydown, true);
-      dom.addEventListener("focusout", this.onFocusOut, true);
+      // On the document, not the editor: the prompt is not inside the editor
+      // once it has been moved to the bottom bar.
+      document.addEventListener("input", this.onInput, true);
+      document.addEventListener("keydown", this.onKeydown, true);
+      document.addEventListener("focusout", this.onFocusOut, true);
     }
 
     update() {
@@ -219,17 +222,16 @@ const watcher = ViewPlugin.fromClass(
     }
 
     destroy() {
-      const dom = this.view.dom;
-      dom.removeEventListener("input", this.onInput, true);
-      dom.removeEventListener("keydown", this.onKeydown, true);
-      dom.removeEventListener("focusout", this.onFocusOut, true);
+      document.removeEventListener("input", this.onInput, true);
+      document.removeEventListener("keydown", this.onKeydown, true);
+      document.removeEventListener("focusout", this.onFocusOut, true);
     }
 
     /** The prompt's input, if this event is from vim's `:` line. */
     private exInput(event: Event): HTMLInputElement | null {
       const target = event.target;
       if (!(target instanceof HTMLInputElement)) return null;
-      const panel = target.closest(".cm-vim-panel");
+      const panel = target.closest(".cm-vim-panel, [data-vim-line]");
       // `/` and `?` searches use the same prompt, and preview themselves.
       return panel?.textContent?.trimStart().startsWith(":") ? target : null;
     }

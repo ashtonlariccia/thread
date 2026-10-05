@@ -72,6 +72,8 @@ export class Documents {
 
   /** The vim mode the editor is in, or null while vim motions are off. */
   vimMode = $state<VimMode | null>(null);
+  /** Where vim's `:` line and messages are shown; set by whoever draws it. */
+  vimLine: HTMLElement | null = null;
 
   /** Set while the user is being asked what to do with unsaved files. */
   asking = $state.raw<{ docs: Doc[]; resolve: (proceed: boolean) => void } | null>(null);
@@ -85,7 +87,12 @@ export class Documents {
       if (doc && doc.dirty !== dirty) doc.dirty = dirty;
     },
     oncursor: (cursor) => (this.cursor = cursor),
-    onview: (view) => this.#vim?.watch(view, (mode) => (this.vimMode = mode)),
+    onview: (view) =>
+      this.#vim?.watch(
+        view,
+        (mode) => (this.vimMode = mode),
+        () => this.vimLine,
+      ),
   });
 
   #config: Config = DEFAULTS;

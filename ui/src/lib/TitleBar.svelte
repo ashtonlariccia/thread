@@ -5,6 +5,8 @@
   type Props = {
     /** Whether a file is open, so entries that need one can be disabled. */
     hasFile: boolean;
+    /** The file being edited, shown in the middle of the bar; null for none. */
+    path: string | null;
     /** How many folders are open in the file tree. */
     folderCount: number;
     onnew: () => void;
@@ -26,6 +28,7 @@
 
   let {
     hasFile,
+    path,
     folderCount,
     onnew,
     onopen,
@@ -233,6 +236,17 @@
   <!-- Grows to fill the middle, so most of the bar stays draggable. -->
   <div class="drag" data-tauri-drag-region></div>
 
+  <!-- Centred on the window, not on the gap between the menus and the
+       buttons: those are different widths, and centring between them would
+       sit visibly off the middle. It takes no pointer events, so the bar
+       under it is still what gets dragged. -->
+  {#if path}
+    <!-- The left-to-right mark keeps a path that starts with punctuation
+         (`\\server\share`) reading in order inside the right-to-left box the
+         truncation needs; see `.path`. -->
+    <div class="path">&lrm;{path}</div>
+  {/if}
+
   <div class="controls">
     <button
       class="ctl"
@@ -241,8 +255,8 @@
       title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
       aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
     >
-      <!-- A panel glyph whose left column is filled while the sidebar is open,
-           so the icon depicts the current state rather than the action. -->
+      <!-- A window with its side panel marked off. The same whether the
+           sidebar is open or not: the sidebar itself says which. -->
       <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
         <rect
           x="1.6"
@@ -255,9 +269,6 @@
           stroke-width="1.2"
         />
         <path d="M6.2 2.6 V13.4" stroke="currentColor" stroke-width="1.2" />
-        {#if !sidebarCollapsed}
-          <path d="M3.4 2.6 H4.8 V13.4 H3.4 Z" fill="currentColor" opacity="0.75" />
-        {/if}
       </svg>
     </button>
     <span class="gap"></span>
@@ -363,6 +374,30 @@
   .drag {
     flex: 1;
     min-width: 0;
+  }
+
+  /* A path too long for its slot loses its *start*: the drive and the first
+     few folders are the part you already know, and the end is the file. An
+     ellipsis only ever lands on the overflowing end of a box, so the box is
+     right-to-left -- which moves that end to the left without reordering the
+     text inside it. */
+  .path {
+    position: absolute;
+    left: 50%;
+    top: var(--viewport-inset);
+    bottom: 0;
+    transform: translateX(-50%);
+    max-width: 46%;
+    /* Centred by its line height rather than by flexbox: the text has to
+       stay one plain box for the ellipsis to be able to clip it. */
+    line-height: calc(var(--titlebar-height) - var(--viewport-inset));
+    color: var(--fg-dim);
+    font-size: 0.72rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl;
+    pointer-events: none;
   }
 
   .controls {

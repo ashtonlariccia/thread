@@ -596,6 +596,7 @@
 <div class="app">
   <TitleBar
     hasFile={docs.active !== null}
+    path={docs.active ? (docs.active.path ?? docs.active.name) : null}
     folderCount={tree.roots.length}
     onnew={() => docs.newFile()}
     onopen={() => void docs.openDialog()}
@@ -675,14 +676,10 @@
       {#if docs.vimMode && docs.active}
         <span class="mode" data-mode={docs.vimMode}>{docs.vimMode}</span>
       {/if}
-    {/snippet}
-    {#snippet center()}
-      {#if docs.active}
-        <!-- The left-to-right mark keeps a path that starts with punctuation
-             (`\\server\share`) reading in order inside the right-to-left box
-             the truncation needs; see `.path`. -->
-        <span class="path" title={docs.active.path}>&lrm;{docs.active.path ?? docs.active.name}</span>
-      {/if}
+      <!-- Vim's `:` line, `/` search and messages are put here by `vim.ts`,
+           beside the mode, where vim itself shows them. Always present, so
+           there is somewhere to put them the moment vim asks. -->
+      <span class="vim-line" data-vim-line bind:this={docs.vimLine}></span>
     {/snippet}
     {#snippet info()}
       {#if docs.active}
@@ -785,33 +782,33 @@
     pointer-events: none;
   }
 
-  /* A path too long for its slot loses its *start*: the drive and the first
-     few folders are the part you already know, and the end is the file. An
-     ellipsis only ever lands on the overflowing end of a box, so the box is
-     right-to-left -- which moves that end to the left without reordering the
-     text inside it. */
-  /* Bottom left, where vim puts it. Coloured by mode, because which mode you
-     are in decides what the next key does, and that should not need reading. */
-  .mode {
-    color: var(--fg-dim);
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-  .mode[data-mode="insert"] {
-    color: var(--ok);
-  }
-  .mode[data-mode="visual"] {
-    color: var(--accent);
-  }
-  .mode[data-mode="replace"] {
-    color: var(--danger);
-  }
-
-  .path {
+  /* What goes in here is built by the vim extension, not by this component,
+     so it is reached with `:global`. Its own inline styles ask for a default
+     monospace font and, for messages, a hard red. */
+  .vim-line {
+    flex: 1;
     min-width: 0;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    color: var(--fg);
+    font-family: "Cascadia Mono", Consolas, monospace;
+  }
+  .vim-line :global(*) {
+    font-family: inherit !important;
+    font-size: inherit;
+  }
+  .vim-line :global(input) {
+    min-width: 0;
+    padding: 0;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--fg);
+  }
+  .vim-line :global(.cm-vim-message) {
+    color: var(--fg-dim) !important;
     overflow: hidden;
     text-overflow: ellipsis;
-    direction: rtl;
   }
 </style>
