@@ -1,4 +1,4 @@
-//! Tauri command surface: windows, files, appearance, and the pinned strip.
+//! Tauri command surface: windows, files, the config, and the pinned strip.
 //!
 //! This layer owns the windows and the IPC transport. Anything that can be
 //! decided without a window lives in `thread-core`.
@@ -9,7 +9,8 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
 
 use thread_core::{
-    document, settings, tree, Appearance, Document, Entry, Eol, Material, Pin, PinStore, Stamp,
+    config, document, tree, Appearance, Config, Document, Entry, Eol, Material, Pin, PinStore,
+    Stamp,
 };
 
 /// A window's size at 100% scale. Matches the window in tauri.conf.json.
@@ -21,13 +22,17 @@ fn scaled(size: (f64, f64), appearance: &Appearance) -> LogicalSize<f64> {
     LogicalSize::new(size.0 * factor, size.1 * factor)
 }
 
-/// The stored appearance, or the defaults if it cannot be read: an unreadable
-/// settings file should cost the customisation, not the window.
-fn stored_appearance() -> Appearance {
-    settings::load().unwrap_or_else(|e| {
-        tracing::warn!(target: "thread::ui", "could not read settings: {e}");
-        Appearance::default()
+/// The config, or the defaults if it cannot be read: a config file with a
+/// mistake in it should cost the customisation, not the window.
+fn stored_config() -> Config {
+    config::load().unwrap_or_else(|e| {
+        tracing::warn!(target: "thread::ui", "{e}");
+        Config::default()
     })
+}
+
+fn stored_appearance() -> Appearance {
+    stored_config().appearance
 }
 
 // --- windows ----------------------------------------------------------------
@@ -98,13 +103,13 @@ pub async fn new_window(app: AppHandle) -> Result<String, String> {
     build_window(&app, Vec::new())
 }
 
-/// Open the settings file in a window of its own (Appearance -> Open Config File).
+/// Open the config file in a window of its own (Appearance -> Open Config File).
 ///
 /// A new window rather than the current one, so the file can sit beside the
 /// window whose look it is changing.
 #[tauri::command]
 pub async fn open_config(app: AppHandle) -> Result<String, String> {
-    let path = settings::ensure_file().map_err(|e| e.to_string())?;
+    let path = config::ensure_file().map_err(|e| e.to_string())?;
     build_window(&app, vec![path.to_string_lossy().into_owned()])
 }
 
@@ -213,20 +218,12 @@ pub fn startup_files(window: WebviewWindow, files: State<'_, PendingFiles>) -> V
 
 // --- file tree --------------------------------------------------------------
 
-/// What the tree leaves out, per the settings file.
-fn excluded() -> Vec<String> {
-    settings::load_all()
-        .map(|settings| settings.exclude)
-        .unwrap_or_else(|e| {
-            tracing::warn!(target: "thread::ui", "could not read settings: {e}");
-            thread_core::Settings::default().exclude
-        })
-}
-
-/// One folder's children, for the tree to show when it is unfolded.
+/// One folder's children, for the tree to show when it is unfolded. What it
+/// leaves out is the config's `files.exclude`.
 #[tauri::command]
 pub async fn read_dir(path: String) -> Result<Vec<Entry>, String> {
-    tree::list(Path::new(&path), &excluded()).map_err(|e| e.to_string())
+    let exclude = stored_config().files.exclude;
+    tree::list(Path::new(&path), &exclude).map_err(|e| e.to_string())
 }
 
 /// When each folder's contents last changed, in order; `None` where it is gone.
@@ -242,14 +239,14 @@ pub async fn dir_stamps(paths: Vec<String>) -> Vec<Option<u64>> {
         .collect()
 }
 
-/// Whether `path` is Thread's own settings file.
-fn is_settings_file(path: &Path) -> bool {
-    let Ok(settings) = settings::path() else {
+/// Whether `path` is Thread's own config file.
+fn is_config_file(path: &Path) -> bool {
+    let Ok(config) = config::path() else {
         return false;
     };
     // Canonical on both sides: the same file can be spelled with either slash,
     // any case, or a short 8.3 name.
-    match (std::fs::canonicalize(path), std::fs::canonicalize(settings)) {
+    match (std::fs::canonicalize(path), std::fs::canonicalize(config)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
@@ -275,19 +272,18 @@ pub async fn write_file(
     let stamp = document::write(Path::new(&path), &text, eol, bom).map_err(|e| e.to_string())?;
     tracing::info!(target: "thread::files", "SAVED {path}");
 
-    // Saving the settings file is how it is edited by hand, so that is the
-    // moment it takes effect -- not the next launch.
-    if is_settings_file(Path::new(&path)) {
-        match settings::load() {
-            Ok(appearance) => {
-                apply_appearance(&app, &appearance);
-                // The rest of the file is read where it is used; this is for
-                // whatever is already on screen because of it -- the tree.
-                let _ = app.emit("settings-changed", ());
+    // Saving the config file is how it is edited, so that is the moment it
+    // takes effect -- not the next launch.
+    if is_config_file(Path::new(&path)) {
+        match config::load() {
+            Ok(config) => apply_config(&app, &config),
+            // The save itself succeeded; what is in the file just cannot be
+            // used. Keep everything as it is and say what is wrong, since the
+            // person who can fix it is looking at the file right now.
+            Err(e) => {
+                tracing::warn!(target: "thread::ui", "config not applied: {e}");
+                let _ = app.emit("config-error", e.to_string());
             }
-            // Half-typed JSON is the normal state of a file being edited. Keep
-            // the look there is; the save itself still succeeded.
-            Err(e) => tracing::warn!(target: "thread::ui", "settings not applied: {e}"),
         }
     }
     Ok(stamp)
@@ -305,14 +301,17 @@ pub async fn file_stamps(paths: Vec<String>) -> Vec<Option<Stamp>> {
         .collect()
 }
 
-// --- appearance -------------------------------------------------------------
+// --- config -----------------------------------------------------------------
 //
-// Two halves: the values the frontend reads to drive the CSS, and the zoom and
-// window effect, which only the backend can apply.
+// Most of the config is the frontend's to act on: it is handed the whole
+// thing, and told when it changes. The exception is the zoom and the window
+// effect, which only the backend can apply.
 
+/// The config as it stands. Falls back to the defaults if the file has a
+/// mistake in it; the mistake itself is reported when the file is saved.
 #[tauri::command]
-pub fn appearance() -> Result<Appearance, String> {
-    settings::load().map_err(|e| e.to_string())
+pub fn config() -> Config {
+    stored_config()
 }
 
 /// Resize a window so it shows the same layout at the new scale.
@@ -340,7 +339,7 @@ fn rescale(window: &WebviewWindow, from: &Appearance, to: &Appearance) {
 
 /// The appearance the windows are wearing right now.
 ///
-/// Not the same as what is in the settings file: that can be edited by hand,
+/// Not the same as what is in the config file: that can be edited by hand,
 /// and rescaling a window needs the scale it is *coming from*, which the file
 /// no longer says once it has been overwritten.
 pub struct Applied(Mutex<Appearance>);
@@ -351,11 +350,14 @@ impl Applied {
     }
 }
 
-/// Put an appearance on every window, and tell their pages about it.
+/// Put a config into effect: its appearance onto every window, and the whole
+/// of it to their pages.
 ///
-/// Every window rather than the calling one: the appearance is global, and a
+/// Every window rather than the calling one: the config is global, and a
 /// second window left opaque while the first went frosted would look like a bug.
-fn apply_appearance(app: &AppHandle, appearance: &Appearance) {
+fn apply_config(app: &AppHandle, config: &Config) {
+    let appearance = &config.appearance;
+
     // Swapped and released before any window is touched. Window calls made
     // off the main thread wait for it, and the main thread may itself be in
     // here waiting for this lock -- holding it across them would deadlock.
@@ -374,8 +376,9 @@ fn apply_appearance(app: &AppHandle, appearance: &Appearance) {
         }
     }
 
-    // The opacity is the page's to paint, and the dialog shows all three.
-    let _ = app.emit("appearance-changed", appearance);
+    // Everything else -- opacity, the editor, the tree, the theme -- is the
+    // page's to act on.
+    let _ = app.emit("config-changed", config);
 
     tracing::info!(
         target: "thread::ui",
@@ -386,14 +389,20 @@ fn apply_appearance(app: &AppHandle, appearance: &Appearance) {
     );
 }
 
-/// Store the appearance and apply it.
+/// Store the appearance in the config file and apply it.
 ///
-/// Returns what was actually written: the store clamps opacity and scale, so
-/// the dialog must render the stored value rather than the one it sent.
+/// Returns what was actually written: opacity and scale are clamped, so the
+/// dialog must render the stored value rather than the one it sent.
 #[tauri::command]
 pub fn set_appearance(app: AppHandle, appearance: Appearance) -> Result<Appearance, String> {
-    let stored = settings::save(&appearance).map_err(|e| e.to_string())?;
-    apply_appearance(&app, &stored);
+    let stored = config::save_appearance(&appearance).map_err(|e| e.to_string())?;
+
+    // The rest comes from the file, so one window's dialog cannot push a stale
+    // copy of the editor settings onto the others. If the file has a mistake
+    // elsewhere in it, the appearance still applies, over the defaults.
+    let mut config = stored_config();
+    config.appearance = stored.clone();
+    apply_config(&app, &config);
     Ok(stored)
 }
 

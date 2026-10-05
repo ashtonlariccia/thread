@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { message } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
@@ -17,9 +18,10 @@
 
   import { item, SEP, type ContextMenuState } from "./lib/contextMenu";
   import { setEditor } from "./lib/edit";
+  import { indentLabel } from "./lib/indent";
   import { languageOf } from "./lib/languages";
   import { RAIL_WIDTH } from "./lib/layout";
-  import { AppearanceStore, type Appearance } from "./lib/state/appearance.svelte";
+  import { ConfigStore, type Config } from "./lib/state/config.svelte";
   import { Documents } from "./lib/state/documents.svelte";
   import { pathKey, samePath } from "./lib/paths";
   import { fileIcon, folderIcon, loadFolderIcons, loadIcons } from "./lib/state/icons.svelte";
@@ -28,7 +30,7 @@
   import type { Pin, SidebarItem } from "./lib/types";
 
   const pins = new Pins();
-  const appearance = new AppearanceStore();
+  const config = new ConfigStore();
   const docs = new Documents();
   const tree = new Tree();
 
@@ -241,8 +243,26 @@
   // place rather than a rule per pane. Set on the root element because the
   // whole cascade reads it, including components this file never touches.
   $effect(() => {
-    document.documentElement.style.setProperty("--bg-alpha", String(appearance.alpha));
+    document.documentElement.style.setProperty("--bg-alpha", String(config.alpha));
   });
+
+  // The editor's share of the config: the font, the gutter, and each open
+  // file's indentation. Re-run whenever the config is replaced.
+  $effect(() => {
+    const current = config.current;
+    // Only the config is a dependency: `configure` walks the open files, and
+    // must not re-run just because one was opened or closed.
+    untrack(() => docs.configure(current));
+  });
+
+  /** A new config has arrived, from this window's dialog, another's, or the file. */
+  function onConfigChanged(next: Config) {
+    const exclude = JSON.stringify(config.current.files.exclude);
+    config.current = next;
+    // What the tree leaves out is decided where it is listed, so the listings
+    // on screen are only as current as the last time they were read.
+    if (JSON.stringify(next.files.exclude) !== exclude) void tree.refresh();
+  }
 
   function checkDisk() {
     void docs.checkDisk();
@@ -253,11 +273,11 @@
     setEditor(docs.editor);
 
     void (async () => {
-      await Promise.all([pins.refresh(), appearance.load()]);
+      await Promise.all([pins.refresh(), config.load()]);
 
       // Liveness beacon: proof in the backend's log that the frontend came up.
       void invoke("ui_ready", {
-        detail: `APP_READY pins=${pins.list.length} scale=${appearance.current.scale}`,
+        detail: `APP_READY pins=${pins.list.length} scale=${config.appearance.scale}`,
       }).catch(() => {});
 
       // Not needed until a file is open, so not paid for before the window is up.
@@ -281,20 +301,21 @@
     // focus. It is one `stat` per open file.
     const diskPoll = setInterval(checkDisk, DISK_POLL_MS);
 
-    // The appearance is shared by every window and can be changed from any of
-    // them, or by saving the settings file, so each window is told.
-    const stopAppearance = listen<Appearance>("appearance-changed", (event) => {
-      appearance.current = event.payload;
-    });
+    // The config is shared by every window and can be changed from any of
+    // them, or by saving the config file, so each window is told.
+    const stopConfig = listen<Config>("config-changed", (event) => onConfigChanged(event.payload));
 
-    // The settings file was saved. What the tree leaves out comes from it.
-    const stopSettings = listen("settings-changed", () => void tree.refresh());
+    // The config file was saved with something in it that cannot be used.
+    // Nothing has changed; say what is wrong while the file is still open.
+    const stopConfigError = listen<string>("config-error", (event) => {
+      void message(event.payload, { title: "Config not applied", kind: "error" });
+    });
 
     return () => {
       setEditor(null);
       clearInterval(diskPoll);
-      void stopAppearance.then((unlisten) => unlisten());
-      void stopSettings.then((unlisten) => unlisten());
+      void stopConfig.then((unlisten) => unlisten());
+      void stopConfigError.then((unlisten) => unlisten());
       void stopClose.then((unlisten) => unlisten());
     };
   });
@@ -394,6 +415,7 @@
     {#snippet info()}
       {#if docs.active}
         <span>Ln {docs.cursor.line}, Col {docs.cursor.col}</span>
+        <span>{indentLabel(docs.active.indent)}</span>
         <span>{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
         <span>{docs.active.bom ? "UTF-8 with BOM" : "UTF-8"}</span>
         <span>{languageOf(docs.active.name)}</span>
@@ -403,7 +425,7 @@
 
   <AppearanceDialog
     open={appearanceOpen}
-    {appearance}
+    {config}
     onclose={() => (appearanceOpen = false)}
   />
 

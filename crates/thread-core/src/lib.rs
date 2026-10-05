@@ -1,19 +1,19 @@
 //! Core for Thread.
 //!
-//! Everything here is UI-agnostic: the stores the window chrome reads and
-//! writes, and where they live on disk. The editor engine lands here too.
+//! Everything here is UI-agnostic: the config, the stores the window chrome
+//! reads and writes, and the file handling behind the editor and the tree.
 
 use std::fmt;
 use std::path::PathBuf;
 
+pub mod config;
 pub mod document;
 pub mod pins;
-pub mod settings;
 pub mod tree;
 
+pub use config::{Appearance, Config, Material};
 pub use document::{Document, Eol, Stamp};
 pub use pins::{Pin, Store as PinStore};
-pub use settings::{Appearance, Material, Settings};
 pub use tree::Entry;
 
 /// Errors surfaced by the core.
@@ -30,7 +30,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// `%APPDATA%\thread`, created if missing.
 ///
-/// `THREAD_DATA_DIR` overrides it, so tests never touch the real settings.
+/// `THREAD_DATA_DIR` overrides it, so tests never touch the real config.
 pub fn data_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("THREAD_DATA_DIR") {
         let dir = PathBuf::from(dir);

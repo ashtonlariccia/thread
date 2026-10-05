@@ -2,19 +2,19 @@
   import { invoke } from "@tauri-apps/api/core";
 
   import Dialog from "./Dialog.svelte";
-  import type { AppearanceStore } from "./state/appearance.svelte";
+  import type { ConfigStore } from "./state/config.svelte";
 
   type Props = {
     open: boolean;
-    appearance: AppearanceStore;
+    config: ConfigStore;
     onclose: () => void;
   };
 
-  let { open, appearance, onclose }: Props = $props();
+  let { open, config, onclose }: Props = $props();
 
-  const a = $derived(appearance.current);
+  const a = $derived(config.appearance);
 
-  /** The same settings as a file, for editing by hand. Saving it applies it. */
+  /** The whole config as a file: these settings and all the others. Saving it applies it. */
   function openConfig() {
     onclose();
     invoke("open_config").catch((e) => console.error("open_config failed", e));
@@ -32,10 +32,10 @@
       input.value = String(a.scale);
       return;
     }
-    void appearance.patch({ scale: Math.round(value) }).then(() => {
+    void config.patchAppearance({ scale: Math.round(value) }).then(() => {
       // The store may have clamped it; the box must show what was stored even
       // when that equals the previous value and nothing re-renders.
-      input.value = String(appearance.current.scale);
+      input.value = String(config.appearance.scale);
     });
   }
 </script>
@@ -52,10 +52,10 @@
         min="20"
         max="100"
         step="1"
-        value={a.backgroundOpacity}
-        oninput={(e) => void appearance.patch({ backgroundOpacity: Number(e.currentTarget.value) })}
+        value={a.background_opacity}
+        oninput={(e) => void config.patchAppearance({ background_opacity: Number(e.currentTarget.value) })}
       />
-      <span class="unit pct">{a.backgroundOpacity}%</span>
+      <span class="unit pct">{a.background_opacity}%</span>
     </div>
 
     <span class="label-ish">Material</span>
@@ -64,7 +64,7 @@
         type="checkbox"
         checked={a.material === "acrylic"}
         onchange={(e) =>
-          void appearance.patch({ material: e.currentTarget.checked ? "acrylic" : "none" })}
+          void config.patchAppearance({ material: e.currentTarget.checked ? "acrylic" : "none" })}
       />
       Acrylic — frost whatever is behind the window
     </label>
@@ -91,7 +91,7 @@
 
   <div class="dlg-actions">
     <button class="btn ghost config" onclick={openConfig}>Open Config File</button>
-    <button class="btn ghost" onclick={() => void appearance.reset()}>Reset</button>
+    <button class="btn ghost" onclick={() => void config.resetAppearance()}>Reset</button>
     <button class="btn primary" onclick={onclose}>Done</button>
   </div>
 </Dialog>

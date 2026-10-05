@@ -116,7 +116,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             ui_ready,
-            commands::appearance,
+            commands::config,
             commands::set_appearance,
             commands::new_window,
             commands::open_config,

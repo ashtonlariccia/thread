@@ -13,7 +13,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { message, open, save } from "@tauri-apps/plugin-dialog";
 
 import { EditorHost, type Cursor } from "../editor";
+import { detectIndent, resolveIndent, type Detected, type Indent } from "../indent";
+import { languageOf } from "../languages";
 import { baseName, samePath } from "../paths";
+import { DEFAULTS, type Config } from "./config.svelte";
 
 export type Eol = "lf" | "crlf";
 
@@ -31,6 +34,10 @@ export type Doc = {
   dirty: boolean;
   /** Null when there is no file on disk: never saved, or since deleted. */
   stamp: Stamp | null;
+  /** How the text was indented when it was opened; null if it gave no clue. */
+  detected: Detected | null;
+  /** What Tab does in this file: the config, the language, and `detected`. */
+  indent: Indent;
 };
 
 /** What `read_file` returns. */
@@ -73,6 +80,7 @@ export class Documents {
     oncursor: (cursor) => (this.cursor = cursor),
   });
 
+  #config: Config = DEFAULTS;
   #nextKey = 1;
   #nextUntitled = 1;
   /** Files being written right now, whose stamps are about to move on purpose. */
@@ -101,6 +109,34 @@ export class Documents {
     this.editor.show(key);
   }
 
+  /** Take on a new config: every open file is re-dressed, not just the next. */
+  configure(config: Config) {
+    this.#config = config;
+    this.editor.setLook({
+      fontFamily: config.editor.font_family,
+      fontSize: config.editor.font_size,
+      lineHeight: config.editor.line_height,
+      lineNumbers: config.editor.line_numbers,
+      wordWrap: config.editor.word_wrap,
+    });
+    for (const doc of this.list) this.#dress(doc);
+  }
+
+  /**
+   * The indentation a file gets: `[editor]`, then its language's override,
+   * then — if detection is on — whatever the file itself was found using.
+   */
+  #indentFor(name: string, detected: Detected | null): Indent {
+    const override = this.#config.language[languageOf(name).toLowerCase()] ?? {};
+    return resolveIndent({ ...this.#config.editor, ...override }, detected);
+  }
+
+  /** Apply everything about a file that follows from its name and the config. */
+  #dress(doc: Doc) {
+    doc.indent = this.#indentFor(doc.name, doc.detected);
+    this.editor.setIndent(doc.key, doc.indent);
+  }
+
   /** Step to the next or previous open file, wrapping at the ends. */
   cycle(step: 1 | -1) {
     const count = this.list.length;
@@ -112,15 +148,19 @@ export class Documents {
   /** File → New File: an empty buffer with nowhere to live until it is saved. */
   newFile() {
     const key = this.#nextKey++;
-    this.editor.create(key, "");
+    const name = `Untitled-${this.#nextUntitled++}`;
+    const indent = this.#indentFor(name, null);
+    this.editor.create(key, "", indent);
     this.list.push({
       key,
       path: null,
-      name: `Untitled-${this.#nextUntitled++}`,
+      name,
       eol: "lf",
       bom: false,
       dirty: false,
       stamp: null,
+      detected: null,
+      indent,
     });
     this.select(key);
   }
@@ -132,7 +172,13 @@ export class Documents {
     for (const path of Array.isArray(picked) ? picked : [picked]) await this.open(path);
   }
 
-  async open(path: string) {
+  /**
+   * Open a file in the editor, or go to it if it is already open.
+   *
+   * `quiet` is for files nobody just asked for by hand — the ones a session
+   * is restoring — where a file that has since gone is skipped, not announced.
+   */
+  async open(path: string, { quiet = false } = {}) {
     // Opening a file that is already open goes to it, rather than making a
     // second buffer whose edits would fight the first's on save.
     const existing = this.list.find((d) => d.path !== null && samePath(d.path, path));
@@ -144,7 +190,9 @@ export class Documents {
     try {
       const loaded = await invoke<Loaded>("read_file", { path });
       const key = this.#nextKey++;
-      this.editor.create(key, loaded.text);
+      const detected = detectIndent(loaded.text);
+      const indent = this.#indentFor(loaded.name, detected);
+      this.editor.create(key, loaded.text, indent);
       this.list.push({
         key,
         path: loaded.path,
@@ -153,10 +201,12 @@ export class Documents {
         bom: loaded.bom,
         dirty: false,
         stamp: loaded.stamp,
+        detected,
+        indent,
       });
       this.select(key);
     } catch (e) {
-      report(e);
+      if (!quiet) report(e);
     }
   }
 
@@ -205,6 +255,8 @@ export class Documents {
 
     doc.path = path;
     doc.name = baseName(path);
+    // A new name can mean a new language, with settings of its own.
+    this.#dress(doc);
     this.editor.markSaved(doc.key);
     return true;
   }

@@ -6,19 +6,33 @@
  * selection and its undo history, which is exactly what has to survive a
  * switch to another file and back.
  *
- * Plain text for now: no language, no highlighting, no completion.
+ * Everything configurable sits in a compartment, so a change to the config
+ * re-dresses the files that are already open instead of waiting for the next
+ * one. Some of it is the same for every file (the font, the palette) and some
+ * is each file's own (its indentation, its language).
  */
 import {
   defaultKeymap,
   history,
   historyKeymap,
-  indentWithTab,
+  indentLess,
+  indentMore,
   redo,
   selectAll,
   undo,
 } from "@codemirror/commands";
-import { EditorState, type Extension, type Text } from "@codemirror/state";
+import { HighlightStyle, indentUnit, syntaxHighlighting } from "@codemirror/language";
 import {
+  Compartment,
+  countColumn,
+  EditorSelection,
+  EditorState,
+  type Extension,
+  type StateEffect,
+  type Text,
+} from "@codemirror/state";
+import {
+  type Command,
   drawSelection,
   EditorView,
   highlightActiveLine,
@@ -27,10 +41,24 @@ import {
   lineNumbers,
 } from "@codemirror/view";
 
+import type { Indent } from "./indent";
+
 /** 1-based, as a status bar shows it. */
 export type Cursor = { line: number; col: number };
 
 export type EditorCommand = "undo" | "redo" | "selectAll";
+
+/** The part of the config that is the same for every file. */
+export type EditorLook = {
+  /** A CSS font list. */
+  fontFamily: string;
+  /** Pixels. */
+  fontSize: number;
+  /** A multiple of the font size. */
+  lineHeight: number;
+  lineNumbers: boolean;
+  wordWrap: boolean;
+};
 
 type Events = {
   /** A file's text now differs from, or matches again, what was last saved. */
@@ -40,19 +68,10 @@ type Events = {
 
 // Colours come from app.css, so the editor follows the window's palette. The
 // background stays transparent: the stage behind it carries the opacity.
-const theme = EditorView.theme(
+const chrome = EditorView.theme(
   {
-    "&": {
-      height: "100%",
-      color: "var(--fg)",
-      backgroundColor: "transparent",
-      fontSize: "13px",
-    },
+    "&": { height: "100%", color: "var(--fg)", backgroundColor: "transparent" },
     "&.cm-focused": { outline: "none" },
-    ".cm-scroller": {
-      fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
-      lineHeight: "1.5",
-    },
     ".cm-content": { padding: "6px 0", caretColor: "var(--accent)" },
     ".cm-gutters": {
       backgroundColor: "transparent",
@@ -69,6 +88,55 @@ const theme = EditorView.theme(
   { dark: true },
 );
 
+function lookExtension(look: EditorLook): Extension {
+  return [
+    EditorView.theme({
+      "&": { fontSize: `${look.fontSize}px` },
+      ".cm-scroller": { fontFamily: look.fontFamily, lineHeight: String(look.lineHeight) },
+    }),
+    look.lineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : [],
+    look.wordWrap ? EditorView.lineWrapping : [],
+  ];
+}
+
+function indentExtension(indent: Indent): Extension {
+  return [
+    EditorState.tabSize.of(indent.width),
+    indentUnit.of(indent.spaces ? " ".repeat(indent.width) : "\t"),
+  ];
+}
+
+/**
+ * Tab. With something selected it indents the selected lines; otherwise it
+ * inserts one step of indentation *at the cursor* — a tab character, or as
+ * many spaces as reach the next stop — which is what the key does in every
+ * editor people come here from. (CodeMirror's own `indentWithTab` indents the
+ * whole line wherever the cursor is.)
+ */
+const insertIndent: Command = (view) => {
+  const { state } = view;
+  if (state.readOnly) return false;
+  if (state.selection.ranges.some((range) => !range.empty)) return indentMore(view);
+
+  const unit = state.facet(indentUnit);
+  view.dispatch(
+    state.changeByRange((range) => {
+      let insert = "\t";
+      if (unit !== "\t") {
+        const line = state.doc.lineAt(range.head);
+        const column = countColumn(line.text, state.tabSize, range.head - line.from);
+        insert = " ".repeat(unit.length - (column % unit.length));
+      }
+      return {
+        changes: { from: range.head, insert },
+        range: EditorSelection.cursor(range.head + insert.length),
+      };
+    }),
+    { scrollIntoView: true, userEvent: "input" },
+  );
+  return true;
+};
+
 function cursorOf(state: EditorState): Cursor {
   const head = state.selection.main.head;
   const line = state.doc.lineAt(head);
@@ -82,32 +150,22 @@ export class EditorHost {
   private saved = new Map<number, Text>();
   private current: number | null = null;
 
-  private readonly extensions: Extension;
-  /** What the view holds while no file is open: nothing, and not typeable. */
-  private readonly blank = EditorState.create({ extensions: [theme, EditorView.editable.of(false)] });
+  // Same for every file.
+  private readonly look = new Compartment();
+  private readonly highlight = new Compartment();
+  // Each file's own.
+  private readonly indent = new Compartment();
+  private readonly language = new Compartment();
 
-  constructor(private readonly events: Events) {
-    this.extensions = [
-      lineNumbers(),
-      highlightActiveLine(),
-      highlightActiveLineGutter(),
-      history(),
-      drawSelection(),
-      EditorState.allowMultipleSelections.of(true),
-      EditorState.tabSize.of(4),
-      keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
-      theme,
-      EditorView.updateListener.of((update) => {
-        const key = this.current;
-        if (key === null) return;
-        if (update.docChanged) {
-          const saved = this.saved.get(key);
-          this.events.ondirty(key, !saved || !update.state.doc.eq(saved));
-        }
-        if (update.docChanged || update.selectionSet) this.events.oncursor(cursorOf(update.state));
-      }),
-    ];
-  }
+  private lookValue: Extension = [];
+  private highlightValue: Extension = [];
+
+  /** What the view holds while no file is open: nothing, and not typeable. */
+  private readonly blank = EditorState.create({
+    extensions: [chrome, EditorView.editable.of(false)],
+  });
+
+  constructor(private readonly events: Events) {}
 
   mount(parent: HTMLElement) {
     this.view = new EditorView({ parent, state: this.stateFor(this.current) });
@@ -120,8 +178,37 @@ export class EditorHost {
   }
 
   /** Start tracking a file. Its text is considered saved as given. */
-  create(key: number, text: string) {
-    const state = EditorState.create({ doc: text, extensions: this.extensions });
+  create(key: number, text: string, indent: Indent) {
+    const state = EditorState.create({
+      doc: text,
+      extensions: [
+        this.look.of(this.lookValue),
+        this.indent.of(indentExtension(indent)),
+        this.language.of([]),
+        this.highlight.of(this.highlightValue),
+        highlightActiveLine(),
+        history(),
+        drawSelection(),
+        EditorState.allowMultipleSelections.of(true),
+        keymap.of([
+          { key: "Tab", run: insertIndent, shift: indentLess },
+          ...defaultKeymap,
+          ...historyKeymap,
+        ]),
+        chrome,
+        EditorView.updateListener.of((update) => {
+          const current = this.current;
+          if (current === null) return;
+          if (update.docChanged) {
+            const saved = this.saved.get(current);
+            this.events.ondirty(current, !saved || !update.state.doc.eq(saved));
+          }
+          if (update.docChanged || update.selectionSet) {
+            this.events.oncursor(cursorOf(update.state));
+          }
+        }),
+      ],
+    });
     this.states.set(key, state);
     this.saved.set(key, state.doc);
   }
@@ -146,6 +233,45 @@ export class EditorHost {
     this.states.delete(key);
     this.saved.delete(key);
   }
+
+  // --- configuration ----------------------------------------------------------
+
+  /** The font and gutter, for every file. */
+  setLook(look: EditorLook) {
+    this.lookValue = lookExtension(look);
+    this.reconfigureAll(this.look.reconfigure(this.lookValue));
+  }
+
+  /** The syntax palette, for every file. */
+  setHighlightStyle(style: HighlightStyle) {
+    this.highlightValue = syntaxHighlighting(style);
+    this.reconfigureAll(this.highlight.reconfigure(this.highlightValue));
+  }
+
+  setIndent(key: number, indent: Indent) {
+    this.reconfigure(key, this.indent.reconfigure(indentExtension(indent)));
+  }
+
+  /** The file's grammar, or `[]` for plain text. */
+  setLanguage(key: number, language: Extension) {
+    this.reconfigure(key, this.language.reconfigure(language));
+  }
+
+  private reconfigureAll(effect: StateEffect<unknown>) {
+    for (const key of this.states.keys()) this.reconfigure(key, effect);
+  }
+
+  /** Apply an effect to a file, whether it is the one on screen or not. */
+  private reconfigure(key: number, effect: StateEffect<unknown>) {
+    if (key === this.current && this.view) {
+      this.view.dispatch({ effects: effect });
+      return;
+    }
+    const state = this.states.get(key);
+    if (state) this.states.set(key, state.update({ effects: effect }).state);
+  }
+
+  // --- text -------------------------------------------------------------------
 
   /** A file's text, `\n`-separated. */
   text(key: number): string {
@@ -187,6 +313,10 @@ export class EditorHost {
 
   hasFocus(): boolean {
     return this.view?.hasFocus ?? false;
+  }
+
+  focus() {
+    this.view?.focus();
   }
 
   run(command: EditorCommand) {
