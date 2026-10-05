@@ -68,11 +68,32 @@ export class Tree {
     if (typeof picked === "string") await this.open(picked);
   }
 
+  /** Every unfolded folder, the opened ones included. */
+  get unfolded(): string[] {
+    return Object.keys(this.#open).filter((dir) => this.#open[dir]);
+  }
+
+  /**
+   * Put back the folders of an earlier session, folded and unfolded as they
+   * were. One that has since gone is left out without comment.
+   */
+  async restore(folders: string[], unfolded: string[]) {
+    for (const folder of folders) await this.open(folder, { quiet: true });
+
+    const wanted = new Set(unfolded);
+    for (const root of this.roots) if (!wanted.has(root.path)) this.#open[root.path] = false;
+    // Shortest first, so a folder is listed before the folders inside it.
+    for (const dir of [...unfolded].sort((a, b) => a.length - b.length)) {
+      const inside = this.roots.some((root) => segmentsBelow(root.path, dir) !== null);
+      if (inside) await this.expand(dir);
+    }
+  }
+
   /**
    * Add `path` to the open folders, below the ones already there. A folder
    * that is already open is unfolded rather than added twice.
    */
-  async open(path: string) {
+  async open(path: string, { quiet = false } = {}) {
     // `C:\src\thread\` and `C:\src\thread` are the same folder, and only one
     // of them has a last component to name it by.
     const trimmed = path.length > 3 ? path.replace(/[\\/]+$/, "") : path;
@@ -86,7 +107,7 @@ export class Tree {
     const error = await this.#load(trimmed);
     if (error !== null) {
       this.#forget(trimmed);
-      void message(error, { title: "Thread", kind: "error" });
+      if (!quiet) void message(error, { title: "Thread", kind: "error" });
       return;
     }
     this.#open[trimmed] = true;
@@ -143,6 +164,11 @@ export class Tree {
       dir = next.path;
     }
     if (!this.#open[dir] || !(dir in this.#children)) await this.expand(dir);
+  }
+
+  /** Re-list one folder now, rather than at the next poll: it was just changed. */
+  async reload(dir: string) {
+    if (dir in this.#children) await this.#load(dir);
   }
 
   /**

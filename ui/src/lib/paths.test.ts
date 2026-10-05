@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { baseName, samePath, segmentsBelow } from "./paths";
+import { baseName, dirName, samePath, segmentsBelow } from "./paths";
+
+describe("dirName", () => {
+  it("drops the last component, with either slash", () => {
+    expect(dirName("C:\\src\\thread\\main.rs")).toBe("C:\\src\\thread");
+    expect(dirName("C:/src/thread/main.rs")).toBe("C:/src/thread");
+  });
+
+  it("keeps the slash of a drive root", () => {
+    expect(dirName("C:\\main.rs")).toBe("C:\\");
+  });
+});
 
 describe("segmentsBelow", () => {
   it("lists the names from the root down to the file", () => {

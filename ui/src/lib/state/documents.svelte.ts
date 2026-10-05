@@ -15,7 +15,7 @@ import { message, open, save } from "@tauri-apps/plugin-dialog";
 import { EditorHost, type Cursor } from "../editor";
 import { detectIndent, resolveIndent, type Detected, type Indent } from "../indent";
 import { languageOf } from "../languages";
-import { baseName, samePath } from "../paths";
+import { baseName, samePath, segmentsBelow } from "../paths";
 import { DEFAULTS, type Config } from "./config.svelte";
 
 export type Eol = "lf" | "crlf";
@@ -259,6 +259,27 @@ export class Documents {
     this.#dress(doc);
     this.editor.markSaved(doc.key);
     return true;
+  }
+
+  /**
+   * A file or folder was renamed on disk from inside Thread. Open files that
+   * were at the old path, or under it, carry on at the new one — same buffer,
+   * same unsaved edits, same undo history.
+   */
+  renamed(from: string, to: string) {
+    const sep = to.includes("\\") ? "\\" : "/";
+    for (const doc of this.list) {
+      if (doc.path === null) continue;
+
+      const below = segmentsBelow(from, doc.path);
+      const next = samePath(doc.path, from) ? to : below ? [to, ...below].join(sep) : null;
+      if (next === null) continue;
+
+      doc.path = next;
+      doc.name = baseName(next);
+      // A new name can mean a new language, with settings of its own.
+      this.#dress(doc);
+    }
   }
 
   /** Close a file, asking first if it has unsaved changes. */

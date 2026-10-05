@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
 
 use thread_core::{
-    config, document, tree, Appearance, Config, Document, Entry, Eol, Material, Pin, PinStore,
-    Stamp,
+    config, document, fsops, tree, Appearance, Config, Document, Entry, Eol, Material, Pin,
+    PinStore, Session, Stamp,
 };
 
 /// A window's size at 100% scale. Matches the window in tauri.conf.json.
@@ -239,6 +239,38 @@ pub async fn dir_stamps(paths: Vec<String>) -> Vec<Option<u64>> {
         .collect()
 }
 
+// The tree's file operations. Each hands back the path it made, spelled as the
+// listing will spell it, so the frontend can go straight to the new entry.
+
+#[tauri::command]
+pub async fn create_file(dir: String, name: String) -> Result<String, String> {
+    let path = fsops::create_file(Path::new(&dir), &name).map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "CREATED {}", path.display());
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn create_dir(dir: String, name: String) -> Result<String, String> {
+    let path = fsops::create_dir(Path::new(&dir), &name).map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "CREATED {}", path.display());
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn rename_path(path: String, name: String) -> Result<String, String> {
+    let renamed = fsops::rename(Path::new(&path), &name).map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "RENAMED {path} -> {}", renamed.display());
+    Ok(renamed.to_string_lossy().into_owned())
+}
+
+/// Move a file or folder to the Recycle Bin.
+#[tauri::command]
+pub async fn delete_path(path: String) -> Result<(), String> {
+    fsops::delete(Path::new(&path)).map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "DELETED {path}");
+    Ok(())
+}
+
 /// Whether `path` is Thread's own config file.
 fn is_config_file(path: &Path) -> bool {
     let Ok(config) = config::path() else {
@@ -404,6 +436,21 @@ pub fn set_appearance(app: AppHandle, appearance: Appearance) -> Result<Appearan
     config.appearance = stored.clone();
     apply_config(&app, &config);
     Ok(stored)
+}
+
+// --- session ----------------------------------------------------------------
+
+/// What was open when Thread was last closed.
+#[tauri::command]
+pub fn session_load() -> Session {
+    thread_core::session::load()
+}
+
+/// Record what is open now, to come back to. Called as things change rather
+/// than at exit, so a crash or a killed process loses nothing either.
+#[tauri::command]
+pub async fn session_save(session: Session) -> Result<(), String> {
+    thread_core::session::save(&session).map_err(|e| e.to_string())
 }
 
 // --- pins -------------------------------------------------------------------

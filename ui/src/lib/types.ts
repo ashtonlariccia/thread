@@ -17,6 +17,11 @@ export type SidebarItem = {
   root: boolean;
   /** A file that is open with unsaved changes. */
   dirty: boolean;
+  /**
+   * Set while the row is a name box — a new entry being named, or this one
+   * being renamed — to the text the box starts with.
+   */
+  editing?: string;
 };
 
 /**

@@ -3,6 +3,13 @@ export function baseName(path: string): string {
   return path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
 }
 
+/** The folder a path is in: everything before its last component. */
+export function dirName(path: string): string {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  // `C:\file` is in `C:\`, not in `C:`, which means something else entirely.
+  return cut <= 2 ? path.slice(0, cut + 1) : path.slice(0, cut);
+}
+
 /**
  * The folder names leading from `root` down to `path`, then its own name —
  * or null if `path` is not inside `root`.

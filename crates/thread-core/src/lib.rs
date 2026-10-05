@@ -8,12 +8,15 @@ use std::path::PathBuf;
 
 pub mod config;
 pub mod document;
+pub mod fsops;
 pub mod pins;
+pub mod session;
 pub mod tree;
 
 pub use config::{Appearance, Config, Material};
 pub use document::{Document, Eol, Stamp};
 pub use pins::{Pin, Store as PinStore};
+pub use session::Session;
 pub use tree::Entry;
 
 /// Errors surfaced by the core.

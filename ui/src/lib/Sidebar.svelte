@@ -3,7 +3,10 @@
 
   type Props = {
     items: SidebarItem[];
+    /** The row for the file being edited. */
     activeKey: string | null;
+    /** The row last clicked: what New File, Rename and Delete act on. */
+    selectedKey: string | null;
     width: number;
     collapsed: boolean;
     /** A drag is in flight, so the width must track the pointer, not glide. */
@@ -11,12 +14,30 @@
     /** What to say when there is nothing to list. */
     empty?: string;
     onselect: (item: SidebarItem) => void;
-    /** Right-click on a row. App owns the menu, so only one is ever open. */
-    oncontext: (event: MouseEvent, item: SidebarItem) => void;
+    /** A key pressed on a focused row, for the row's own shortcuts. */
+    onkey: (event: KeyboardEvent, item: SidebarItem) => void;
+    /** The name box was settled: with what was typed, or null if abandoned. */
+    onedit: (value: string | null) => void;
+    /**
+     * Right-click on a row, or — with no item — on the empty space below the
+     * rows. App owns the menu, so only one is ever open.
+     */
+    oncontext: (event: MouseEvent, item: SidebarItem | null) => void;
   };
 
-  let { items, activeKey, width, collapsed, resizing, empty, onselect, oncontext }: Props =
-    $props();
+  let {
+    items,
+    activeKey,
+    selectedKey,
+    width,
+    collapsed,
+    resizing,
+    empty,
+    onselect,
+    onkey,
+    onedit,
+    oncontext,
+  }: Props = $props();
 
   // Keep the active row on screen: in a long tree the file just opened may be
   // well below the fold. Keyed on the active row alone, so unfolding folders
@@ -26,6 +47,42 @@
     if (activeKey === null) return;
     list?.querySelector(".row.active")?.scrollIntoView({ block: "nearest" });
   });
+
+  // --- the name box ------------------------------------------------------------
+  //
+  // New File, New Folder and Rename all type a name straight into the tree,
+  // on the row where the entry is or will be.
+
+  /**
+   * Enter settles the box and removes it, and removing a focused input fires
+   * `blur`, which settles it too. One box, one answer.
+   */
+  let settled = false;
+
+  function settle(value: string | null) {
+    if (settled) return;
+    settled = true;
+    onedit(value);
+  }
+
+  function nameBox(node: HTMLInputElement) {
+    settled = false;
+    node.focus();
+    // Renaming `main.rs` is nearly always about `main`; leave the extension
+    // out of the selection so typing replaces only the stem.
+    const dot = node.value.lastIndexOf(".");
+    node.setSelectionRange(0, dot > 0 ? dot : node.value.length);
+    node.scrollIntoView({ block: "nearest" });
+  }
+
+  function onNameKey(event: KeyboardEvent) {
+    // The box sits inside a row, and the row has shortcuts of its own: Space
+    // must type a space here, not fold the folder.
+    event.stopPropagation();
+    const input = event.currentTarget as HTMLInputElement;
+    if (event.key === "Enter") settle(input.value.trim() || null);
+    else if (event.key === "Escape") settle(null);
+  }
 </script>
 
 <aside style="width: {width}px" class:collapsed class:resizing>
@@ -37,24 +94,40 @@
       <p class="empty">{empty}</p>
     {/if}
 
-    <ul bind:this={list}>
+    <!-- The space below the last row belongs to the tree too: right-clicking
+         it is how something is made at the top level. A click on a row never
+         reaches here; the row stops it. -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <ul
+      bind:this={list}
+      oncontextmenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        oncontext(e, null);
+      }}
+    >
       {#each items as item (item.key)}
+        {@const naming = item.editing !== undefined}
         <li>
           <div
             class="row"
             class:active={item.key === activeKey}
+            class:selected={item.key === selectedKey}
             role="button"
             tabindex="0"
-            title={item.path}
+            title={naming ? undefined : item.path}
             aria-expanded={item.folder ? item.folder === "open" : undefined}
-            onclick={() => onselect(item)}
-            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && onselect(item)}
+            onclick={() => !naming && onselect(item)}
+            onkeydown={(e) => {
+              if (e.key === "Enter" || e.key === " ") onselect(item);
+              else onkey(e, item);
+            }}
             oncontextmenu={(e) => {
               // Stopped, not merely defaulted: the window-level handler in App
               // opens the plain menu, and a row may want one of its own.
               e.preventDefault();
               e.stopPropagation();
-              oncontext(e, item);
+              if (!naming) oncontext(e, item);
             }}
           >
             <!-- One per level of nesting. Each draws a hairline where its
@@ -80,9 +153,23 @@
               {/if}
             </span>
             <img class="glyph" src={item.icon} alt="" width="16" height="16" draggable="false" />
-            <span class="label">{item.title}</span>
-            {#if item.dirty}
-              <span class="dirty" aria-label="Unsaved changes"></span>
+            {#if naming}
+              <input
+                class="name"
+                value={item.editing}
+                spellcheck="false"
+                autocomplete="off"
+                aria-label="Name"
+                use:nameBox
+                onkeydown={onNameKey}
+                onclick={(e) => e.stopPropagation()}
+                onblur={(e) => settle(e.currentTarget.value.trim() || null)}
+              />
+            {:else}
+              <span class="label">{item.title}</span>
+              {#if item.dirty}
+                <span class="dirty" aria-label="Unsaved changes"></span>
+              {/if}
             {/if}
           </div>
         </li>
@@ -161,10 +248,17 @@
     align-self: center;
   }
 
-  .row:hover {
+  .row:hover,
+  .row.selected {
     background: var(--hover);
   }
+  .row:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+  }
 
+  /* After `.selected`, so the file being edited keeps its tint when it is
+     also the row last clicked -- which it usually is. */
   .row.active {
     background: var(--accent-soft);
   }
@@ -208,6 +302,23 @@
     white-space: nowrap;
     font-size: 0.82rem;
     color: var(--fg);
+  }
+
+  /* Sized and set like the label it stands in for, so a row does not jump
+     when it turns into a box and back. */
+  .name {
+    flex: 1;
+    min-width: 0;
+    height: 18px;
+    padding: 0 0.25rem;
+    margin-left: -0.25rem;
+    background: var(--bg-input);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 0.82rem;
+    outline: none;
   }
 
   /* Unsaved changes: the same dot the file's tab wears, at the row's far end

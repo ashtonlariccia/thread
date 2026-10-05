@@ -2,7 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { message } from "@tauri-apps/plugin-dialog";
+  import { ask, message } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
@@ -23,7 +23,7 @@
   import { RAIL_WIDTH } from "./lib/layout";
   import { ConfigStore, type Config } from "./lib/state/config.svelte";
   import { Documents } from "./lib/state/documents.svelte";
-  import { pathKey, samePath } from "./lib/paths";
+  import { dirName, pathKey, samePath } from "./lib/paths";
   import { fileIcon, folderIcon, loadFolderIcons, loadIcons } from "./lib/state/icons.svelte";
   import { Pins } from "./lib/state/pins.svelte";
   import { Tree } from "./lib/state/tree.svelte";
@@ -57,8 +57,22 @@
     new Set(docs.dirty.flatMap((doc) => (doc.path === null ? [] : [pathKey(doc.path)]))),
   );
 
-  const treeItems = $derived(
-    tree.rows.map(
+  /** The row last clicked or right-clicked. */
+  let selectedKey = $state<string | null>(null);
+
+  /**
+   * A name being typed into the tree. `row` is the row being renamed, or for
+   * something new the folder row it will appear under.
+   */
+  let naming = $state<{ kind: "file" | "folder" | "rename"; row: string; dir: string } | null>(
+    null,
+  );
+
+  /** Stands in for the entry being created until it has a name and exists. */
+  const NEW_ROW = "\0new";
+
+  const treeItems = $derived.by(() => {
+    const items = tree.rows.map(
       ({ id, entry, depth, open, root }): SidebarItem => ({
         key: id,
         path: entry.path,
@@ -68,9 +82,30 @@
         folder: entry.dir ? (open ? "open" : "closed") : undefined,
         root,
         dirty: !entry.dir && dirtyPaths.has(pathKey(entry.path)),
+        editing: naming?.kind === "rename" && naming.row === id ? entry.name : undefined,
       }),
-    ),
-  );
+    );
+
+    if (naming && naming.kind !== "rename") {
+      // First inside its folder, above what is already there: where the eye
+      // already is, and where it will not be hidden below a long listing.
+      const parent = items.findIndex((row) => row.key === naming!.row);
+      if (parent !== -1) {
+        items.splice(parent + 1, 0, {
+          key: NEW_ROW,
+          path: "",
+          title: "",
+          icon: naming.kind === "file" ? fileIcon("") : folderIcon("", false),
+          depth: items[parent].depth + 1,
+          folder: naming.kind === "folder" ? "closed" : undefined,
+          root: false,
+          dirty: false,
+          editing: "",
+        });
+      }
+    }
+    return items;
+  });
 
   /** The tree row for the file being edited, so the two stay visibly in step. */
   const activeTreeKey = $derived.by(() => {
@@ -89,8 +124,104 @@
   });
 
   function onTreeSelect(row: SidebarItem) {
+    selectedKey = row.key;
     if (row.folder) void tree.toggle(row.path);
     else void docs.open(row.path);
+  }
+
+  // --- creating, renaming, deleting ---------------------------------------------
+
+  /** The root a row belongs to: the first half of its key. */
+  const rootOf = (key: string) => key.slice(0, key.indexOf("\n"));
+  const rowKey = (root: string, path: string) => `${root}\n${path}`;
+
+  /**
+   * The folder row something new should go under: the folder that was
+   * right-clicked, the folder of the file that was, or — for the empty space
+   * below the tree — the first folder that is open.
+   */
+  function creationTarget(from: SidebarItem | null): { row: string; dir: string } | null {
+    const row = from ?? treeItems[0];
+    if (!row) return null;
+    if (row.folder) return { row: row.key, dir: row.path };
+    const dir = dirName(row.path);
+    return { row: rowKey(rootOf(row.key), dir), dir };
+  }
+
+  async function startNew(kind: "file" | "folder", from: SidebarItem | null) {
+    const target = creationTarget(from);
+    if (!target) return;
+    // Unfolded first: the name box is drawn among the folder's children.
+    await tree.expand(target.dir);
+    naming = { kind, ...target };
+  }
+
+  function startRename(row: SidebarItem) {
+    // An opened folder is addressed by its path everywhere; renaming it here
+    // would pull the tree out from under itself.
+    if (row.root) return;
+    naming = { kind: "rename", row: row.key, dir: dirName(row.path) };
+  }
+
+  /** The name box was settled, with a name or without one. */
+  async function finishNaming(value: string | null) {
+    const pending = naming;
+    naming = null;
+    if (!pending || value === null) return;
+
+    try {
+      if (pending.kind === "rename") {
+        const row = treeItems.find((r) => r.key === pending.row);
+        if (!row || value === row.title) return;
+        const renamed = await invoke<string>("rename_path", { path: row.path, name: value });
+        docs.renamed(row.path, renamed);
+        await tree.reload(pending.dir);
+        selectedKey = rowKey(rootOf(pending.row), renamed);
+      } else {
+        const command = pending.kind === "file" ? "create_file" : "create_dir";
+        const created = await invoke<string>(command, { dir: pending.dir, name: value });
+        await tree.reload(pending.dir);
+        selectedKey = rowKey(rootOf(pending.row), created);
+        // A new file is made to be written in.
+        if (pending.kind === "file") await docs.open(created);
+      }
+    } catch (e) {
+      void message(String(e), { title: "Thread", kind: "error" });
+    }
+  }
+
+  async function deleteRow(row: SidebarItem) {
+    if (row.root) return;
+    const what = row.folder ? `the folder "${row.title}" and everything in it` : `"${row.title}"`;
+    const confirmed = await ask(`Move ${what} to the Recycle Bin?`, {
+      title: "Delete",
+      kind: "warning",
+      okLabel: "Move to Recycle Bin",
+      cancelLabel: "Cancel",
+    });
+    if (!confirmed) return;
+
+    try {
+      await invoke("delete_path", { path: row.path });
+      if (selectedKey === row.key) selectedKey = null;
+      await tree.reload(dirName(row.path));
+      // Any open copy is now the only one; the same check that notices a file
+      // deleted from outside marks it unsaved.
+      void docs.checkDisk();
+    } catch (e) {
+      void message(String(e), { title: "Thread", kind: "error" });
+    }
+  }
+
+  /** The shortcuts a focused tree row answers to. */
+  function onTreeKey(event: KeyboardEvent, row: SidebarItem) {
+    if (event.key === "F2") {
+      event.preventDefault();
+      startRename(row);
+    } else if (event.key === "Delete") {
+      event.preventDefault();
+      void deleteRow(row);
+    }
   }
 
   /**
@@ -104,6 +235,62 @@
     // A folder was asked for; show it. Not if the dialog was cancelled.
     if (tree.roots.length > before || path !== undefined) sidebarCollapsed = false;
   }
+
+  // --- session ------------------------------------------------------------------
+  //
+  // What is open is written down as it changes and put back at the next
+  // launch. Only the main window does either: a session is one window's worth
+  // of state, and two windows taking turns to overwrite it would restore
+  // whichever happened to write last.
+
+  type Session = {
+    folders: string[];
+    unfolded: string[];
+    files: string[];
+    active: string | null;
+    sidebarCollapsed: boolean;
+    sidebarWidth: number;
+  };
+
+  const keepsSession = appWindow.label === "main";
+  /** Nothing is saved until the last session is back: half of it is not a session. */
+  let sessionRestored = $state(false);
+
+  async function restoreSession() {
+    const session = await invoke<Session>("session_load");
+    sidebarWidth = session.sidebarWidth;
+
+    if (session.folders.length > 0) loadFolderIcons();
+    await tree.restore(session.folders, session.unfolded);
+    for (const path of session.files) await docs.open(path, { quiet: true });
+
+    const active = docs.list.find((d) => d.path !== null && d.path === session.active);
+    if (active) docs.select(active.key);
+    // Last, so the tree is already there when the sidebar opens onto it.
+    sidebarCollapsed = session.sidebarCollapsed;
+  }
+
+  const session = $derived<Session>({
+    folders: tree.roots.map((root) => root.path),
+    unfolded: tree.unfolded,
+    files: docs.list.flatMap((doc) => (doc.path === null ? [] : [doc.path])),
+    active: docs.active?.path ?? null,
+    sidebarCollapsed,
+    sidebarWidth: Math.round(sidebarWidth),
+  });
+
+  $effect(() => {
+    if (!keepsSession || !sessionRestored) return;
+    const snapshot = $state.snapshot(session);
+    // Dragging the sidebar or opening a folder changes this many times in a
+    // row; one write once it settles is enough.
+    const timer = setTimeout(() => {
+      invoke("session_save", { session: snapshot }).catch((e) =>
+        console.error("session_save failed", e),
+      );
+    }, 400);
+    return () => clearTimeout(timer);
+  });
 
   // --- tabs -------------------------------------------------------------------
 
@@ -214,13 +401,37 @@
     ctx = { x: event.clientX, y: event.clientY, items: [item("Refresh Page", refreshPage)] };
   }
 
-  /** A row in the file tree. Only the opened folders have anything to offer yet. */
-  function onTreeContextMenu(event: MouseEvent, row: SidebarItem) {
-    const refresh = item("Refresh Page", refreshPage);
+  /**
+   * A row in the file tree, or the empty space below the rows (`row` null).
+   * This menu is the only way to create, rename or delete from the tree.
+   */
+  function onTreeContextMenu(event: MouseEvent, row: SidebarItem | null) {
+    if (row) selectedKey = row.key;
+
+    // With no folder open there is nowhere to make anything.
+    const create =
+      tree.roots.length > 0
+        ? [
+            item("New File", () => void startNew("file", row)),
+            item("New Folder", () => void startNew("folder", row)),
+            SEP,
+          ]
+        : [];
+    // An opened folder is closed, not renamed or deleted, from here.
+    const own = !row
+      ? []
+      : row.root
+        ? [item("Close Folder", () => tree.close(row.path)), SEP]
+        : [
+            item("Rename", () => startRename(row)),
+            item("Delete", () => void deleteRow(row), true),
+            SEP,
+          ];
+
     ctx = {
       x: event.clientX,
       y: event.clientY,
-      items: row.root ? [item("Close Folder", () => tree.close(row.path)), SEP, refresh] : [refresh],
+      items: [...create, ...own, item("Refresh Page", refreshPage)],
     };
   }
 
@@ -288,6 +499,13 @@
         () => [],
       );
       for (const { path, dir } of startup) await (dir ? openFolder(path) : docs.open(path));
+
+      // Asked to open something specific: do that, and leave the last session
+      // where it is. Otherwise carry on from where things were left.
+      if (keepsSession) {
+        if (startup.length === 0) await restoreSession().catch((e) => console.error(e));
+        sessionRestored = true;
+      }
     })();
 
     // The × in the bar, Alt+F4, the taskbar's Close and File → Exit all arrive
@@ -352,11 +570,14 @@
     <Sidebar
       items={treeItems}
       activeKey={activeTreeKey}
+      {selectedKey}
       width={sidebarCollapsed ? RAIL_WIDTH : sidebarWidth}
       collapsed={sidebarCollapsed}
       {resizing}
       empty="No folder open. File → Open Folder, or Ctrl+Shift+O."
       onselect={onTreeSelect}
+      onkey={onTreeKey}
+      onedit={(value) => void finishNaming(value)}
       oncontext={onTreeContextMenu}
     />
 
