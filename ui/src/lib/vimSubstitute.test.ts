@@ -1,7 +1,42 @@
 import { Text } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 
-import { parseSubstitute, previewSubstitute } from "./vimSubstitute";
+import { parseSubstitute, previewSubstitute, vimRegexToJs } from "./vimSubstitute";
+
+describe("vimRegexToJs", () => {
+  const matches = (pattern: string, text: string) =>
+    new RegExp(vimRegexToJs(pattern)).exec(text)?.[0] ?? null;
+
+  it("treats brackets and repeats as literal until escaped, as Vim does", () => {
+    expect(matches("foo(", "x = foo(1)")).toBe("foo(");
+    expect(matches("a+b", "a+b aab")).toBe("a+b");
+    expect(matches("a\\+b", "a+b aab")).toBe("aab");
+  });
+
+  it("reads escaped brackets and bars as groups and alternatives", () => {
+    expect(matches("\\(cat\\|dog\\)s", "two dogs")).toBe("dogs");
+  });
+
+  it("keeps the characters that are special in both", () => {
+    expect(matches("f.o*", "fxooo")).toBe("fxooo");
+    expect(matches("^int", "int x")).toBe("int");
+    expect(matches("[0-9]", "abc7")).toBe("7");
+  });
+
+  it("understands word boundaries", () => {
+    expect(matches("\\<f\\>", "foo f off")).toBe("f");
+    expect(new RegExp(vimRegexToJs("\\<f\\>")).exec("foo f off")?.index).toBe(4);
+  });
+
+  it("switches to very magic with \\v", () => {
+    expect(matches("\\v(cat|dog)s+", "dogss")).toBe("dogss");
+  });
+
+  it("limits the match with \\zs and \\ze", () => {
+    expect(matches("foo\\zsbar", "foobar")).toBe("bar");
+    expect(matches("foo\\zebar", "foobar")).toBe("foo");
+  });
+});
 
 describe("parseSubstitute", () => {
   it("reads a whole-file substitute as it is typed", () => {
@@ -74,13 +109,22 @@ describe("previewSubstitute", () => {
   });
 
   it("expands & and groups in the replacement", () => {
-    expect(edits("%s/fo+/<&>")).toEqual([["foo", "<foo>"]]);
-    expect(edits("%s/(f)(oo)/$2$1")).toEqual([["foo", "oof"]]);
-    expect(edits("%s/(f)(oo)/\\2\\1")).toEqual([["foo", "oof"]]);
+    expect(edits("%s/fo\\+/<&>")).toEqual([["foo", "<foo>"]]);
+    expect(edits("%s/\\(f\\)\\(oo\\)/\\2\\1")).toEqual([["foo", "oof"]]);
   });
 
   it("previews nothing for a pattern that does not compile yet", () => {
-    expect(edits("%s/(f/d")).toEqual([]);
+    // A group that has been opened but not closed.
+    expect(edits("%s/\\(f/d")).toEqual([]);
+  });
+
+  it("reads a bare bracket as a bracket, the way Vim does", () => {
+    expect(edits("%s/(f/[")).toEqual([["(f", "["]]);
+  });
+
+  it("puts a literal & or backslash in with a backslash", () => {
+    expect(edits("%s/foo/a\\&b")).toEqual([["foo", "a&b"]]);
+    expect(edits("%s/foo/a\\\\b")).toEqual([["foo", "a\\b"]]);
   });
 
   it("does not loop for ever on a pattern that can match nothing", () => {

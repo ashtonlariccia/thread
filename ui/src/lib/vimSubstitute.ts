@@ -98,15 +98,65 @@ export function parseSubstitute(input: string, currentLine = 1): Substitute | nu
   };
 }
 
-/** Expand a replacement for one match: `&`, `$1`/`\1`, `\n`, `\t`, `\x`. */
+/**
+ * Turn a Vim pattern into the JavaScript regular expression that matches the
+ * same text.
+ *
+ * The two syntaxes mostly differ in which characters need a backslash to be
+ * special. In Vim's default ("magic") mode `(`, `)`, `|`, `{`, `+` and `?`
+ * are literal unless escaped, the reverse of JavaScript; `\v`, `\m`, `\M`
+ * and `\V` switch mode part-way through. `\<` and `\>` are word
+ * boundaries, and `\zs` / `\ze` mark where the match proper starts and ends.
+ *
+ * This is the vim extension's own translation, ported, so the preview
+ * highlights exactly what the command will go on to replace.
+ */
+export function vimRegexToJs(pattern: string): string {
+  // In each mode: the characters whose meaning flips with a backslash.
+  const modes: Record<string, string> = {
+    V: "|(){+?*.[$^", // very nomagic
+    M: "|(){+?*.[", // nomagic
+    m: "|(){+?", // magic, the default
+    v: "<>", // very magic
+  };
+  const boundaries: Record<string, string> = {
+    ">": "(?<=[\\w])(?=[^\\w]|$)",
+    "<": "(?<=[^\\w]|^)(?=[\\w])",
+  };
+
+  let specials = modes.m;
+  let regex = pattern.replace(/\\.|[[|(){+*?.$^<>]/g, (match) => {
+    if (match[0] === "\\") {
+      const next = match[1];
+      if (next === "}" || specials.includes(next)) return next;
+      if (next in modes) {
+        specials = modes[next];
+        return "";
+      }
+      return boundaries[next] ?? match;
+    }
+    return specials.includes(match) ? (boundaries[match] ?? `\\${match}`) : match;
+  });
+
+  const start = regex.indexOf("\\zs");
+  if (start !== -1) regex = `(?<=${regex.slice(0, start)})${regex.slice(start + 3)}`;
+  const end = regex.indexOf("\\ze");
+  if (end !== -1) regex = `${regex.slice(0, end)}(?=${regex.slice(end + 3)})`;
+  return regex;
+}
+
+/**
+ * Expand a replacement for one match, as Vim reads it: `&` is the whole
+ * match, `\1` to `\9` are groups, `\n`, `\r` and `\t` are a line break and a
+ * tab, and a backslash before anything else makes it literal.
+ */
 function expand(replacement: string, match: RegExpExecArray): string {
-  return replacement.replace(/\\(.)|\$(\d)|&/g, (whole, escaped: string | undefined, group: string | undefined) => {
-    if (whole === "&") return match[0];
-    if (group !== undefined) return match[Number(group)] ?? "";
-    if (escaped === "n") return "\n";
+  return replacement.replace(/\\(.)|&/g, (_whole, escaped: string | undefined) => {
+    if (escaped === undefined) return match[0];
+    if (/\d/.test(escaped)) return match[Number(escaped)] ?? "";
+    if (escaped === "n" || escaped === "r") return "\n";
     if (escaped === "t") return "\t";
-    if (escaped !== undefined && /\d/.test(escaped)) return match[Number(escaped)] ?? "";
-    return escaped ?? whole;
+    return escaped;
   });
 }
 
@@ -114,9 +164,8 @@ function expand(replacement: string, match: RegExpExecArray): string {
  * What a substitute would do to the lines `fromLine..toLine` of a document
  * (1-based, inclusive), without doing it.
  *
- * The pattern is a JavaScript regular expression, which is what the vim
- * extension itself uses. One that does not compile — as most do, part-way
- * through being typed — simply previews nothing.
+ * The pattern is Vim's (see `vimRegexToJs`). One that does not compile — as
+ * some do, part-way through being typed — simply previews nothing.
  */
 export function previewSubstitute(
   doc: Text,
@@ -127,7 +176,7 @@ export function previewSubstitute(
 ): PreviewEdit[] {
   let regex: RegExp;
   try {
-    regex = new RegExp(command.pattern, command.ignoreCase ? "gi" : "g");
+    regex = new RegExp(vimRegexToJs(command.pattern), command.ignoreCase ? "gi" : "g");
   } catch {
     return [];
   }

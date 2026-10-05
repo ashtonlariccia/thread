@@ -55,6 +55,13 @@ let hooks: VimHooks | null = null;
 export function loadVim(next: VimHooks): Promise<VimApi> {
   hooks = next;
   loading ??= import("@replit/codemirror-vim").then(({ vim, Vim, getCM }) => {
+    // Patterns are Vim's, not JavaScript's: `\(a\|b\)` groups and `\+`
+    // repeats, with a bare `(` or `+` meaning itself. The extension defaults
+    // to JavaScript syntax (and says so after every search and substitute);
+    // this is the switch it offers for the real thing. `vimSubstitute.ts`
+    // reads patterns the same way, so the preview and the command agree.
+    Vim.setOption("pcre", false);
+
     // Each takes its usual abbreviation: `:w` for `:write`, and so on.
     Vim.defineEx("write", "w", () => hooks?.write());
     Vim.defineEx("quit", "q", () => hooks?.quit());
