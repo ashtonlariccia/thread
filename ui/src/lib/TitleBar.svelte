@@ -14,10 +14,8 @@
     onsave: () => void;
     onsaveas: () => void;
     onclosefile: () => void;
-    leftCollapsed: boolean;
-    rightCollapsed: boolean;
-    ontoggleleft: () => void;
-    ontoggleright: () => void;
+    sidebarCollapsed: boolean;
+    ontogglesidebar: () => void;
     onnewwindow: () => void;
     onappearance: () => void;
     /** This window only. */
@@ -36,10 +34,8 @@
     onsave,
     onsaveas,
     onclosefile,
-    leftCollapsed,
-    rightCollapsed,
-    ontoggleleft,
-    ontoggleright,
+    sidebarCollapsed,
+    ontogglesidebar,
     onnewwindow,
     onappearance,
     onclosewindow,
@@ -113,37 +109,6 @@
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKey} />
 
-{#snippet panelToggle(side: "left" | "right", collapsed: boolean, ontoggle: () => void)}
-  {@const label = `${collapsed ? "Show" : "Hide"} ${side} sidebar`}
-  <button
-    class="ctl"
-    class:mirrored={side === "right"}
-    onclick={ontoggle}
-    aria-expanded={!collapsed}
-    title={label}
-    aria-label={label}
-  >
-    <!-- A panel glyph whose side column is filled while that sidebar is open,
-         so the icon depicts the current state rather than the action. Drawn
-         for the left; the right one is the same glyph mirrored. -->
-    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
-      <rect
-        x="1.6"
-        y="2.6"
-        width="12.8"
-        height="10.8"
-        rx="2"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.2"
-      />
-      <path d="M6.2 2.6 V13.4" stroke="currentColor" stroke-width="1.2" />
-      {#if !collapsed}
-        <path d="M3.4 2.6 H4.8 V13.4 H3.4 Z" fill="currentColor" opacity="0.75" />
-      {/if}
-    </svg>
-  </button>
-{/snippet}
 
 <!-- data-tauri-drag-region makes the empty areas behave like a real titlebar. -->
 <header class="titlebar" data-tauri-drag-region>
@@ -267,8 +232,32 @@
   <div class="drag" data-tauri-drag-region></div>
 
   <div class="controls">
-    {@render panelToggle("left", leftCollapsed, ontoggleleft)}
-    {@render panelToggle("right", rightCollapsed, ontoggleright)}
+    <button
+      class="ctl"
+      onclick={ontogglesidebar}
+      aria-expanded={!sidebarCollapsed}
+      title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+      aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+    >
+      <!-- A panel glyph whose left column is filled while the sidebar is open,
+           so the icon depicts the current state rather than the action. -->
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+        <rect
+          x="1.6"
+          y="2.6"
+          width="12.8"
+          height="10.8"
+          rx="2"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.2"
+        />
+        <path d="M6.2 2.6 V13.4" stroke="currentColor" stroke-width="1.2" />
+        {#if !sidebarCollapsed}
+          <path d="M3.4 2.6 H4.8 V13.4 H3.4 Z" fill="currentColor" opacity="0.75" />
+        {/if}
+      </svg>
+    </button>
     <span class="gap"></span>
 
     <button class="ctl" title="Minimize" onclick={() => appWindow.minimize()}>
@@ -399,11 +388,7 @@
     background: var(--hover);
     color: var(--fg);
   }
-  .ctl.mirrored svg {
-    transform: scaleX(-1);
-  }
-
-  /* Sets the sidebar toggles apart from the window buttons: beside them, but
+  /* Sets the sidebar toggle apart from the window buttons: beside them, but
      not one of them. */
   .gap {
     width: 8px;

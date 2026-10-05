@@ -11,6 +11,7 @@
   import PinBar from "./lib/PinBar.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import SidebarResizer from "./lib/SidebarResizer.svelte";
+  import TabBar, { type Tab } from "./lib/TabBar.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import UnsavedDialog from "./lib/UnsavedDialog.svelte";
 
@@ -38,18 +39,14 @@
 
   let appearanceOpen = $state(false);
 
-  // --- sidebars ---------------------------------------------------------------
+  // --- sidebar ----------------------------------------------------------------
   //
-  // Left is the file tree. Right is the files open in this window.
-  //
-  // Each `*Width` stays the *expanded* width while collapsed, so expanding
-  // returns to the width you dragged rather than a default. Both start as
-  // rails: an empty list is a quarter of the window spent on nothing.
+  // The file tree. `sidebarWidth` stays the *expanded* width while collapsed,
+  // so expanding returns to the width you dragged rather than a default. It
+  // starts as a rail: an empty list is a quarter of the window spent on nothing.
 
-  let leftWidth = $state(230);
-  let leftCollapsed = $state(true);
-  let rightWidth = $state(230);
-  let rightCollapsed = $state(true);
+  let sidebarWidth = $state(230);
+  let sidebarCollapsed = $state(true);
   let resizing = $state(false);
 
   function treeItem(entry: Entry, depth: number, open: boolean, root: boolean): SidebarItem {
@@ -67,7 +64,7 @@
   // shows one level -- what is directly inside the project -- as icons: enough
   // to jump to a top-level file, or to a folder (which unfolds the sidebar).
   const treeItems = $derived(
-    leftCollapsed
+    sidebarCollapsed
       ? tree.topLevel.map((entry) => treeItem(entry, 0, tree.isOpen(entry.path), false))
       : tree.rows.map((row) => treeItem(row.entry, row.depth, row.open, row.root)),
   );
@@ -76,7 +73,7 @@
   const activeTreeKey = $derived.by(() => {
     const path = docs.active?.path;
     if (!path) return null;
-    return treeItems.find((row) => samePath(String(row.key), path))?.key ?? null;
+    return treeItems.find((row) => samePath(row.key, path))?.key ?? null;
   });
 
   // Whatever file is being edited is shown in the tree, unfolding down to it
@@ -89,13 +86,13 @@
   });
 
   function onTreeSelect(key: SidebarKey) {
-    const path = String(key);
+    const path = key;
     const row = treeItems.find((r) => r.key === key);
     if (!row?.folder) {
       void docs.open(path);
-    } else if (leftCollapsed) {
+    } else if (sidebarCollapsed) {
       // On the rail a folder cannot unfold in place; open the sidebar to it.
-      leftCollapsed = false;
+      sidebarCollapsed = false;
       void tree.expand(path);
     } else {
       void tree.toggle(path);
@@ -106,14 +103,16 @@
     loadFolderIcons();
     await (path === undefined ? tree.openDialog() : tree.open(path));
     // A folder was asked for; show it.
-    if (tree.root) leftCollapsed = false;
+    if (tree.root) sidebarCollapsed = false;
   }
 
-  const openFiles = $derived(
+  // --- tabs -------------------------------------------------------------------
+
+  const tabs = $derived(
     docs.list.map(
-      (doc): SidebarItem => ({
+      (doc): Tab => ({
         key: doc.key,
-        title: doc.name,
+        name: doc.name,
         detail: doc.path ?? "Not saved yet",
         icon: fileIcon(doc.name),
         dirty: doc.dirty,
@@ -221,9 +220,8 @@
     ctx = { x: event.clientX, y: event.clientY, items: [item("Refresh Page", refreshPage)] };
   }
 
-  /** A row in the open-files list. */
-  function onFileContextMenu(event: MouseEvent, row: SidebarItem) {
-    const key = row.key as number;
+  /** A tab. */
+  function onTabContextMenu(event: MouseEvent, key: number) {
     ctx = {
       x: event.clientX,
       y: event.clientY,
@@ -319,10 +317,8 @@
     onsave={() => void docs.save()}
     onsaveas={() => void docs.saveAs()}
     onclosefile={() => void docs.close()}
-    {leftCollapsed}
-    {rightCollapsed}
-    ontoggleleft={() => (leftCollapsed = !leftCollapsed)}
-    ontoggleright={() => (rightCollapsed = !rightCollapsed)}
+    {sidebarCollapsed}
+    ontogglesidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
     onnewwindow={newWindow}
     onappearance={() => (appearanceOpen = true)}
     onclosewindow={closeWindow}
@@ -331,11 +327,10 @@
 
   <main class:resizing>
     <Sidebar
-      side="left"
       items={treeItems}
       activeKey={activeTreeKey}
-      width={leftCollapsed ? RAIL_WIDTH : leftWidth}
-      collapsed={leftCollapsed}
+      width={sidebarCollapsed ? RAIL_WIDTH : sidebarWidth}
+      collapsed={sidebarCollapsed}
       {resizing}
       tree
       empty="No folder open. File → Open Folder, or Ctrl+Shift+O."
@@ -345,45 +340,36 @@
 
     <!-- No handle while collapsed: the rail has one width, and a drag that
          silently expanded it would fight the toggle in the title bar. -->
-    {#if !leftCollapsed}
+    {#if !sidebarCollapsed}
       <SidebarResizer
-        side="left"
-        width={leftWidth}
-        onresize={(w) => (leftWidth = w)}
+        width={sidebarWidth}
+        onresize={(w) => (sidebarWidth = w)}
         ondragging={(d) => (resizing = d)}
       />
     {/if}
 
-    <!-- A resizer normally provides the gap on its side; where a sidebar is
-         collapsed it is not rendered, so the stage supplies its own. -->
-    <section class="stage" class:railed-left={leftCollapsed} class:railed-right={rightCollapsed}>
-      <Editor host={docs.editor} />
-      {#if docs.list.length === 0}
-        <p class="empty">Ctrl+O to open a file, Ctrl+N for a new one</p>
+    <!-- The resizer normally provides the gap on this side; collapsed, it is
+         not rendered, so the stage supplies its own. -->
+    <section class="stage" class:railed={sidebarCollapsed}>
+      <!-- No strip with nothing open: an empty bar across the top of an empty
+           editor is a line with no reason to be there. -->
+      {#if tabs.length > 0}
+        <TabBar
+          {tabs}
+          activeKey={docs.activeKey}
+          onselect={(key) => docs.select(key)}
+          onclose={(key) => void docs.close(key)}
+          oncontext={onTabContextMenu}
+        />
       {/if}
+
+      <div class="editor-area">
+        <Editor host={docs.editor} />
+        {#if docs.list.length === 0}
+          <p class="empty">Ctrl+O to open a file, Ctrl+N for a new one</p>
+        {/if}
+      </div>
     </section>
-
-    {#if !rightCollapsed}
-      <SidebarResizer
-        side="right"
-        width={rightWidth}
-        onresize={(w) => (rightWidth = w)}
-        ondragging={(d) => (resizing = d)}
-      />
-    {/if}
-
-    <Sidebar
-      side="right"
-      items={openFiles}
-      activeKey={docs.activeKey}
-      width={rightCollapsed ? RAIL_WIDTH : rightWidth}
-      collapsed={rightCollapsed}
-      {resizing}
-      closable
-      onselect={(key) => docs.select(key as number)}
-      onclose={(key) => void docs.close(key as number)}
-      oncontext={onFileContextMenu}
-    />
   </main>
 
   {#if ctx}
@@ -447,28 +433,35 @@
      this line is what separates "the app" from "what the app is showing" --
      the same trick a browser plays with its content area.
 
-     It is also the painted surface for the editor, which draws no background
-     of its own: one layer here is what keeps the window a single opacity. */
+     It is also the painted surface for the tabs and the editor, which draw no
+     background of their own: one layer here is what keeps the window a single
+     opacity. */
   .stage {
-    position: relative;
+    display: flex;
+    flex-direction: column;
     flex: 1;
     min-width: 0;
     min-height: 0;
-    margin: var(--viewport-inset) 0;
+    margin: var(--viewport-inset) var(--viewport-inset) var(--viewport-inset) 0;
     background: var(--bg-viewport-wash);
     border: 1px solid var(--border);
     border-radius: var(--viewport-radius);
-    transition: margin 170ms cubic-bezier(0.2, 0.7, 0.3, 1);
+    transition: margin-left 170ms cubic-bezier(0.2, 0.7, 0.3, 1);
     /* Keeps the content inside the rounded corners. Safe here, unlike on the
-       sidebars: nothing in the stage needs to escape it. */
+       sidebar: nothing in the stage needs to escape it. */
     overflow: hidden;
   }
 
-  .stage.railed-left {
+  .stage.railed {
     margin-left: var(--viewport-inset);
   }
-  .stage.railed-right {
-    margin-right: var(--viewport-inset);
+
+  /* Whatever the tab strip leaves. The editor fills it absolutely, so it is
+     the positioning context for that and for the empty-state hint. */
+  .editor-area {
+    position: relative;
+    flex: 1;
+    min-height: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {

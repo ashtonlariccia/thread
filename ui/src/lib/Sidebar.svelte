@@ -2,8 +2,6 @@
   import type { SidebarItem, SidebarKey } from "./types";
 
   type Props = {
-    /** Which edge of the window it sits on; everything that points mirrors. */
-    side: "left" | "right";
     items: SidebarItem[];
     activeKey: SidebarKey | null;
     width: number;
@@ -15,28 +13,22 @@
      * a chevron, and packed tight enough that the guides join up.
      */
     tree?: boolean;
-    /** Rows carry a close button. */
-    closable?: boolean;
     /** What to say, expanded, when there is nothing to list. */
     empty?: string;
     onselect: (key: SidebarKey) => void;
-    onclose?: (key: SidebarKey) => void;
     /** Right-click on a row. App owns the menu, so only one is ever open. */
     oncontext: (event: MouseEvent, item: SidebarItem) => void;
   };
 
   let {
-    side,
     items,
     activeKey,
     width,
     collapsed,
     resizing,
     tree = false,
-    closable = false,
     empty,
     onselect,
-    onclose,
     oncontext,
   }: Props = $props();
 
@@ -71,8 +63,7 @@
         item,
         // Beside the sidebar rather than beside the row: rows are inset, and a
         // card that tracked them would step in and out as the list scrolled.
-        // On the stage side of it, whichever side that is.
-        x: side === "left" ? (rail?.right ?? box.right) + 6 : (rail?.left ?? box.left) - 6,
+        x: (rail?.right ?? box.right) + 6,
         y: box.top + box.height / 2,
       };
     }, HOVER_DELAY_MS);
@@ -101,7 +92,6 @@
   class:collapsed
   class:resizing
   class:tree
-  class:right={side === "right"}
   bind:this={aside}
 >
   {#if items.length === 0 && empty && !collapsed}
@@ -164,31 +154,9 @@
             {:else}
               <span class="dot"></span>
             {/if}
-            <!-- Collapsed, there is no label to carry the marker, so it rides
-                 on the icon's corner instead. -->
-            {#if item.dirty && collapsed}
-              <span class="dirty badge"></span>
-            {/if}
           </span>
           {#if !collapsed}
             <span class="label">{item.title}</span>
-            {#if item.dirty}
-              <span class="dirty" aria-label="Unsaved changes"></span>
-            {/if}
-            {#if closable}
-              <!-- aria-label, not `title`: a native tooltip here would fight
-                   the hover card the row is already showing. -->
-              <button
-                class="kill"
-                aria-label="Close"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  onclose?.(item.key);
-                }}
-              >
-                ×
-              </button>
-            {/if}
           {/if}
         </div>
       </li>
@@ -201,7 +169,6 @@
        full list still gets a card that is entirely on screen. -->
   <div
     class="tip"
-    class:right={side === "right"}
     role="tooltip"
     style="left: {tip.x}px; top: {Math.min(Math.max(tip.y, 20), window.innerHeight - 20)}px"
   >
@@ -289,19 +256,6 @@
     background: var(--accent);
   }
 
-  /* Unsaved changes: the same mark VS Code puts on a tab. */
-  .dirty {
-    flex: none;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--fg-dim);
-  }
-  .dirty.badge {
-    position: absolute;
-    top: -3px;
-    right: -4px;
-  }
   .label {
     flex: 1;
     overflow: hidden;
@@ -309,21 +263,6 @@
     white-space: nowrap;
     font-size: 0.82rem;
     color: var(--fg);
-  }
-
-  .kill {
-    background: transparent;
-    border: none;
-    color: var(--fg-dim);
-    cursor: pointer;
-    font-size: 1rem;
-    line-height: 1;
-    padding: 0 0.15rem;
-    border-radius: 3px;
-  }
-  .kill:hover {
-    color: var(--danger);
-    background: #f38ba81f;
   }
 
   /* --- tree ---------------------------------------------------------------- */
@@ -396,9 +335,6 @@
     position: relative;
     left: calc(var(--viewport-inset) / 2);
   }
-  .right.collapsed ul {
-    left: calc(var(--viewport-inset) / -2);
-  }
 
   /* The icon is the whole row, so centre it and drop the text-sized padding. */
   .collapsed .row {
@@ -431,23 +367,10 @@
     animation: tip-in 110ms ease-out;
   }
 
-  /* `left` is the sidebar's inner edge either way; on the right the card
-     hangs back from it instead of forward. */
-  .tip.right {
-    transform: translate(-100%, -50%);
-    animation-name: tip-in-right;
-  }
-
   @keyframes tip-in {
     from {
       opacity: 0;
       transform: translateY(-50%) translateX(-3px);
-    }
-  }
-  @keyframes tip-in-right {
-    from {
-      opacity: 0;
-      transform: translate(calc(-100% + 3px), -50%);
     }
   }
 

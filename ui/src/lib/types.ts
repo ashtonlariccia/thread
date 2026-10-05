@@ -1,7 +1,7 @@
-/** Open files are keyed by number, tree rows by their path. */
-export type SidebarKey = number | string;
+/** Tree rows are keyed by their path. */
+export type SidebarKey = string;
 
-/** One row in a sidebar. */
+/** One row in the sidebar. */
 export type SidebarItem = {
   key: SidebarKey;
   title: string;
@@ -9,8 +9,6 @@ export type SidebarItem = {
   detail?: string;
   /** Icon URL. A row without one gets a plain dot. */
   icon?: string;
-  /** Has unsaved changes. */
-  dirty?: boolean;
   /** In a tree: how many folders deep the row is. */
   depth?: number;
   /** In a tree: set on folders, saying whether theirs is unfolded. */
