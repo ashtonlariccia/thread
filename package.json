@@ -14,6 +14,7 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tauri-apps/cli": "^2.12.1",
+    "happy-dom": "^20.14.5",
     "svelte": "^5.56.8",
     "svelte-check": "^4.7.5",
     "typescript": "^6.0.3",
@@ -51,6 +52,7 @@
     "@tauri-apps/plugin-clipboard-manager": "^2.4.1",
     "@tauri-apps/plugin-dialog": "^2.8.1",
     "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^6.0.0"
   }
 }

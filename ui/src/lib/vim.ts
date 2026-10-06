@@ -39,6 +39,19 @@ export type VimHooks = {
   only: () => void;
   /** `:wincmd`: `h` `j` `k` `l` to the pane that way, `w` and `p` to step through them. */
   wincmd: (arg: string) => void;
+  /** `:qa`: close every file, in every pane. `force` is `:qa!`. */
+  quitAll: (force: boolean) => void;
+  /** `:wa`: save every file that has unsaved changes. */
+  writeAll: () => void;
+  /** `:wqa` and `:xa`: save every file, and close them all if they all saved. */
+  writeQuitAll: () => void;
+  /**
+   * `u` and Ctrl+R, in the editor they were pressed in. The history is the
+   * file's and not that editor's, so the extension's own way of undoing,
+   * which looks in the editor, would find nothing there.
+   */
+  undo: (view: EditorView) => void;
+  redo: (view: EditorView) => void;
 };
 
 export type VimApi = {
@@ -76,7 +89,11 @@ let hooks: VimHooks | null = null;
 
 export function loadVim(next: VimHooks): Promise<VimApi> {
   hooks = next;
-  loading ??= import("@replit/codemirror-vim").then(({ vim, Vim, getCM }) => {
+  loading ??= import("@replit/codemirror-vim").then(({ vim, Vim, getCM, CodeMirror }) => {
+    // Every way the extension has of undoing goes through these two.
+    CodeMirror.commands.undo = (cm) => hooks?.undo(cm.cm6);
+    CodeMirror.commands.redo = (cm) => hooks?.redo(cm.cm6);
+
     // Patterns are Vim's, not JavaScript's: `\(a\|b\)` groups and `\+`
     // repeats, with a bare `(` or `+` meaning itself. The extension defaults
     // to JavaScript syntax (and says so after every search and substitute);
@@ -121,6 +138,15 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
     Vim.defineEx("close", "clo", later(() => hooks?.close()));
     Vim.defineEx("only", "on", later(() => hooks?.only()));
     Vim.defineEx("wincmd", "winc", withArg((arg) => arg !== null && hooks?.wincmd(arg)));
+
+    // Every file at once.
+    Vim.defineEx("qall", "qa", (_cm: unknown, params?: Params) => {
+      const force = banged(params);
+      later(() => hooks?.quitAll(force))();
+    });
+    Vim.defineEx("wall", "wa", later(() => hooks?.writeAll()));
+    Vim.defineEx("wqall", "wqa", later(() => hooks?.writeQuitAll()));
+    Vim.defineEx("xall", "xa", later(() => hooks?.writeQuitAll()));
 
     const watched = new WeakSet<object>();
     return {

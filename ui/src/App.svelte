@@ -1047,6 +1047,14 @@
       else if (arg === "o") onlyPane();
       else if (arg === "q") closeTab();
     },
+    // Every file, in every pane. Terminals are left running: a shell is
+    // not a buffer, and ending one is not something to do in passing.
+    quitAll: (force) => void docs.closeAll({ force }),
+    writeAll: () => void docs.saveAll(),
+    writeQuitAll: () =>
+      void docs.saveAll().then((saved) => {
+        if (saved) void docs.closeAll();
+      }),
   };
 
   // --- the stage ------------------------------------------------------------------

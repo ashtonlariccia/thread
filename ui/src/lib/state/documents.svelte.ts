@@ -92,8 +92,11 @@ export class Documents {
    * whoever draws it.
    */
   vimLines: Record<number, HTMLElement | null> = {};
-  /** What vim's commands for files and panes do; set by whoever owns the panes. */
-  vimHooks: VimHooks | null = null;
+  /**
+   * What vim's commands for files and panes do; set by whoever owns the
+   * panes. Undo and redo are not theirs to say: those are the editor's.
+   */
+  vimHooks: Omit<VimHooks, "undo" | "redo"> | null = null;
   /** Whoever wants to hear what happens to the files. */
   watcher: DocWatcher | null = null;
 
@@ -216,6 +219,11 @@ export class Documents {
       close: () => this.vimHooks?.close(),
       only: () => this.vimHooks?.only(),
       wincmd: (arg) => this.vimHooks?.wincmd(arg),
+      quitAll: (force) => this.vimHooks?.quitAll(force),
+      writeAll: () => this.vimHooks?.writeAll(),
+      writeQuitAll: () => this.vimHooks?.writeQuitAll(),
+      undo: (view) => void this.editor.travelIn(view, "undo"),
+      redo: (view) => void this.editor.travelIn(view, "redo"),
     })
       .then((vim) => {
         // Switched off again while it was being fetched.
@@ -434,6 +442,25 @@ export class Documents {
     const docs = this.list.filter((doc) => doc.path !== null && under(doc.path));
     if (!(await this.confirm(docs.filter((doc) => doc.dirty)))) return false;
     for (const doc of docs) this.#remove(doc);
+    return true;
+  }
+
+  /**
+   * Save every file with unsaved changes, one after another. False as soon
+   * as one does not save, which leaves the rest as they were.
+   */
+  async saveAll(): Promise<boolean> {
+    for (const doc of this.dirty) if (!(await this.save(doc.key))) return false;
+    return true;
+  }
+
+  /**
+   * Close every file, asking once about all the unsaved ones. `force` does
+   * not ask. False, having closed nothing, if the question was cancelled.
+   */
+  async closeAll({ force = false } = {}): Promise<boolean> {
+    if (!force && !(await this.confirm())) return false;
+    this.clear();
     return true;
   }
 

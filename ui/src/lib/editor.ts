@@ -9,8 +9,13 @@
  *
  * A file open in two panes is two states of the one text. What is typed into
  * either is passed on to the other as it happens, the way a collaborator's
- * edits would be: each keeps its own cursor, its own scroll and its own undo
- * history, and they never disagree about what the file says.
+ * edits would be: each keeps its own cursor and its own scroll, and they
+ * never disagree about what the file says.
+ *
+ * What can be undone belongs to the file, not to a pane, as it does to a
+ * buffer in vim: there is one history of each file, kept beside its states
+ * and not in any of them, and undo in whichever pane takes back the last
+ * thing done to the file, in whichever pane that was.
  *
  * Everything configurable sits in a compartment, so a change to the config
  * re-dresses the files that are already open instead of waiting for the next
@@ -21,7 +26,7 @@ import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import {
   defaultKeymap,
   history,
-  historyKeymap,
+  isolateHistory,
   indentLess,
   indentMore,
   insertNewlineAndIndent,
@@ -45,6 +50,7 @@ import {
   EditorState,
   type Extension,
   type StateEffect,
+  type StateCommand,
   type Text,
   Transaction,
 } from "@codemirror/state";
@@ -539,6 +545,12 @@ export class EditorHost {
   private highlightValue: Extension = [];
   /** What each file's own compartments hold, for dressing another state of it. */
   private own = new Map<number, { indent: Extension; language: Extension; tools: Extension }>();
+  /**
+   * What can be undone in each file. A state of its own that no pane shows,
+   * holding the text and the history of it: every edit made in a pane is
+   * made in it too, and undoing is done in it and the result passed out.
+   */
+  private ledgers = new Map<number, EditorState>();
   /** The last thing its tools were told about each file, for a state made later. */
   private kept = new Map<number, StateEffect<unknown>>();
 
@@ -566,7 +578,7 @@ export class EditorHost {
     this.panes.delete(pane);
   }
 
-  /** A fresh state of a file: the text and a cursor, with nothing to undo. */
+  /** A fresh state of a file: the text, and a cursor. */
   private make(key: number, doc: Text | string, selection?: EditorSelection): EditorState {
     const kept = this.kept.get(key);
     const state = this.dressed(key, doc, selection);
@@ -588,7 +600,6 @@ export class EditorHost {
         this.tools.of(own.tools),
         this.highlight.of(this.highlightValue),
         highlightActiveLine(),
-        history(),
         drawSelection(),
         caretLayer,
         EditorState.allowMultipleSelections.of(true),
@@ -597,8 +608,11 @@ export class EditorHost {
         keymap.of([
           { key: "Tab", run: insertIndent, shift: indentLess },
           { key: "Enter", run: newlineAndIndent },
+          // Undo and redo are the file's, not this state's: see `travel`.
+          { key: "Mod-z", run: (view) => this.travelIn(view, "undo"), preventDefault: true },
+          { key: "Mod-y", run: (view) => this.travelIn(view, "redo"), preventDefault: true },
+          { key: "Mod-Shift-z", run: (view) => this.travelIn(view, "redo"), preventDefault: true },
           ...defaultKeymap,
-          ...historyKeymap,
         ]),
         chrome,
         EditorView.updateListener.of((update) => {
@@ -608,7 +622,9 @@ export class EditorHost {
             // What was done here goes to every other state of the file; what
             // arrived from one of them stops here.
             for (const tr of update.transactions) {
-              if (tr.docChanged && !tr.annotation(passedOn)) this.passOn(key, pane, tr.changes);
+              if (!tr.docChanged || tr.annotation(passedOn)) continue;
+              this.record(key, tr);
+              this.passOn(key, pane, tr.changes);
             }
             const saved = this.saved.get(key);
             this.events.ondirty(key, !saved || !update.state.doc.eq(saved));
@@ -627,14 +643,78 @@ export class EditorHost {
   private passOn(key: number, from: number, changes: ChangeSet) {
     const states = this.states.get(key);
     if (!states) return;
-    // Not theirs to undo: each pane's history is of what was done in it.
-    const spec = { changes, annotations: [passedOn.of(true), Transaction.addToHistory.of(false)] };
+    const spec = { changes, annotations: passedOn.of(true) };
     for (const [pane, state] of states) {
       if (pane === from) continue;
       const slot = this.panes.get(pane);
       if (slot?.current === key) slot.view.dispatch(spec);
       else states.set(pane, state.update(spec).state);
     }
+  }
+
+  /**
+   * Write an edit into the file's history. With what kind of edit it was
+   * and when, which is what the history goes by in deciding where one
+   * undoable step ends and the next begins.
+   */
+  private record(key: number, tr: Transaction) {
+    const ledger = this.ledgers.get(key);
+    if (!ledger) return;
+    const carried = [Transaction.userEvent, Transaction.time, Transaction.addToHistory, isolateHistory];
+    this.ledgers.set(
+      key,
+      ledger.update({
+        changes: tr.changes,
+        annotations: carried.flatMap((type) => {
+          const value = tr.annotation(type as typeof Transaction.userEvent);
+          return value === undefined ? [] : [(type as typeof Transaction.userEvent).of(value)];
+        }),
+      }).state,
+    );
+  }
+
+  /**
+   * Undo or redo in a file: take the step in its history, and make the
+   * change that amounts to in every state of it. The pane it was asked for
+   * in is left with its cursor at the start of what changed, which is where
+   * vim leaves it. False if there was nothing to undo, or redo.
+   */
+  private travel(key: number, pane: number, direction: "undo" | "redo"): boolean {
+    const ledger = this.ledgers.get(key);
+    const states = this.states.get(key);
+    if (!ledger || !states) return false;
+
+    let step: Transaction | null = null;
+    const command: StateCommand = direction === "undo" ? undo : redo;
+    command({ state: ledger, dispatch: (tr) => (step = tr) });
+    const made = step as Transaction | null;
+    if (!made) return false;
+    this.ledgers.set(key, made.state);
+    if (!made.docChanged) return true;
+
+    let start: number | null = null;
+    made.changes.iterChangedRanges((_fromA, _toA, fromB) => {
+      start ??= fromB;
+    });
+    for (const [each, state] of states) {
+      const here = each === pane && start !== null;
+      const spec = {
+        changes: made.changes,
+        annotations: passedOn.of(true),
+        ...(here ? { selection: { anchor: start! }, scrollIntoView: true } : {}),
+      };
+      const slot = this.panes.get(each);
+      if (slot?.current === key) slot.view.dispatch(spec);
+      else states.set(each, state.update(spec).state);
+    }
+    return true;
+  }
+
+  /** Undo or redo in whatever file a view is showing. */
+  travelIn(view: EditorView, direction: "undo" | "redo"): boolean {
+    const pane = this.paneOf(view);
+    const key = pane === null ? null : this.panes.get(pane)!.current;
+    return pane !== null && key !== null && this.travel(key, pane, direction);
   }
 
   private paneOf(view: EditorView): number | null {
@@ -653,6 +733,7 @@ export class EditorHost {
     this.own.set(key, { indent: indentExtension(indent), language: [], tools: [] });
     const state = this.make(key, text);
     this.states.set(key, new Map([[SPARE, state]]));
+    this.ledgers.set(key, EditorState.create({ doc: state.doc, extensions: history() }));
     this.saved.set(key, state.doc);
   }
 
@@ -695,9 +776,6 @@ export class EditorHost {
     } else {
       const [other] = states.keys();
       const from = this.live(other, key) ?? states.get(other)!;
-      // A new state rather than a copy of that one. Two histories of the
-      // same edits would each undo them, and the second to try would be
-      // undoing something already undone.
       state = this.make(key, from.doc, from.selection);
       const there = this.panes.get(other);
       if (there?.current === key) {
@@ -711,7 +789,7 @@ export class EditorHost {
   /**
    * A pane has let go of a file: its tab there was closed, or moved. The
    * state waits as the spare one, so a tab dragged to another pane arrives
-   * with its cursor and its undo history.
+   * with its cursor where it was.
    */
   release(pane: number, key: number) {
     const states = this.states.get(key);
@@ -747,6 +825,7 @@ export class EditorHost {
     this.saved.delete(key);
     this.own.delete(key);
     this.kept.delete(key);
+    this.ledgers.delete(key);
   }
 
   // --- configuration ----------------------------------------------------------
@@ -887,6 +966,7 @@ export class EditorHost {
     }
     const tr = from.update(spec);
     states.set(pane, tr.state);
+    this.record(key, tr);
     this.passOn(key, pane, tr.changes);
     this.events.onchange(key);
   }
@@ -908,9 +988,8 @@ export class EditorHost {
   run(command: EditorCommand) {
     const view = this.focusedView();
     if (!view) return;
-    if (command === "undo") undo(view);
-    else if (command === "redo") redo(view);
-    else selectAll(view);
+    if (command === "selectAll") selectAll(view);
+    else this.travelIn(view, command);
   }
 
   /** Replace the selection, as a paste does. */
