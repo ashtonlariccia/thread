@@ -7,7 +7,9 @@
 //! native: finding a server, running it, and carrying whole messages to and
 //! from it. What the messages say is the frontend's business.
 //!
-//! A server runs on this machine. A window working on a remote has none yet.
+//! A server runs where the files are: on this machine as a process of its
+//! own, and for a window working on a remote, on the remote, over the
+//! connection the window already has (see `Remote::serve`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{AsHandle, OwnedHandle};
@@ -37,8 +39,10 @@ pub struct Spec {
     /// The languages it serves: the name the bottom bar gives a file, and
     /// the id the protocol knows that language by.
     pub languages: &'static [(&'static str, &'static str)],
-    /// A command that installs it, to show beside one that is not installed.
+    /// A command that installs it here, to show beside one that is not installed.
     pub install: &'static str,
+    /// The same for a remote, which is some kind of Unix.
+    pub remote_install: &'static str,
     /// Folders to look in besides `PATH`: where its installer puts it without
     /// adding that to `PATH`.
     pub folders: &'static [&'static str],
@@ -53,6 +57,7 @@ pub const CATALOG: &[Spec] = &[
         args: &["--stdio"],
         languages: &[("Python", "python")],
         install: "npm install -g pyright",
+        remote_install: "npm install -g pyright",
         folders: &[],
     },
     Spec {
@@ -62,6 +67,7 @@ pub const CATALOG: &[Spec] = &[
         args: &[],
         languages: &[("C", "c"), ("C++", "cpp")],
         install: "winget install LLVM.LLVM",
+        remote_install: "install clangd with the system's package manager",
         // The LLVM installer leaves PATH alone unless asked.
         folders: &["C:/Program Files/LLVM/bin"],
     },
@@ -72,6 +78,7 @@ pub const CATALOG: &[Spec] = &[
         args: &[],
         languages: &[("Nix", "nix")],
         install: "cargo install --git https://github.com/oxalica/nil nil",
+        remote_install: "nix profile install nixpkgs#nil",
         folders: &[],
     },
 ];
@@ -96,11 +103,11 @@ pub struct Info {
     pub installed: bool,
 }
 
-/// Every server Thread knows of, each looked for on `PATH` as this is called.
-pub fn catalog() -> Vec<Info> {
-    CATALOG
-        .iter()
-        .map(|spec| Info {
+impl Info {
+    /// A server as the frontend is told of it. `remote` picks whose way of
+    /// installing it is given.
+    pub fn of(spec: &Spec, installed: bool, remote: bool) -> Self {
+        Self {
             id: spec.id,
             name: spec.name,
             command: spec.command,
@@ -109,10 +116,94 @@ pub fn catalog() -> Vec<Info> {
                 .iter()
                 .map(|&(name, id)| Language { name, id })
                 .collect(),
-            install: spec.install,
-            installed: find(spec).is_some(),
-        })
+            install: if remote {
+                spec.remote_install
+            } else {
+                spec.install
+            },
+            installed,
+        }
+    }
+}
+
+/// Every server Thread knows of, each looked for on this machine as this is
+/// called.
+pub fn catalog() -> Vec<Info> {
+    CATALOG
+        .iter()
+        .map(|spec| Info::of(spec, find(spec).is_some(), false))
         .collect()
+}
+
+/// The server with this id.
+pub fn spec(id: &str) -> Result<&'static Spec> {
+    CATALOG
+        .iter()
+        .find(|spec| spec.id == id)
+        .ok_or_else(|| Error::Other(anyhow::anyhow!("there is no language server \"{id}\"")))
+}
+
+/// Something a message can be sent to: a server here, or one on a remote.
+/// Dropping it ends the server.
+pub trait Serving: Send + Sync {
+    /// Send one message, as JSON.
+    fn send(&self, message: &str);
+}
+
+/// A message as it goes down the wire: its length, a blank line, and it.
+pub fn frame(message: &str) -> Vec<u8> {
+    format!("Content-Length: {}\r\n\r\n{message}", message.len()).into_bytes()
+}
+
+/// Whole messages out of a stream that arrives in pieces of any size.
+///
+/// For a server whose output comes in packets rather than from a pipe. What
+/// comes before a message's header is dropped: a shell on the way to
+/// starting the server may have had something to say.
+#[derive(Default)]
+pub struct Framer {
+    buffer: Vec<u8>,
+}
+
+impl Framer {
+    /// Take in some more of the stream, and give back the messages it completes.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        const HEADER: &[u8] = b"Content-Length:";
+        let at = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
+
+        self.buffer.extend_from_slice(bytes);
+        let mut messages = Vec::new();
+        loop {
+            let Some(start) = at(&self.buffer, HEADER) else {
+                // Nothing of a message yet, unless its header has begun.
+                let keep = self.buffer.len().min(HEADER.len() - 1);
+                self.buffer.drain(..self.buffer.len() - keep);
+                break;
+            };
+            self.buffer.drain(..start);
+            let Some(end) = at(&self.buffer, b"\r\n\r\n") else {
+                break;
+            };
+            let length = std::str::from_utf8(&self.buffer[HEADER.len()..end])
+                .ok()
+                .and_then(|headers| headers.lines().next())
+                .and_then(|value| value.trim().parse::<usize>().ok());
+            let Some(length) = length else {
+                // Not a header after all; look for the next thing that is.
+                self.buffer.drain(..HEADER.len());
+                continue;
+            };
+            let body = end + 4;
+            if self.buffer.len() < body + length {
+                break;
+            }
+            if let Ok(message) = String::from_utf8(self.buffer[body..body + length].to_vec()) {
+                messages.push(message);
+            }
+            self.buffer.drain(..body + length);
+        }
+        messages
+    }
 }
 
 /// Where a server's program is: on `PATH`, or in one of the folders its
@@ -175,10 +266,7 @@ impl Server {
         M: FnMut(&str) + Send + 'static,
         E: FnOnce() + Send + 'static,
     {
-        let spec = CATALOG
-            .iter()
-            .find(|spec| spec.id == id)
-            .ok_or_else(|| Error::Other(anyhow::anyhow!("there is no language server \"{id}\"")))?;
+        let spec = spec(id)?;
         let program = find(spec).ok_or_else(|| {
             Error::Other(anyhow::anyhow!(
                 "{} is not installed. To install it: {}",
@@ -245,14 +333,16 @@ impl Server {
             _job: job,
         })
     }
+}
 
-    /// Send one message, framed as the protocol has it.
-    pub fn send(&self, message: &str) {
+impl Serving for Server {
+    fn send(&self, message: &str) {
         let Ok(mut stdin) = self.stdin.lock() else {
             return;
         };
         // A server that has gone cannot be written to; its exit says so.
-        let _ = write!(stdin, "Content-Length: {}\r\n\r\n{message}", message.len())
+        let _ = stdin
+            .write_all(&frame(message))
             .and_then(|()| stdin.flush());
     }
 }
@@ -326,6 +416,18 @@ mod tests {
 
         let mut short = Cursor::new("Content-Length: 10\r\n\r\n{}");
         assert!(read_message(&mut short).is_err());
+    }
+
+    #[test]
+    fn a_stream_in_pieces_comes_out_as_whole_messages() {
+        let mut framer = Framer::default();
+        // A shell's greeting first, then a message split mid-header and
+        // mid-body, then two at once.
+        assert!(framer.push(b"Welcome to host\r\n\r\nConte").is_empty());
+        assert!(framer.push(b"nt-Length: 7\r\n\r\n{\"a\"").is_empty());
+        assert_eq!(framer.push(b":1}"), ["{\"a\":1}"]);
+        let two = [frame("{}"), frame("[\"\u{e9}\"]")].concat();
+        assert_eq!(framer.push(&two), ["{}", "[\"\u{e9}\"]"]);
     }
 
     #[test]

@@ -1001,19 +1001,23 @@ pub fn terminal_close(terminals: State<'_, Terminals>, id: u64) {
 
 // --- language servers ---------------------------------------------------------
 //
-// Each one is a program on this machine, started for a window when it first
-// opens a file in a language the server knows, and ended with the window.
+// Each one is a program wherever its window is working -- this machine, or
+// the remote it is connected to -- started when the window first opens a file
+// in a language the server knows, and ended with the window.
 // Messages go through here whole and unread: what they say is between the
 // page and the server.
 
 /// Every running language server, by id, with the label of its window.
 #[derive(Default)]
-pub struct Servers(Mutex<HashMap<u64, (String, Arc<lsp::Server>)>>);
+pub struct Servers(Mutex<HashMap<u64, Running>>);
+
+/// A server, with the label of the window it is for.
+type Running = (String, Arc<dyn lsp::Serving>);
 
 impl Servers {
     /// Take a server out. Dropping what comes back is what ends it, and is
     /// left to the caller so that it happens outside the lock.
-    fn take(&self, id: u64) -> Option<Arc<lsp::Server>> {
+    fn take(&self, id: u64) -> Option<Arc<dyn lsp::Serving>> {
         let (_, server) = self.0.lock().ok()?.remove(&id)?;
         Some(server)
     }
@@ -1035,11 +1039,18 @@ impl Servers {
     }
 }
 
-/// The language servers Thread knows of, and which of them are installed.
+/// The language servers Thread knows of, and which of them are installed
+/// where this window is working: here, or on its remote.
 #[tauri::command]
-pub async fn lsp_catalog() -> Vec<lsp::Info> {
-    // Off the main thread: it looks along the whole of PATH for each one.
-    lsp::catalog()
+pub async fn lsp_catalog(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<Vec<lsp::Info>, String> {
+    Ok(match remotes.of(&window) {
+        Some(link) => link.remote.servers().await,
+        // Off the main thread: it looks along the whole of PATH for each one.
+        None => lsp::catalog(),
+    })
 }
 
 /// Start a language server for this window, in `cwd`. Each message it sends
@@ -1056,12 +1067,6 @@ pub async fn lsp_start(
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
 
-    // The paths a window on a remote has open are the remote's, and a server
-    // here could make nothing of them.
-    if app.state::<Remotes>().of(&window).is_some() {
-        return Err("language servers do not run on a remote yet".into());
-    }
-
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let ended = {
         let app = app.clone();
@@ -1071,20 +1076,28 @@ pub async fn lsp_start(
             tracing::info!(target: "thread::lsp", "ENDED #{id}");
         }
     };
-    let spawned = lsp::Server::spawn(
-        &server,
-        cwd.as_deref().map(Path::new),
-        move |message| {
-            // A channel that refuses is a page that has gone.
-            let _ = on_message.send(message.to_owned());
-        },
-        ended,
-    )
-    .map_err(|e| e.to_string())?;
+    let heard = move |message: &str| {
+        // A channel that refuses is a page that has gone.
+        let _ = on_message.send(message.to_owned());
+    };
+    // Where the files are: the paths a window on a remote has open are the
+    // remote's, and a server here could make nothing of them.
+    let spawned: Arc<dyn lsp::Serving> = match app.state::<Remotes>().of(&window) {
+        Some(link) => Arc::new(
+            link.remote
+                .serve(&server, cwd.as_deref(), heard, ended)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        None => Arc::new(
+            lsp::Server::spawn(&server, cwd.as_deref().map(Path::new), heard, ended)
+                .map_err(|e| e.to_string())?,
+        ),
+    };
 
     tracing::info!(target: "thread::lsp", "STARTED #{id} {server} in {}", window.label());
     if let Ok(mut open) = app.state::<Servers>().0.lock() {
-        open.insert(id, (window.label().to_owned(), Arc::new(spawned)));
+        open.insert(id, (window.label().to_owned(), spawned));
     }
     Ok(id)
 }

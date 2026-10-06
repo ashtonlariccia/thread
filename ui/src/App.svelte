@@ -59,7 +59,7 @@
   const remote = new RemoteStore();
   const lsp = new Lsp(docs, {
     roots: () => tree.roots.map((root) => root.path),
-    remote: () => remote.status !== "local",
+    ready: () => remote.status === "local" || remote.status === "connected",
   });
   docs.watcher = lsp;
 
@@ -733,6 +733,8 @@
       return;
     }
     remote.info = result.info;
+    // The ones it had went with the connection; they start again on this one.
+    lsp.reset();
     remote.status = "connected";
     checkDisk();
   }
@@ -1338,12 +1340,18 @@
     untrack(() => lsp.configure(enabled));
   });
 
-  // A folder opened or closed can change which project a file belongs to,
-  // and coming back from a remote brings the servers back into play.
+  // A folder opened or closed can change which project a file belongs to.
   $effect(() => {
     void tree.roots.length;
-    void remote.status;
     untrack(() => lsp.sync());
+  });
+
+  // Which servers there are is a fact about a machine: asked when the
+  // window comes up, and again each time it lands on another one.
+  $effect(() => {
+    if (remote.status === "local" || remote.status === "connected") {
+      untrack(() => void lsp.refresh());
+    }
   });
 
   /** A new config has arrived, from this window's dialog, another's, or the file. */
@@ -1385,7 +1393,6 @@
 
       // Not needed until a file is open, so not paid for before the window is up.
       loadIcons();
-      void lsp.refresh();
 
       // `thread.exe some-file`, `thread.exe .`, or "Open with" from Explorer.
       const startup = await invoke<{ path: string; dir: boolean }[]>("startup_files").catch(
@@ -1652,7 +1659,7 @@
     open={lspOpen}
     {lsp}
     {config}
-    remote={remote.status !== "local"}
+    host={remote.remote ? (remote.info?.host ?? null) : null}
     onclose={() => (lspOpen = false)}
   />
 

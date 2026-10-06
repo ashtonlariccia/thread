@@ -746,6 +746,164 @@ impl Remote {
 
         Ok(RemoteTerminal { commands })
     }
+
+    // --- language servers -------------------------------------------------------
+
+    /// A command for the remote that runs `script` in the user's login shell,
+    /// which is where their `PATH` is whole: a server installed for the user
+    /// (a Nix profile, `~/.local/bin`, npm's own folder) is not on the bare
+    /// one a command over SSH is otherwise given.
+    fn login(script: &str) -> String {
+        format!("exec \"${{SHELL:-/bin/sh}}\" -lc {}", quoted(script))
+    }
+
+    /// Run a command on the remote and give back what it printed.
+    async fn output(&self, command: String) -> Result<String> {
+        let run = async {
+            let mut channel = self.handle.channel_open_session().await?;
+            channel.exec(true, command).await?;
+            let mut printed = Vec::new();
+            while let Some(message) = channel.wait().await {
+                match message {
+                    ChannelMsg::Data { data } => printed.extend_from_slice(&data),
+                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+            let _ = channel.close().await;
+            Ok::<_, russh::Error>(printed)
+        };
+        match tokio::time::timeout(Duration::from_secs(15), run).await {
+            Ok(Ok(printed)) => Ok(String::from_utf8_lossy(&printed).into_owned()),
+            Ok(Err(e)) => Err(refuse(format!("the server would not run a command: {e}"))),
+            Err(_) => Err(refuse("the remote took too long to answer")),
+        }
+    }
+
+    /// The language servers Thread knows of, and which of them are installed
+    /// on the remote: found by its login shell, as they would be if typed.
+    pub async fn servers(&self) -> Vec<crate::lsp::Info> {
+        /// Marks an answer, among whatever else a login shell prints.
+        const FOUND: &str = "thread-found:";
+        let names: Vec<&str> = crate::lsp::CATALOG
+            .iter()
+            .map(|spec| spec.command)
+            .collect();
+        let script = format!(
+            "for c in {}; do command -v \"$c\" >/dev/null 2>&1 && echo \"{FOUND}$c\"; done",
+            names.join(" ")
+        );
+        let printed = self.output(Self::login(&script)).await.unwrap_or_default();
+        let found: Vec<&str> = printed
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(FOUND))
+            .collect();
+
+        crate::lsp::CATALOG
+            .iter()
+            .map(|spec| crate::lsp::Info::of(spec, found.contains(&spec.command), true))
+            .collect()
+    }
+
+    /// Start a language server on the remote, in `cwd`, as a channel on this
+    /// connection. `on_message` hears each message it sends, whole; `on_exit`
+    /// hears once, when it has ended or the connection under it has.
+    pub async fn serve<M, E>(
+        &self,
+        id: &str,
+        cwd: Option<&str>,
+        mut on_message: M,
+        on_exit: E,
+    ) -> Result<RemoteServer>
+    where
+        M: FnMut(&str) + Send + 'static,
+        E: FnOnce() + Send + 'static,
+    {
+        let spec = crate::lsp::spec(id)?;
+        let describe = |what: &str, e: russh::Error| refuse(format!("{what}: {e}"));
+
+        let mut line = String::from("exec ");
+        line.push_str(spec.command);
+        for arg in spec.args {
+            line.push(' ');
+            line.push_str(&quoted(arg));
+        }
+        let command = match cwd {
+            Some(dir) => format!("cd {} 2>/dev/null; {}", quoted(dir), Self::login(&line)),
+            None => Self::login(&line),
+        };
+
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| describe("the server would not open a channel", e))?;
+        // No terminal: what goes over this is the protocol, byte for byte.
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| describe("the server refused to run it", e))?;
+
+        let name = spec.id;
+        let (commands, mut queued) = unbounded_channel::<Command>();
+        tokio::spawn(async move {
+            let mut framer = crate::lsp::Framer::default();
+            loop {
+                tokio::select! {
+                    command = queued.recv() => match command {
+                        Some(Command::Data(bytes)) => {
+                            if channel.data(&bytes[..]).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Command::Resize { .. }) => {}
+                        Some(Command::Close) | None => break,
+                    },
+                    message = channel.wait() => match message {
+                        Some(ChannelMsg::Data { data }) => {
+                            for message in framer.push(&data) {
+                                on_message(&message);
+                            }
+                        }
+                        // What it says to the side: "command not found", too.
+                        Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            tracing::debug!(
+                                target: "thread::lsp",
+                                "{name}: {}",
+                                String::from_utf8_lossy(&data).trim_end()
+                            );
+                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                        Some(_) => {}
+                    },
+                }
+            }
+            let _ = channel.close().await;
+            on_exit();
+        });
+
+        Ok(RemoteServer { commands })
+    }
+}
+
+/// A language server on the remote. Dropping it closes its channel, which
+/// ends it.
+pub struct RemoteServer {
+    commands: UnboundedSender<Command>,
+}
+
+impl crate::lsp::Serving for RemoteServer {
+    fn send(&self, message: &str) {
+        let _ = self
+            .commands
+            .send(Command::Data(crate::lsp::frame(message)));
+    }
+}
+
+impl Drop for RemoteServer {
+    fn drop(&mut self) {
+        let _ = self.commands.send(Command::Close);
+    }
 }
 
 /// Prove who we are, by whichever way the target says. `Ok(false)` is the

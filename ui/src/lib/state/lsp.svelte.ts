@@ -8,7 +8,9 @@
  * back is put into the editor: completions as they are asked for, and its
  * complaints as it makes them.
  *
- * Servers run on this machine, so a window working on a remote has none.
+ * A server runs where the files are: on this machine, or for a window
+ * working on a remote, on the remote. Which are installed is asked of
+ * whichever of the two the window is on.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { autocompletion, type CompletionSource } from "@codemirror/autocomplete";
@@ -99,12 +101,15 @@ export class Lsp implements DocWatcher {
     private readonly where: {
       /** The folders open in the tree. */
       roots: () => string[];
-      /** Whether the window is working on a remote. */
-      remote: () => boolean;
+      /**
+       * Whether there is a machine to run one on: not while the window is
+       * between machines, or its connection has dropped.
+       */
+      ready: () => boolean;
     },
   ) {}
 
-  /** Look again at which servers are installed, and act on it. */
+  /** Ask the machine the window is on which servers it has, and act on it. */
   async refresh() {
     try {
       this.catalog = await invoke<ServerInfo[]>("lsp_catalog");
@@ -133,9 +138,14 @@ export class Lsp implements DocWatcher {
     for (const doc of this.docs.list) void this.#attach(doc);
   }
 
-  /** End every server: the window is going to another machine. */
+  /**
+   * End every server, and forget which there are: the window is going to
+   * another machine, or coming back to one it lost. Nothing starts again
+   * until `refresh` has asked what that machine has.
+   */
   reset() {
     for (const id of Object.keys(this.states)) this.#stop(id);
+    this.catalog = [];
   }
 
   // --- what happens to the files ----------------------------------------------------
@@ -171,7 +181,7 @@ export class Lsp implements DocWatcher {
 
   /** The server for a file, and what it calls the file's language. */
   #serverFor(doc: Doc): { server: ServerInfo; language: string } | null {
-    if (doc.path === null || this.where.remote()) return null;
+    if (doc.path === null || !this.where.ready()) return null;
     const name = languageOf(doc.name);
     for (const server of this.catalog) {
       if (!server.installed || !this.enabled.includes(server.id)) continue;

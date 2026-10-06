@@ -16,12 +16,12 @@
     open: boolean;
     lsp: Lsp;
     config: ConfigStore;
-    /** Whether the window is on a remote, where none of them run. */
-    remote: boolean;
+    /** The remote the window is on, which is then where they run; null for this machine. */
+    host: string | null;
     onclose: () => void;
   };
 
-  let { open, lsp, config, remote, onclose }: Props = $props();
+  let { open, lsp, config, host, onclose }: Props = $props();
 
   /** Which of the two this is showing: the servers, or the user's own languages. */
   let tab = $state<"servers" | "languages">("servers");
@@ -46,7 +46,6 @@
   function status(server: ServerInfo): { text: string; bad?: boolean } | null {
     if (!server.installed) return { text: "Not installed" };
     if (!lsp.enabled.includes(server.id)) return null;
-    if (remote) return { text: "Not on a remote" };
     const state = lsp.states[server.id];
     if (state === "running") return { text: "Running" };
     if (state === "starting") return { text: "Starting…" };
@@ -117,9 +116,10 @@
   <p class="dlg-note">
     A server that is switched on starts with the first file in one of its languages, and gives
     completion as you type and its errors at the end of the line they are on. Thread runs the
-    ones it finds on your PATH and installs none itself.
-    {#if remote}
-      They run on this machine only: this window is on a remote, and has none for now.
+    ones it finds on the PATH and installs none itself.
+    {#if host}
+      This window is on {host}, so these are the servers installed there, and that is
+      where they run.
     {/if}
   </p>
 

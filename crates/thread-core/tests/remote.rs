@@ -44,6 +44,7 @@ impl russh::server::Server for Server {
             root: self.root.clone(),
             channels: HashMap::new(),
             shells: HashSet::new(),
+            raw: HashSet::new(),
         }
     }
 }
@@ -55,6 +56,9 @@ struct Connection {
     /// The channels that are shells, whose input is echoed. The rest of what
     /// arrives is SFTP, which reads its own channel.
     shells: HashSet<ChannelId>,
+    /// The channels standing in for a language server: what is sent comes
+    /// back as it was, byte for byte.
+    raw: HashSet<ChannelId>,
 }
 
 impl russh::server::Handler for Connection {
@@ -138,9 +142,23 @@ impl russh::server::Handler for Connection {
         command: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.shells.insert(id);
         session.channel_success(id)?;
         let command = String::from_utf8_lossy(command);
+        // Asked which programs there are: there is `clangd`, said among the
+        // sort of thing a login shell prints on its way.
+        if command.contains("command -v") {
+            session.data(id, b"Last login: today\nthread-found:clangd\n".to_vec())?;
+            session.close(id)?;
+            return Ok(());
+        }
+        // Asked to run a language server: an echo, after a word from the
+        // shell that started it.
+        if command.contains("exec clangd") {
+            self.raw.insert(id);
+            session.data(id, format!("started by: {command}\n").into_bytes())?;
+            return Ok(());
+        }
+        self.shells.insert(id);
         session.data(id, format!("{BANNER} {command}\r\n$ ").into_bytes())?;
         Ok(())
     }
@@ -152,6 +170,10 @@ impl russh::server::Handler for Connection {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.raw.contains(&id) {
+            session.data(id, data.to_vec())?;
+            return Ok(());
+        }
         if !self.shells.contains(&id) {
             return Ok(());
         }
@@ -657,6 +679,62 @@ async fn dropping_a_terminal_ends_it_and_leaves_the_connection_up() {
 
     remote.disconnect().await;
     eventually("the connection to close", || remote.is_closed()).await;
+}
+
+#[tokio::test]
+async fn the_remote_says_which_language_servers_it_has() {
+    let (_root, remote) = connected().await;
+    let installed: Vec<&str> = remote
+        .servers()
+        .await
+        .into_iter()
+        .filter(|server| server.installed)
+        .map(|server| server.id)
+        .collect();
+    assert_eq!(installed, ["clangd"]);
+}
+
+#[tokio::test]
+async fn a_language_server_runs_on_the_remote_and_ends_when_dropped() {
+    use thread_core::lsp::Serving;
+
+    let (_root, remote) = connected().await;
+    let heard = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ended = Arc::new(AtomicBool::new(false));
+
+    let server = remote
+        .serve(
+            "clangd",
+            Some("/srv/my app"),
+            {
+                let heard = Arc::clone(&heard);
+                move |message| heard.lock().unwrap().push(message.to_owned())
+            },
+            {
+                let ended = Arc::clone(&ended);
+                move || ended.store(true, Ordering::SeqCst)
+            },
+        )
+        .await
+        .expect("a server");
+
+    // Two messages go out framed, and come back whole and in order, with
+    // what the shell said first left out.
+    server.send("{\"id\":1}");
+    server.send("{\"id\":2}");
+    eventually("the messages to come back", || {
+        heard.lock().unwrap().len() == 2
+    })
+    .await;
+    assert_eq!(*heard.lock().unwrap(), ["{\"id\":1}", "{\"id\":2}"]);
+
+    drop(server);
+    eventually("the dropped server to end", || ended.load(Ordering::SeqCst)).await;
+    assert!(!remote.is_closed());
+    assert!(remote
+        .serve("no-such-server", None, |_| {}, || {})
+        .await
+        .is_err());
 }
 
 /// Not a test: the server above, kept running, to point a Thread window at.
