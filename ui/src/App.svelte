@@ -1320,8 +1320,12 @@
       <!-- Where the window is working: this machine or a remote, then as
            whom, on what, in which mode, and on which branch. Each its own
            colour, so the eye finds one without reading the rest. All of it is
-           for reading; changing any of it is done from the menus. -->
-      <span class="place" data-status={remote.status}>
+           for reading; changing any of it is done from the menus.
+
+           `data-drop` is the order they give way in as the window narrows,
+           lowest first (see `PinBar`). The mode has none: it is what the
+           next key depends on, and is the last thing to go. -->
+      <span class="place" data-status={remote.status} data-drop="3">
         {#if remote.status === "connecting"}
           Connecting
         {:else if remote.status === "connected"}
@@ -1333,16 +1337,16 @@
         {/if}
       </span>
       {#if where.user}
-        <span class="user">{where.user}</span>
+        <span class="user" data-drop="1">{where.user}</span>
       {/if}
       {#if where.host}
-        <span class="host">{where.host}</span>
+        <span class="host" data-drop="2">{where.host}</span>
       {/if}
       {#if docs.vimMode && showingFile}
         <span class="mode" data-mode={docs.vimMode}>{docs.vimMode}</span>
       {/if}
       {#if gitBranch}
-        <span class="git" title="Git branch">{gitBranch}</span>
+        <span class="git" title="Git branch" data-drop="4">{gitBranch}</span>
       {/if}
     {/snippet}
     {#snippet middle()}
@@ -1352,12 +1356,14 @@
       <div class="vim-line" data-vim-line bind:this={docs.vimLine}></div>
     {/snippet}
     {#snippet info()}
+      <!-- What rarely changes goes first as the window narrows; where the
+           cursor is stays to the end. -->
       {#if docs.active && showingFile}
         <span>Ln {docs.cursor.line}, Col {docs.cursor.col}</span>
-        <span>{indentLabel(docs.active.indent)}</span>
-        <span>{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
-        <span>{docs.active.bom ? "UTF-8 with BOM" : "UTF-8"}</span>
-        <span>{languageOf(docs.active.name)}</span>
+        <span data-drop="3">{indentLabel(docs.active.indent)}</span>
+        <span data-drop="2">{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
+        <span data-drop="1">{docs.active.bom ? "UTF-8 with BOM" : "UTF-8"}</span>
+        <span data-drop="4">{languageOf(docs.active.name)}</span>
       {/if}
     {/snippet}
   </PinBar>
@@ -1543,8 +1549,11 @@
   .git {
     color: #f5c2e7;
   }
+  /* A machine or a branch with a very long name is cut short rather than
+     allowed to push everything else out of the bar. */
   .host,
   .git {
+    max-width: 14rem;
     overflow: hidden;
     text-overflow: ellipsis;
   }

@@ -20,6 +20,68 @@
 
   let { pins, onopen, onunpin, onmove, info, start, middle }: Props = $props();
 
+  /**
+   * Keep a group of status items to the room it has.
+   *
+   * As the window narrows, a group's side of the bar does too, and items that
+   * no longer fit are taken out whole, one at a time, in the order their
+   * `data-drop` says — lowest first. An item without one is never taken out.
+   * Nothing is ever shown cut in half, and what is left stays centred.
+   *
+   * Measured rather than done with breakpoints: how wide the items are
+   * depends on what they say, and a host or a branch can be any length.
+   */
+  function collapsing(group: HTMLElement) {
+    let queued = 0;
+
+    const fit = () => {
+      const items = [...group.children] as HTMLElement[];
+      // From the top each time: an item that went may have room again.
+      for (const item of items) delete item.dataset.collapsed;
+
+      const style = getComputedStyle(group);
+      const room =
+        group.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const gap = parseFloat(style.columnGap) || 0;
+      const needed = () => {
+        const shown = items.filter((item) => item.dataset.collapsed === undefined);
+        const widths = shown.reduce((sum, item) => sum + item.getBoundingClientRect().width, 0);
+        return widths + gap * Math.max(0, shown.length - 1);
+      };
+
+      const droppable = items
+        .filter((item) => item.dataset.drop !== undefined)
+        .sort((a, b) => Number(a.dataset.drop) - Number(b.dataset.drop));
+      for (const item of droppable) {
+        if (needed() <= room) break;
+        item.dataset.collapsed = "";
+      }
+    };
+
+    // Once a frame at most: a drag of the window's edge reports every pixel.
+    const schedule = () => {
+      cancelAnimationFrame(queued);
+      queued = requestAnimationFrame(fit);
+    };
+
+    // The room changes with the window; what is needed, with what the items
+    // say. Attributes are not watched, so marking an item here does not ask
+    // for another pass.
+    const resized = new ResizeObserver(schedule);
+    resized.observe(group);
+    const changed = new MutationObserver(schedule);
+    changed.observe(group, { childList: true, characterData: true, subtree: true });
+    schedule();
+
+    return {
+      destroy() {
+        cancelAnimationFrame(queued);
+        resized.disconnect();
+        changed.disconnect();
+      },
+    };
+  }
+
   // The context menu is positioned in *viewport* coordinates rather than inside
   // the row, because the strip scrolls horizontally -- and `overflow` clips any
   // popover that tries to escape it.
@@ -195,46 +257,46 @@
   <!-- Three columns: a box of fixed width dead centre, and to either side of
        it whatever room is left, with a group centred in each. -->
   <div class="side">
-  {#if start}
-    <div class="start">{@render start()}</div>
-  {/if}
+    {#if start}
+      <div class="start" use:collapsing>{@render start()}</div>
+    {/if}
 
-  <!-- Empty until something learns to pin; the bar keeps its height either
-       way, so the window's frame does not change shape when the first one lands. -->
-  {#if pins.length > 0}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <ul class="strip" class:dragging={drag?.started} bind:this={strip} onwheel={onWheel}>
-      {#each pins as entry, index (entry.kind + ":" + entry.target)}
-        <li
-          class:drop-before={marker === index}
-          class:drop-after={marker === pins.length && index === pins.length - 1}
-        >
-          <button
-            class="pin"
-            class:lifted={drag?.started && drag.from === index}
-            title={entry.label}
-            onclick={() => onClick(entry)}
-            onauxclick={(e) => onAuxClick(e, entry)}
-            oncontextmenu={(e) => openMenu(e, entry)}
-            onkeydown={(e) => onKeydown(e, entry, index)}
-            onpointerdown={(e) => onPointerDown(e, index)}
-            onpointermove={onPointerMove}
-            onpointerup={onPointerUp}
-            onpointercancel={onPointerCancel}
+    <!-- Empty until something learns to pin; the bar keeps its height either
+         way, so the window's frame does not change shape when the first one lands. -->
+    {#if pins.length > 0}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <ul class="strip" class:dragging={drag?.started} bind:this={strip} onwheel={onWheel}>
+        {#each pins as entry, index (entry.kind + ":" + entry.target)}
+          <li
+            class:drop-before={marker === index}
+            class:drop-after={marker === pins.length && index === pins.length - 1}
           >
-            <span class="label">{entry.label}</span>
-          </button>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+            <button
+              class="pin"
+              class:lifted={drag?.started && drag.from === index}
+              title={entry.label}
+              onclick={() => onClick(entry)}
+              onauxclick={(e) => onAuxClick(e, entry)}
+              oncontextmenu={(e) => openMenu(e, entry)}
+              onkeydown={(e) => onKeydown(e, entry, index)}
+              onpointerdown={(e) => onPointerDown(e, index)}
+              onpointermove={onPointerMove}
+              onpointerup={onPointerUp}
+              onpointercancel={onPointerCancel}
+            >
+              <span class="label">{entry.label}</span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </div>
 
   <div class="middle">{@render middle?.()}</div>
 
   <div class="side">
     {#if info}
-      <div class="info">{@render info()}</div>
+      <div class="info" use:collapsing>{@render info()}</div>
     {/if}
   </div>
 </footer>
@@ -291,14 +353,26 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 0.9rem;
+    /* Wide enough that each item is plainly its own, with no rule between. */
+    gap: 1.6rem;
     flex: 1;
     min-width: 0;
-    padding: 0 0.6rem;
+    padding: 0 0.8rem;
     overflow: hidden;
     color: var(--fg-dim);
     font-size: 0.71rem;
     white-space: nowrap;
+  }
+  /* Whole or not at all: an item keeps its width, and one there is no room
+     for is taken out by `collapsing` rather than squeezed. The items belong
+     to whoever supplied the snippet, hence `:global`. */
+  .start > :global(*),
+  .info > :global(*) {
+    flex: none;
+  }
+  .start > :global([data-collapsed]),
+  .info > :global([data-collapsed]) {
+    display: none;
   }
 
   /* The box in the middle. It is the height of a chip and draws nothing of
