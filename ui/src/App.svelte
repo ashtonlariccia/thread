@@ -1290,10 +1290,18 @@
             <Editor host={docs.editor} />
           </div>
           <!-- Vim's `:` line, `/` search and messages are put here by
-               `vim.ts`: a bar the width of the editor, under the text, that
-               is not there at all while it is empty. Always present, so
-               there is somewhere to put them the moment vim asks. -->
-          <div class="vim-line" data-vim-line bind:this={docs.vimLine}></div>
+               `vim.ts`: one line of the editor, in the editor's own font and
+               at its line height, that takes the place of the last line on
+               screen for as long as it has something in it. Always present,
+               so there is somewhere to put them the moment vim asks. -->
+          <div
+            class="vim-line"
+            data-vim-line
+            bind:this={docs.vimLine}
+            style:font-family={config.current.editor.font_family}
+            style:font-size="{config.current.editor.font_size}px"
+            style:height="{config.current.editor.font_size * config.current.editor.line_height}px"
+          ></div>
         </div>
 
         <!-- Each for as long as its tab is open: with the last one goes
@@ -1485,19 +1493,22 @@
     }
   }
 
-  /* Vim's command line: a bar across the foot of the editor, as vim has it.
-     Nothing is drawn for it, no surface and no rule: it is the text in it,
-     on the editor's own background. Not there at all while it is empty. What
-     goes in it is built by the vim extension, not by this component, so it
-     is reached with `:global`. */
+  /* Vim's command line: a line across the foot of the editor, as vim has it.
+     It is set as a line of the file is (the font and the height come from the
+     config, inline), and the text above gives up exactly that much, so it
+     reads as the last line on screen having been swapped for it. Nothing is
+     drawn for it, no surface and no rule. Not there at all while it is empty.
+     What goes in it is built by the vim extension, not by this component, so
+     it is reached with `:global`. */
   .vim-line {
     flex: none;
+    box-sizing: content-box;
     display: flex;
     align-items: center;
-    /* In line with the line numbers above it. */
-    padding: 3px 14px 5px;
+    /* In line with the line numbers above it, which also clears the card's
+       rounded corner. */
+    padding: 0 14px;
     color: var(--fg);
-    font-size: 0.8rem;
   }
   .vim-line:empty {
     display: none;
@@ -1514,7 +1525,7 @@
   .vim-line :global(*) {
     color: inherit !important;
     font-family: inherit !important;
-    font-size: inherit;
+    font-size: inherit !important;
   }
   .vim-line :global(input) {
     flex: 1;
