@@ -4,12 +4,17 @@
  * Each complaint is underlined where it is, and written out at the end of
  * the line it starts on, with the line tinted to match: the reading of a
  * problem without hovering over it or opening a panel, after the VS Code
- * extension Error Lens. One message to a line, the most serious there.
+ * extension Error Lens. One message to a line, the most serious there, cut
+ * short if it is long; all of it is in the line's tooltip.
+ *
+ * The message is not text in the editor. It is drawn by the line's own
+ * stylesheet, from an attribute, so there is nothing there for the cursor to
+ * be beside, for a selection to take in, or for a copy to pick up.
  *
  * This only draws. What the complaints are is whoever sets them's business.
  */
 import { StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
+import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
 /** Most serious first, which is also the order they are compared in. */
 export const SEVERITIES = ["error", "warning", "info", "hint"] as const;
@@ -28,36 +33,18 @@ export type Diagnostic = {
 /** Replace everything said about a file. */
 export const setDiagnostics = StateEffect.define<Diagnostic[]>();
 
-class LensWidget extends WidgetType {
-  constructor(
-    readonly severity: Severity,
-    readonly text: string,
-    /** Everything said about the line, for the tooltip. */
-    readonly full: string,
-  ) {
-    super();
-  }
+/** As much of a message as is written at the end of a line. */
+const LENS_CHARS = 72;
 
-  override eq(other: LensWidget) {
-    return this.severity === other.severity && this.text === other.text && this.full === other.full;
-  }
-
-  override toDOM() {
-    const el = document.createElement("span");
-    el.className = `cm-lens cm-lens-${this.severity}`;
-    el.textContent = this.text;
-    el.title = this.full;
-    return el;
-  }
-
-  // Reading a message is not placing the cursor.
-  override ignoreEvent() {
-    return true;
-  }
+/** A message as it is written out: its first line, and not too much of that. */
+export function lensText(message: string, others: number): string {
+  const first = message.split("\n")[0].trim();
+  const cut = first.length > LENS_CHARS ? `${first.slice(0, LENS_CHARS).trimEnd()}…` : first;
+  return others > 0 ? `${cut}  (+${others})` : cut;
 }
 
 function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
-  type Line = { from: number; to: number; worst: Diagnostic; all: Diagnostic[] };
+  type Line = { from: number; worst: Diagnostic; all: Diagnostic[] };
   const lines = new Map<number, Line>();
   const marks: { from: number; to: number; severity: Severity }[] = [];
 
@@ -71,7 +58,7 @@ function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
 
     const known = lines.get(line.from);
     if (!known) {
-      lines.set(line.from, { from: line.from, to: line.to, worst: diagnostic, all: [diagnostic] });
+      lines.set(line.from, { from: line.from, worst: diagnostic, all: [diagnostic] });
     } else {
       known.all.push(diagnostic);
       const rank = (d: Diagnostic) => SEVERITIES.indexOf(d.severity);
@@ -79,26 +66,20 @@ function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
     }
   }
 
-  // Three kinds of range, each already in order; the set wants them merged.
   const ranges = [
     ...marks.map(({ from, to, severity }) =>
       Decoration.mark({ class: `cm-lens-range cm-lens-range-${severity}` }).range(from, to),
     ),
-    ...[...lines.values()].flatMap((line) => {
-      const { worst, all } = line;
-      const more = all.length > 1 ? `  (+${all.length - 1})` : "";
-      const full = all
-        .map((d) => (d.source ? `${d.message} — ${d.source}` : d.message))
-        .join("\n\n");
-      return [
-        Decoration.line({ class: `cm-lens-line cm-lens-line-${worst.severity}` }).range(line.from),
-        Decoration.widget({
-          // The first line of it: the rest is in the tooltip.
-          widget: new LensWidget(worst.severity, worst.message.split("\n")[0] + more, full),
-          side: 1,
-        }).range(line.to),
-      ];
-    }),
+    ...[...lines.values()].map(({ from, worst, all }) =>
+      Decoration.line({
+        class: `cm-lens-line cm-lens-line-${worst.severity}`,
+        attributes: {
+          "data-lens": lensText(worst.message, all.length - 1),
+          // Everything said about the line, and all of each.
+          title: all.map((d) => (d.source ? `${d.message} — ${d.source}` : d.message)).join("\n\n"),
+        },
+      }).range(from),
+    ),
   ];
   return ranges.length === 0 ? Decoration.none : Decoration.set(ranges, true);
 }
@@ -109,8 +90,7 @@ const field = StateField.define<DecorationSet>({
     for (const effect of tr.effects) {
       if (effect.is(setDiagnostics)) return build(tr.state.doc, effect.value);
     }
-    // Until the server has read the edit and said so, they stay with the
-    // text they were about.
+    // Until they are replaced, they stay with the text they were about.
     return tr.docChanged ? set.map(tr.changes) : set;
   },
   provide: (self) => EditorView.decorations.from(self),
@@ -124,14 +104,11 @@ const COLOURS: Record<Severity, string> = {
 };
 
 const look = EditorView.baseTheme({
-  ".cm-lens": {
+  ".cm-lens-line::after": {
+    content: "attr(data-lens)",
     marginLeft: "3ch",
     fontStyle: "italic",
     opacity: "0.85",
-    // Not text of the file: not selected with it, and not copied.
-    userSelect: "none",
-    WebkitUserSelect: "none",
-    cursor: "default",
     whiteSpace: "pre",
   },
   ".cm-lens-range": {
@@ -142,7 +119,7 @@ const look = EditorView.baseTheme({
   },
   ...Object.fromEntries(
     SEVERITIES.flatMap((severity) => [
-      [`.cm-lens-${severity}`, { color: COLOURS[severity] }],
+      [`.cm-lens-line-${severity}::after`, { color: COLOURS[severity] }],
       [`.cm-lens-range-${severity}`, { textDecorationColor: COLOURS[severity] }],
       [
         `.cm-lens-line-${severity}`,
@@ -155,13 +132,16 @@ const look = EditorView.baseTheme({
 /** The drawing of diagnostics; nothing shows until some are set. */
 export const diagnostics: Extension = [field, look];
 
-/** For tests: what is drawn in a state, as `[from, to, class or text]`. */
-export function drawn(state: { field: (f: typeof field) => DecorationSet }): [number, number, string][] {
-  const out: [number, number, string][] = [];
+/** For tests: what is drawn in a state, as `[from, to, class, message written out]`. */
+export function drawn(state: {
+  field: (f: typeof field) => DecorationSet;
+}): [number, number, string, string?][] {
+  const out: [number, number, string, string?][] = [];
   const cursor = state.field(field).iter();
   for (; cursor.value; cursor.next()) {
-    const spec = cursor.value.spec as { class?: string; widget?: LensWidget };
-    out.push([cursor.from, cursor.to, spec.class ?? spec.widget?.text ?? ""]);
+    const spec = cursor.value.spec as { class: string; attributes?: Record<string, string> };
+    const lens = spec.attributes?.["data-lens"];
+    out.push(lens === undefined ? [cursor.from, cursor.to, spec.class] : [cursor.from, cursor.to, spec.class, lens]);
   }
   return out;
 }

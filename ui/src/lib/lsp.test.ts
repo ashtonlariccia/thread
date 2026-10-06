@@ -1,7 +1,7 @@
 import { EditorState, Text } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 
-import { diagnostics, drawn, setDiagnostics } from "./diagnostics";
+import { diagnostics, drawn, lensText, setDiagnostics } from "./diagnostics";
 import { toCompletions, toDiagnostic, toOffset, toPosition, toUri, uriKey } from "./lsp";
 
 const doc = Text.of(["fn main() {", "    let x = 1;", "}"]);
@@ -60,9 +60,8 @@ describe("what a server finds wrong", () => {
     const line = doc.line(2);
 
     expect(drawn(state.update({ effects: setDiagnostics.of(found) }).state)).toEqual([
-      [line.from, line.from, "cm-lens-line cm-lens-line-warning"],
+      [line.from, line.from, "cm-lens-line cm-lens-line-warning", "unused variable: `x`"],
       [line.from + 8, line.from + 9, "cm-lens-range cm-lens-range-warning"],
-      [line.to, line.to, "unused variable: `x`"],
     ]);
   });
 
@@ -71,9 +70,16 @@ describe("what a server finds wrong", () => {
     const found = [wire(1, 8, 9, 2, "unused"), wire(1, 12, 13, 1, "mismatched types\nexpected `()`")];
     const next = state.update({ effects: setDiagnostics.of(found.map((w) => toDiagnostic(doc, w))) });
 
-    const texts = drawn(next.state).map(([, , text]) => text);
-    expect(texts).toContain("cm-lens-line cm-lens-line-error");
-    expect(texts).toContain("mismatched types  (+1)");
+    const [line] = drawn(next.state);
+    expect(line.slice(2)).toEqual(["cm-lens-line cm-lens-line-error", "mismatched types  (+1)"]);
+  });
+
+  it("is cut short when it is long, and to its first line", () => {
+    const long = `call to undeclared library function 'printf' with type 'int (const char *, ...)'; ISO C99 and later do not support implicit function declarations`;
+    const text = lensText(`${long}\nmore`, 0);
+    expect(text.length).toBeLessThanOrEqual(73);
+    expect(text.endsWith("…")).toBe(true);
+    expect(lensText("short", 2)).toBe("short  (+2)");
   });
 
   it("goes when the server says there is nothing wrong any more", () => {

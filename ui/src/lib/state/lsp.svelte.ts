@@ -49,6 +49,14 @@ export type ServerState = "starting" | "running" | "failed";
 /** How long after a key before the server is told: once per burst of typing. */
 const CHANGE_MS = 150;
 
+/**
+ * How long the keys have to have been still before what a server finds is
+ * shown. A line being typed is wrong at nearly every keystroke -- a bracket
+ * not closed yet, a statement with no end -- and being told so as it is
+ * typed is noise.
+ */
+const QUIET_MS = 900;
+
 type Attached = {
   server: string;
   /** Which of the server's processes: there is one for each folder. */
@@ -58,6 +66,10 @@ type Attached = {
   version: number;
   /** Set while there is an edit the server has not been told of. */
   timer: ReturnType<typeof setTimeout> | null;
+  /** When the file was last edited, as `Date.now()` has it. */
+  edited: number;
+  /** What the server last found, waiting for the keys to be still. */
+  found: { items: Parameters<typeof toDiagnostic>[1][]; timer: ReturnType<typeof setTimeout> } | null;
 };
 
 // The list of completions, in the window's colours rather than the editor
@@ -162,7 +174,30 @@ export class Lsp implements DocWatcher {
 
   changed(key: number) {
     const attached = this.#attached.get(key);
-    if (attached) attached.timer ??= setTimeout(() => this.#flush(key), CHANGE_MS);
+    if (!attached) return;
+    attached.timer ??= setTimeout(() => this.#flush(key), CHANGE_MS);
+    attached.edited = Date.now();
+    // Whatever was waiting to be shown waits again, from this key.
+    if (attached.found) this.#found(key, attached.found.items);
+  }
+
+  /**
+   * A server has had its say about a file. Shown once the file has gone
+   * unedited for a moment, and at once if it already has.
+   */
+  #found(key: number, items: Parameters<typeof toDiagnostic>[1][]) {
+    const attached = this.#attached.get(key);
+    if (!attached) return;
+    if (attached.found) clearTimeout(attached.found.timer);
+
+    const show = () => {
+      attached.found = null;
+      const doc = this.docs.editor.doc(key);
+      if (!doc || this.#attached.get(key) !== attached) return;
+      this.docs.editor.keep(key, setDiagnostics.of(items.map((item) => toDiagnostic(doc, item))));
+    };
+    const wait = attached.edited + QUIET_MS - Date.now();
+    attached.found = { items, timer: setTimeout(show, Math.max(0, wait)) };
   }
 
   saved(doc: Doc) {
@@ -223,6 +258,8 @@ export class Lsp implements DocWatcher {
       uri,
       version: 1,
       timer: null,
+      edited: 0,
+      found: null,
     });
     client.notify("textDocument/didOpen", {
       textDocument: {
@@ -240,6 +277,7 @@ export class Lsp implements DocWatcher {
     const attached = this.#attached.get(key);
     if (!attached) return;
     if (attached.timer !== null) clearTimeout(attached.timer);
+    if (attached.found) clearTimeout(attached.found.timer);
     this.#attached.delete(key);
     attached.client.notify("textDocument/didClose", { textDocument: { uri: attached.uri } });
     if (undress) this.docs.editor.setTools(key, []);
@@ -270,12 +308,7 @@ export class Lsp implements DocWatcher {
         ondiagnostics: (uri, items) => {
           for (const [key, attached] of this.#attached) {
             if (attached.process !== process || uriKey(attached.uri) !== uriKey(uri)) continue;
-            const doc = this.docs.editor.doc(key);
-            if (!doc) continue;
-            this.docs.editor.keep(
-              key,
-              setDiagnostics.of(items.map((item) => toDiagnostic(doc, item))),
-            );
+            this.#found(key, items);
           }
         },
         onexit: () => this.#lost(id, process, "It stopped by itself."),
