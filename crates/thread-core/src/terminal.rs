@@ -473,7 +473,7 @@ mod tests {
         });
     }
 
-    /// `exit` has to end the terminal by itself, or the panel would sit there
+    /// `exit` has to end the terminal by itself, or its tab would sit there
     /// on a shell that has gone.
     #[test]
     fn exit_ends_the_terminal() {

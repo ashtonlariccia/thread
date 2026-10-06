@@ -74,6 +74,11 @@ export class Documents {
   vimMode = $state<VimMode | null>(null);
   /** Where vim's `:` line and messages are shown; set by whoever draws it. */
   vimLine: HTMLElement | null = null;
+  /**
+   * Called when a file is brought to the front: opened, clicked, cycled to.
+   * Not when one merely becomes current because its neighbour was closed.
+   */
+  onselect: (() => void) | null = null;
 
   /** Set while the user is being asked what to do with unsaved files. */
   asking = $state.raw<{ docs: Doc[]; resolve: (proceed: boolean) => void } | null>(null);
@@ -125,6 +130,11 @@ export class Documents {
   }
 
   select(key: number | null) {
+    this.#show(key);
+    this.onselect?.();
+  }
+
+  #show(key: number | null) {
     this.activeKey = key;
     this.editor.show(key);
   }
@@ -381,7 +391,7 @@ export class Documents {
     this.editor.drop(doc.key);
     this.#grammars.delete(doc.key);
     // The neighbour that slid into its place, else the one before it.
-    if (this.activeKey === doc.key) this.select((this.list[index] ?? this.list.at(-1))?.key ?? null);
+    if (this.activeKey === doc.key) this.#show((this.list[index] ?? this.list.at(-1))?.key ?? null);
   }
 
   /**

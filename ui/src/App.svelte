@@ -14,12 +14,13 @@
   import Sidebar from "./lib/Sidebar.svelte";
   import SidebarResizer from "./lib/SidebarResizer.svelte";
   import TabBar, { type Tab } from "./lib/TabBar.svelte";
-  import TerminalPanel, { TERMINAL_MIN } from "./lib/TerminalPanel.svelte";
+  import TerminalView from "./lib/TerminalView.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import UnsavedDialog from "./lib/UnsavedDialog.svelte";
 
   import { item, SEP, type ContextMenuState } from "./lib/contextMenu";
   import { setEditor } from "./lib/edit";
+  import { iconUrl } from "./lib/icons";
   import { indentLabel } from "./lib/indent";
   import { languageOf } from "./lib/languages";
   import { RAIL_WIDTH } from "./lib/layout";
@@ -277,25 +278,33 @@
     if (tree.roots.length > before || path !== undefined) sidebarCollapsed = false;
   }
 
-  // --- terminal -----------------------------------------------------------------
+  // --- terminals ----------------------------------------------------------------
   //
-  // One per window, in a panel under the editor. Three states, not two: no
-  // shell at all, which is how a window starts and costs nothing; a shell with
-  // the panel showing; and a shell with the panel folded away, still running.
-  // Toggling moves between the last two. Only killing it, or the shell
-  // exiting, goes back to the first.
+  // A terminal is a tab like a file is, and there can be several. Each is a
+  // shell for whatever this window is working on. None exists until one is
+  // asked for, and closing its tab ends it: there is no hidden state in
+  // between, so a window with no terminal tab is running no shell.
 
-  let terminalAlive = $state(false);
-  let terminalOpen = $state(false);
-  let terminalHeight = $state(240);
-  /** Where the shell was started, fixed for as long as it lives. */
-  let terminalCwd = $state<string | null>(null);
-  let terminal = $state<TerminalPanel>();
+  type TerminalTab = {
+    key: number;
+    name: string;
+    /** Where the shell was started, fixed for as long as it lives. */
+    cwd: string | null;
+  };
 
-  /** The stage's height, which is what bounds the panel's. */
-  let stageHeight = $state(0);
-  /** What the editor and the tabs above it are always left. */
-  const EDITOR_MIN = 110;
+  let terminals = $state<TerminalTab[]>([]);
+  /** The terminal being shown, or null while a file is. */
+  let activeTerminal = $state<number | null>(null);
+  /** The one last shown, for Ctrl+` to come back to. */
+  let lastTerminal: number | null = null;
+  /** Each open terminal's view, by key, for the menus to act on. */
+  const terminalViews = $state<Record<number, TerminalView | undefined>>({});
+
+  // Files are keyed upwards from 1 and terminals downwards from -1, so the
+  // tab strip can hold both under one kind of key and tell them apart.
+  let nextTerminalKey = -1;
+  let nextTerminalNumber = 1;
+  const isTerminal = (key: number) => key < 0;
 
   // The terminal is set in the editor's font: the two are read side by side.
   const terminalLook = $derived({
@@ -320,24 +329,56 @@
     return holding ?? roots[0] ?? (file ? dirName(file) : null);
   }
 
-  function toggleTerminal() {
-    if (terminalOpen) {
-      terminalOpen = false;
-      docs.editor.focus();
-      return;
-    }
-    if (!terminalAlive) {
-      terminalCwd = terminalDir();
-      terminalAlive = true;
-    }
-    terminalOpen = true;
+  /** Terminal → New Terminal. */
+  function newTerminal() {
+    // Numbered from the top again once the last one has gone.
+    if (terminals.length === 0) nextTerminalNumber = 1;
+    const number = nextTerminalNumber++;
+    const key = nextTerminalKey--;
+    terminals.push({
+      key,
+      name: number === 1 ? "Terminal" : `Terminal ${number}`,
+      cwd: terminalDir(),
+    });
+    activeTerminal = key;
   }
 
-  /** End the shell and whatever is running in it. Also where `exit` lands. */
-  function killTerminal() {
-    terminalAlive = false;
-    terminalOpen = false;
-    docs.editor.focus();
+  /** A file has come to the front; whichever terminal was showing gives way. */
+  function leaveTerminal() {
+    if (activeTerminal === null) return;
+    lastTerminal = activeTerminal;
+    activeTerminal = null;
+  }
+  docs.onselect = leaveTerminal;
+
+  /** Ctrl+`: to the terminal and back, opening one if there is none. */
+  function toggleTerminal() {
+    if (activeTerminal !== null) {
+      leaveTerminal();
+      docs.editor.focus();
+    } else if (terminals.length > 0) {
+      const back = terminals.find((t) => t.key === lastTerminal) ?? terminals.at(-1)!;
+      activeTerminal = back.key;
+    } else {
+      newTerminal();
+    }
+  }
+
+  /**
+   * Close a terminal's tab, which ends its shell and whatever is running in
+   * it. Also where a shell that exits by itself lands.
+   */
+  function closeTerminal(key: number) {
+    const order = tabs.map((tab) => tab.key);
+    const index = order.indexOf(key);
+    terminals = terminals.filter((t) => t.key !== key);
+    delete terminalViews[key];
+    if (activeTerminal !== key) return;
+
+    // The neighbour that slides into its place, else the one before it.
+    activeTerminal = null;
+    const next = order[index + 1] ?? order[index - 1];
+    if (next !== undefined) selectTab(next);
   }
 
   function inTerminal(target: EventTarget | null): boolean {
@@ -358,7 +399,6 @@
     active: string | null;
     sidebarCollapsed: boolean;
     sidebarWidth: number;
-    terminalHeight: number;
   };
 
   const keepsSession = appWindow.label === "main";
@@ -368,7 +408,6 @@
   async function restoreSession() {
     const session = await invoke<Session>("session_load");
     sidebarWidth = session.sidebarWidth;
-    terminalHeight = session.terminalHeight;
 
     if (session.folders.length > 0) loadFolderIcons();
     await tree.restore(session.folders, session.unfolded);
@@ -387,7 +426,6 @@
     active: docs.active?.path ?? null,
     sidebarCollapsed,
     sidebarWidth: Math.round(sidebarWidth),
-    terminalHeight: Math.round(terminalHeight),
   });
 
   $effect(() => {
@@ -404,18 +442,65 @@
   });
 
   // --- tabs -------------------------------------------------------------------
+  //
+  // One strip for files and terminals, in the order they were opened.
 
-  const tabs = $derived(
-    docs.list.map(
-      (doc): Tab => ({
-        key: doc.key,
-        name: doc.name,
-        detail: doc.path ?? "Not saved yet",
-        icon: fileIcon(doc.name),
-        dirty: doc.dirty,
-      }),
-    ),
-  );
+  /** When each tab was first seen, which is where in the strip it sits. */
+  const tabSeen = new Map<number, number>();
+
+  const tabs = $derived.by(() => {
+    const all = [
+      ...docs.list.map(
+        (doc): Tab => ({
+          key: doc.key,
+          name: doc.name,
+          detail: doc.path ?? "Not saved yet",
+          icon: fileIcon(doc.name),
+          dirty: doc.dirty,
+        }),
+      ),
+      ...terminals.map(
+        (terminal): Tab => ({
+          key: terminal.key,
+          name: terminal.name,
+          detail: terminal.cwd ?? "Terminal",
+          icon: iconUrl("console"),
+          dirty: false,
+        }),
+      ),
+    ];
+    for (const tab of all) if (!tabSeen.has(tab.key)) tabSeen.set(tab.key, tabSeen.size);
+    return all.sort((a, b) => tabSeen.get(a.key)! - tabSeen.get(b.key)!);
+  });
+
+  const activeTab = $derived(activeTerminal ?? docs.activeKey);
+  /** A file is what is on screen, rather than a terminal in front of one. */
+  const showingFile = $derived(docs.active !== null && activeTerminal === null);
+
+  function selectTab(key: number) {
+    if (isTerminal(key)) {
+      activeTerminal = key;
+      return;
+    }
+    const fromTerminal = activeTerminal !== null;
+    docs.select(key);
+    // Coming from a terminal the keyboard is still in it, behind the file.
+    if (fromTerminal) docs.editor.focus();
+  }
+
+  /** Close a tab, the one showing unless told otherwise. */
+  function closeTab(key: number | null = activeTab) {
+    if (key === null) return;
+    if (isTerminal(key)) closeTerminal(key);
+    else void docs.close(key);
+  }
+
+  /** Step to the next or previous tab, wrapping at the ends. */
+  function cycleTabs(step: 1 | -1) {
+    if (tabs.length < 2) return;
+    const index = tabs.findIndex((tab) => tab.key === activeTab);
+    selectTab(tabs[(index + step + tabs.length) % tabs.length].key);
+  }
 
   // --- pins -------------------------------------------------------------------
 
@@ -464,18 +549,22 @@
     // A dialog is up; the window behind it is not taking commands.
     const blocked = docs.busy || appearanceOpen || question !== null;
 
-    // Ctrl+` is the terminal's, from anywhere, the terminal included.
+    // Ctrl+` goes to the terminal and back, and with Shift opens another;
+    // from anywhere, a terminal included.
     if (event.code === "Backquote") {
       event.preventDefault();
       event.stopPropagation();
-      if (!blocked && !event.repeat) toggleTerminal();
+      if (blocked || event.repeat) return;
+      if (event.shiftKey) newTerminal();
+      else toggleTerminal();
       return;
     }
-    // Typed into the terminal, the rest belong to the shell: Ctrl+W there
-    // deletes a word, and must not close the file behind it.
-    if (inTerminal(event.target)) return;
 
     const key = event.key.toLowerCase();
+    // Typed into a terminal, the rest belong to the shell: Ctrl+W there
+    // deletes a word, and must not close the tab. Ctrl+Tab is the exception,
+    // being the way out to the other tabs.
+    if (inTerminal(event.target) && key !== "tab") return;
     if (!SHORTCUTS.has(key)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -483,7 +572,7 @@
     if (blocked) return;
 
     if (key === "tab") {
-      docs.cycle(event.shiftKey ? -1 : 1);
+      cycleTabs(event.shiftKey ? -1 : 1);
       return;
     }
     // Holding the others down should not open a stack of dialogs or files.
@@ -492,7 +581,9 @@
     if (key === "n") docs.newFile();
     else if (key === "o" && event.shiftKey) void openFolder();
     else if (key === "o") void docs.openDialog();
-    else if (key === "w") void docs.close();
+    else if (key === "w") closeTab();
+    // There is a file behind a terminal's tab, but it is not what is on screen.
+    else if (activeTerminal !== null) return;
     else if (event.shiftKey) void docs.saveAs();
     else void docs.save();
   }
@@ -565,40 +656,42 @@
     };
   }
 
-  /** The terminal. The way to copy out of it, and one of the ways to end it. */
-  function onTerminalContextMenu(event: MouseEvent) {
+  /** A terminal. The way to copy out of it, and one of the ways to end it. */
+  function onTerminalContextMenu(event: MouseEvent, key: number) {
+    const view = terminalViews[key];
     const back = (act: () => void) => () => {
       act();
       // The menu took the focus to be clicked; typing carries on after it.
-      terminal?.focus();
+      view?.focus();
     };
     // Only with something selected: there is nothing else it could copy.
-    const copy = terminal?.hasSelection() ? [item("Copy", back(() => terminal?.copy()))] : [];
+    const copy = view?.hasSelection() ? [item("Copy", back(() => view.copy()))] : [];
 
     ctx = {
       x: event.clientX,
       y: event.clientY,
       items: [
         ...copy,
-        item("Paste", back(() => terminal?.paste())),
+        item("Paste", back(() => view?.paste())),
         SEP,
-        item("Kill Terminal", killTerminal, true),
+        item("Kill Terminal", () => closeTerminal(key), true),
       ],
     };
   }
 
   /** A tab. */
   function onTabContextMenu(event: MouseEvent, key: number) {
+    const own = isTerminal(key)
+      ? [item("Kill Terminal", () => closeTerminal(key), true)]
+      : [
+          item("Save", () => void docs.save(key)),
+          item("Save As…", () => void docs.saveAs(key)),
+          item("Close", () => void docs.close(key)),
+        ];
     ctx = {
       x: event.clientX,
       y: event.clientY,
-      items: [
-        item("Save", () => void docs.save(key)),
-        item("Save As…", () => void docs.saveAs(key)),
-        item("Close", () => void docs.close(key)),
-        SEP,
-        item("Refresh Page", refreshPage),
-      ],
+      items: [...own, SEP, item("Refresh Page", refreshPage)],
     };
   }
 
@@ -701,8 +794,12 @@
 
 <div class="app">
   <TitleBar
-    hasFile={docs.active !== null}
-    path={docs.active ? (docs.active.path ?? docs.active.name) : null}
+    hasFile={showingFile}
+    path={activeTerminal !== null
+      ? (terminals.find((t) => t.key === activeTerminal)?.cwd ?? null)
+      : docs.active
+        ? (docs.active.path ?? docs.active.name)
+        : null}
     folderCount={tree.roots.length}
     onnew={() => docs.newFile()}
     onopen={() => void docs.openDialog()}
@@ -713,10 +810,7 @@
     onclosefile={() => void docs.close()}
     {sidebarCollapsed}
     ontogglesidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
-    {terminalOpen}
-    {terminalAlive}
-    ontoggleterminal={toggleTerminal}
-    onkillterminal={killTerminal}
+    onnewterminal={newTerminal}
     onnewwindow={newWindow}
     onappearance={() => (appearanceOpen = true)}
     onclosewindow={closeWindow}
@@ -750,42 +844,44 @@
 
     <!-- The resizer normally provides the gap on this side; collapsed, it is
          not rendered, so the stage supplies its own. -->
-    <section class="stage" class:railed={sidebarCollapsed} bind:clientHeight={stageHeight}>
+    <section class="stage" class:railed={sidebarCollapsed}>
       <!-- No strip with nothing open: an empty bar across the top of an empty
            editor is a line with no reason to be there. -->
       {#if tabs.length > 0}
         <TabBar
           {tabs}
-          activeKey={docs.activeKey}
-          onselect={(key) => docs.select(key)}
-          onclose={(key) => void docs.close(key)}
+          activeKey={activeTab}
+          onselect={selectTab}
+          onclose={closeTab}
           oncontext={onTabContextMenu}
         />
       {/if}
 
       <div class="editor-area">
-        <Editor host={docs.editor} />
-        {#if docs.list.length === 0}
+        <!-- Hidden, not removed, behind a terminal: the editor keeps its
+             scroll position and its measurements. -->
+        <div class="pane" class:hidden={activeTerminal !== null}>
+          <Editor host={docs.editor} />
+        </div>
+
+        <!-- Each for as long as its tab is open: with the last one goes
+             xterm, and with each its shell. -->
+        {#each terminals as terminal (terminal.key)}
+          <TerminalView
+            bind:this={terminalViews[terminal.key]}
+            active={activeTerminal === terminal.key}
+            cwd={terminal.cwd}
+            look={terminalLook}
+            scrollback={config.current.terminal.scrollback}
+            onexit={() => closeTerminal(terminal.key)}
+            oncontext={(event) => onTerminalContextMenu(event, terminal.key)}
+          />
+        {/each}
+
+        {#if docs.list.length === 0 && activeTerminal === null}
           <p class="empty">Ctrl+O to open a file, Ctrl+N for a new one</p>
         {/if}
       </div>
-
-      <!-- Not rendered until a terminal is asked for, and gone again once it
-           is killed: with it goes xterm, and the shell. -->
-      {#if terminalAlive}
-        <TerminalPanel
-          bind:this={terminal}
-          open={terminalOpen}
-          height={terminalHeight}
-          max={Math.max(TERMINAL_MIN, stageHeight - EDITOR_MIN)}
-          cwd={terminalCwd}
-          look={terminalLook}
-          scrollback={config.current.terminal.scrollback}
-          onresize={(h) => (terminalHeight = h)}
-          onexit={killTerminal}
-          oncontext={onTerminalContextMenu}
-        />
-      {/if}
     </section>
   </main>
 
@@ -800,7 +896,7 @@
     onmove={(pin, index) => void pins.move(pin, index)}
   >
     {#snippet start()}
-      {#if docs.vimMode && docs.active}
+      {#if docs.vimMode && showingFile}
         <span class="mode" data-mode={docs.vimMode}>{docs.vimMode}</span>
       {/if}
       <!-- Vim's `:` line, `/` search and messages are put here by `vim.ts`,
@@ -809,7 +905,7 @@
       <span class="vim-line" data-vim-line bind:this={docs.vimLine}></span>
     {/snippet}
     {#snippet info()}
-      {#if docs.active}
+      {#if docs.active && showingFile}
         <span>Ln {docs.cursor.line}, Col {docs.cursor.col}</span>
         <span>{indentLabel(docs.active.indent)}</span>
         <span>{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
@@ -882,12 +978,21 @@
     margin-left: var(--viewport-inset);
   }
 
-  /* Whatever the tab strip leaves. The editor fills it absolutely, so it is
-     the positioning context for that and for the empty-state hint. */
+  /* Whatever the tab strip leaves. The editor and the terminals fill it
+     absolutely, so it is the positioning context for them and for the
+     empty-state hint. */
   .editor-area {
     position: relative;
     flex: 1;
     min-height: 0;
+  }
+
+  .pane {
+    position: absolute;
+    inset: 0;
+  }
+  .pane.hidden {
+    visibility: hidden;
   }
 
   @media (prefers-reduced-motion: reduce) {

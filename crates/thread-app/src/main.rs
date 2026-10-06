@@ -111,6 +111,13 @@ fn main() {
             }
         })
         .on_page_load(|webview, payload| {
+            // A page starting over has lost its hold on the terminals the last
+            // one opened; left alone they would run on with nothing attached.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                webview
+                    .state::<commands::Terminals>()
+                    .close_window(webview.label());
+            }
             tracing::info!(
                 target: "thread::ui",
                 "PAGE_LOAD event={:?} url={}",

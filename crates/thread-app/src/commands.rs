@@ -460,53 +460,54 @@ pub async fn session_save(session: Session) -> Result<(), String> {
 
 // --- terminal ---------------------------------------------------------------
 //
-// One per window, in the panel that rises from the bottom bar. It belongs to
-// whatever the window is working on: a shell on this machine today, and one on
-// the remote host once a window can be connected to one. Everything below
-// deals in `dyn Terminal`, so that is a second thing `terminal_open` can make
-// rather than a second set of commands.
+// Terminals open as tabs, any number to a window. Each belongs to whatever its
+// window is working on: a shell on this machine today, and one on the remote
+// host once a window can be connected to one. Everything below deals in
+// `dyn Terminal`, so that is a second thing `terminal_open` can make rather
+// than a second set of commands.
 
-/// Each window's terminal, by window label.
+/// Every open terminal, by id.
 #[derive(Default)]
-pub struct Terminals(Mutex<HashMap<String, Open>>);
+pub struct Terminals(Mutex<HashMap<u64, Open>>);
 
-/// A terminal, and an id to tell it from the next one its window opens: a
-/// shell that has just ended must not take its replacement with it.
-type Open = (u64, Box<dyn Terminal>);
+/// A terminal, with the label of the window it is in.
+type Open = (String, Box<dyn Terminal>);
 
 impl Terminals {
-    /// Take a window's terminal out — only the one with this id, if one is
-    /// given. Dropping what comes back is what ends its shell, and is left to
-    /// the caller so that it happens outside the lock.
-    fn take(&self, label: &str, id: Option<u64>) -> Option<Box<dyn Terminal>> {
-        let mut open = self.0.lock().ok()?;
-        match open.get(label) {
-            Some((current, _)) if id.is_none_or(|id| id == *current) => {
-                open.remove(label).map(|(_, terminal)| terminal)
-            }
-            _ => None,
-        }
+    /// Take a terminal out. Dropping what comes back is what ends its shell,
+    /// and is left to the caller so that it happens outside the lock.
+    fn take(&self, id: u64) -> Option<Box<dyn Terminal>> {
+        let (_, terminal) = self.0.lock().ok()?.remove(&id)?;
+        Some(terminal)
     }
 
-    /// The window has gone; so does its shell.
+    /// The window has gone, or its page has been reloaded and can no longer
+    /// reach them: its shells go too.
     pub fn close_window(&self, label: &str) {
-        drop(self.take(label, None));
+        let Ok(mut open) = self.0.lock() else {
+            return;
+        };
+        let ids: Vec<u64> = open
+            .iter()
+            .filter(|(_, (window, _))| window == label)
+            .map(|(id, _)| *id)
+            .collect();
+        let closed: Vec<_> = ids.iter().filter_map(|id| open.remove(id)).collect();
+        drop(open);
+        drop(closed);
     }
 
-    fn with(&self, label: &str, act: impl FnOnce(&dyn Terminal)) {
+    fn with(&self, id: u64, act: impl FnOnce(&dyn Terminal)) {
         if let Ok(open) = self.0.lock() {
-            if let Some((_, terminal)) = open.get(label) {
+            if let Some((_, terminal)) = open.get(&id) {
                 act(terminal.as_ref());
             }
         }
     }
 }
 
-/// Start this window's terminal, in `cwd`. Output arrives on `on_output` as
-/// raw bytes; `on_exit` hears once, when the shell has ended.
-///
-/// A terminal the window already had is ended first. That is how a reloaded
-/// page, which never got to close the one it had, does not leave it running.
+/// Start a terminal for this window, in `cwd`. Output arrives on `on_output`
+/// as raw bytes; `on_exit` hears once, when the shell has ended.
 #[tauri::command]
 pub async fn terminal_open(
     app: AppHandle,
@@ -522,7 +523,6 @@ pub async fn terminal_open(
 
     let label = window.label().to_owned();
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    app.state::<Terminals>().close_window(&label);
 
     let options = terminal::Options {
         shell: stored_config().terminal.shell,
@@ -537,19 +537,19 @@ pub async fn terminal_open(
             let _ = on_output.send(InvokeResponseBody::Raw(chunk.to_vec()));
         },
         {
-            let (app, label) = (app.clone(), label.clone());
+            let app = app.clone();
             move || {
-                drop(app.state::<Terminals>().take(&label, Some(id)));
+                drop(app.state::<Terminals>().take(id));
                 let _ = on_exit.send(());
-                tracing::info!(target: "thread::terminal", "ENDED {label} #{id}");
+                tracing::info!(target: "thread::terminal", "ENDED #{id}");
             }
         },
     )
     .map_err(|e| e.to_string())?;
 
-    tracing::info!(target: "thread::terminal", "OPENED {label} #{id} {cols}x{rows}");
+    tracing::info!(target: "thread::terminal", "OPENED #{id} in {label} {cols}x{rows}");
     if let Ok(mut open) = app.state::<Terminals>().0.lock() {
-        open.insert(label, (id, Box::new(spawned)));
+        open.insert(id, (label, Box::new(spawned)));
     }
     Ok(id)
 }
@@ -559,25 +559,20 @@ pub async fn terminal_open(
 
 /// What was typed, or pasted, as the terminal emulator encoded it.
 #[tauri::command]
-pub fn terminal_write(window: WebviewWindow, terminals: State<'_, Terminals>, data: String) {
-    terminals.with(window.label(), |terminal| terminal.write(data.as_bytes()));
+pub fn terminal_write(terminals: State<'_, Terminals>, id: u64, data: String) {
+    terminals.with(id, |terminal| terminal.write(data.as_bytes()));
 }
 
 #[tauri::command]
-pub fn terminal_resize(
-    window: WebviewWindow,
-    terminals: State<'_, Terminals>,
-    cols: u16,
-    rows: u16,
-) {
-    terminals.with(window.label(), |terminal| terminal.resize(cols, rows));
+pub fn terminal_resize(terminals: State<'_, Terminals>, id: u64, cols: u16, rows: u16) {
+    terminals.with(id, |terminal| terminal.resize(cols, rows));
 }
 
-/// End the terminal `terminal_open` gave this id to, and everything running
-/// in it. Nothing happens if it has already gone.
+/// End a terminal and everything running in it. Nothing happens if it has
+/// already gone.
 #[tauri::command]
-pub fn terminal_close(window: WebviewWindow, terminals: State<'_, Terminals>, id: u64) {
-    drop(terminals.take(window.label(), Some(id)));
+pub fn terminal_close(terminals: State<'_, Terminals>, id: u64) {
+    drop(terminals.take(id));
 }
 
 // --- pins -------------------------------------------------------------------

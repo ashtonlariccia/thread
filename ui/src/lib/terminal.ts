@@ -2,12 +2,12 @@
  * The terminal emulator: xterm.js, wired to this window's shell.
  *
  * Nothing imports this at the top level. xterm is most of a megabyte of
- * source that a window with no terminal open has no use for, so the panel
- * loads it the first time it is shown and not before.
+ * source that a window with no terminal open has no use for, so it is loaded
+ * with the first terminal and not before.
  *
  * Drawn by xterm's DOM renderer. The WebGL one is faster under a flood of
- * output, and costs a GPU context and the memory behind it for as long as a
- * terminal exists — the wrong trade for a panel that mostly runs a build.
+ * output, and costs a GPU context and the memory behind it for every
+ * terminal that is open — the wrong trade for a tab that mostly runs a build.
  */
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -50,7 +50,7 @@ function theme(): ITheme {
   const color = (name: string) => style.getPropertyValue(name).trim();
 
   return {
-    // Unpainted: the panel sits on the same surface as the editor above it.
+    // Unpainted: a terminal sits on the same surface the editor does.
     background: "#00000000",
     foreground: color("--fg"),
     cursor: color("--caret"),
@@ -120,11 +120,17 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     return true;
   });
 
-  // Addressed to the window rather than to a terminal id: xterm answers the
+  // Held until the shell has an id to address it by. xterm answers the
   // console's opening questions the moment they arrive, which can be before
   // `terminal_open` has come back with one.
-  term.onData((data) => void invoke("terminal_write", { data }));
-  term.onResize(({ cols, rows }) => void invoke("terminal_resize", { cols, rows }));
+  const early: string[] = [];
+  term.onData((data) => {
+    if (id === null) early.push(data);
+    else void invoke("terminal_write", { id, data });
+  });
+  term.onResize(({ cols, rows }) => {
+    if (id !== null) void invoke("terminal_resize", { id, cols, rows });
+  });
 
   const onOutput = new Channel<ArrayBuffer>();
   onOutput.onmessage = (bytes) => term.write(new Uint8Array(bytes));
@@ -146,8 +152,9 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
         return;
       }
       id = opened;
-      // The panel may have been resized while the shell was starting.
-      void invoke("terminal_resize", { cols: term.cols, rows: term.rows });
+      if (early.length > 0) void invoke("terminal_write", { id, data: early.join("") });
+      // The window may have been resized while the shell was starting.
+      void invoke("terminal_resize", { id, cols: term.cols, rows: term.rows });
     },
     (e) => {
       // Left on screen rather than closed, so there is something to read.
@@ -159,7 +166,7 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
   // the whole screen for the program on the other end.
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   const refit = () => {
-    // Nothing can be measured while the panel is not laid out.
+    // Nothing can be measured while it is not laid out.
     if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
   };
   const observer = new ResizeObserver(() => {

@@ -252,7 +252,7 @@ impl Default for Vim {
     }
 }
 
-/// The terminal in the bottom panel.
+/// The terminals that open as tabs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Terminal {
