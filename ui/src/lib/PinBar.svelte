@@ -352,7 +352,8 @@
     flex: 1;
     min-width: 0;
     overflow: hidden;
-    color: var(--fg-dim);
+    /* All of it in the accent: one strip, not a colour per item. */
+    color: var(--accent);
     font-size: 0.71rem;
     white-space: nowrap;
   }

@@ -448,7 +448,11 @@
     return {
       folders: tree.roots.map((root) => root.path),
       unfolded: tree.unfolded,
-      files: docs.list.flatMap((doc) => (doc.path === null ? [] : [doc.path])),
+      // As the strip has them, so tabs dragged into an order come back in it.
+      files: tabs.flatMap((tab) => {
+        const path = docs.find(tab.key)?.path ?? null;
+        return path === null ? [] : [path];
+      }),
       active: docs.active?.path ?? null,
     };
   }
@@ -838,12 +842,16 @@
 
   // --- tabs -------------------------------------------------------------------
   //
-  // One strip for files and terminals, in the order they were opened.
+  // One strip for files and terminals, in the order they were opened until
+  // one is dragged somewhere else.
 
-  /** When each tab was first seen, which is where in the strip it sits. */
+  /** Each tab's place in the strip: when it was first seen, unless moved since. */
   const tabSeen = new Map<number, number>();
+  /** Counts the moves. The map is not watched, so this is what says it changed. */
+  let tabMoves = $state(0);
 
   const tabs = $derived.by(() => {
+    void tabMoves;
     const all = [
       ...docs.list.map(
         (doc): Tab => ({
@@ -881,6 +889,19 @@
     docs.select(key);
     // Coming from a terminal the keyboard is still in it, behind the file.
     if (fromTerminal) docs.editor.focus();
+  }
+
+  /** Put a tab at `index` of the strip, the others closing up around it. */
+  function moveTab(key: number, index: number) {
+    const order = tabs.map((tab) => tab.key);
+    const from = order.indexOf(key);
+    if (from === -1) return;
+    // The places stay the ones these tabs hold; which tab has which changes.
+    const places = order.map((each) => tabSeen.get(each)!);
+    order.splice(from, 1);
+    order.splice(index, 0, key);
+    order.forEach((each, at) => tabSeen.set(each, places[at]));
+    tabMoves++;
   }
 
   /** Close a tab, the one showing unless told otherwise. */
@@ -1289,6 +1310,7 @@
           activeKey={activeTab}
           onselect={selectTab}
           onclose={closeTab}
+          onmove={moveTab}
           oncontext={onTabContextMenu}
         />
       {/if}
@@ -1344,8 +1366,7 @@
   >
     {#snippet start()}
       <!-- Where the window is working: this machine or a remote, then as
-           whom, on what, in which mode, and on which branch. Each its own
-           colour, so the eye finds one without reading the rest. All of it is
+           whom, on what, in which mode, and on which branch. All of it is
            for reading; changing any of it is done from the menus.
 
            `data-drop` is the order they give way in as the window narrows,
@@ -1552,34 +1573,15 @@
     white-space: nowrap;
   }
 
-  /* The left end of the bottom bar. Every item is the bar's own text, with
-     nothing drawn round it; the colour is what tells one from the next. */
-  .place {
-    color: #94e2d5;
-  }
-  .place[data-status="connected"] {
-    color: var(--ok);
-  }
-  .place[data-status="connecting"] {
-    color: #f9e2af;
-  }
+  /* The left end of the bottom bar. Every item is the bar's own text, in the
+     accent like the rest of it. Only a connection that has dropped is set
+     apart: that one is a fault, not a fact about the window. */
   .place[data-status="lost"] {
     color: var(--danger);
   }
-
-  .user {
-    color: #fab387;
-  }
-  .host {
-    color: #89b4fa;
-  }
   /* Named the way the status items are: "Normal", not vim's shouted "NORMAL". */
   .mode {
-    color: var(--accent);
     text-transform: capitalize;
-  }
-  .git {
-    color: #f5c2e7;
   }
   /* A machine or a branch with a very long name is cut short rather than
      allowed to push everything else out of the bar. */

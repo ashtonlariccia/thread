@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { dropGap, dropIndex } from "./pins";
+
   /** One open file, as the strip shows it. */
   export type Tab = {
     key: number;
@@ -14,11 +16,13 @@
     activeKey: number | null;
     onselect: (key: number) => void;
     onclose: (key: number) => void;
+    /** Drop a tab at a new position. `index` counts the reordered strip. */
+    onmove: (key: number, index: number) => void;
     /** Right-click on a tab. App owns the menu, so only one is ever open. */
     oncontext: (event: MouseEvent, key: number) => void;
   };
 
-  let { tabs, activeKey, onselect, onclose, oncontext }: Props = $props();
+  let { tabs, activeKey, onselect, onclose, onmove, oncontext }: Props = $props();
 
   let strip = $state<HTMLElement | undefined>();
 
@@ -35,6 +39,8 @@
     if (event.deltaY === 0 || !strip || strip.scrollWidth <= strip.clientWidth) return;
     event.preventDefault();
     strip.scrollLeft += event.deltaY;
+    // Every tab just moved; the drag cache no longer describes the strip.
+    mids = null;
   }
 
   // Middle-click closes, as it does on tabs everywhere else.
@@ -43,20 +49,132 @@
     event.preventDefault();
     onclose(key);
   }
+
+  // --- drag to reorder ------------------------------------------------------
+  //
+  // As the pins below are dragged, and for the same reasons: pointer events,
+  // because the window's own drag-drop handler swallows `dragstart`, and a
+  // line where the tab will land rather than tabs shuffling under the pointer.
+
+  /** Pixels of travel before a press becomes a drag rather than a click. */
+  const DRAG_SLOP = 4;
+
+  let drag = $state<{ from: number; x: number; started: boolean; gap: number } | null>(null);
+
+  /** Set for the duration of one click, so a finished drag doesn't also select. */
+  let dragged = false;
+
+  /** Each tab's horizontal midpoint, measured once per drag (see `PinBar`). */
+  let mids: number[] | null = null;
+
+  function midpoints(): number[] {
+    if (mids) return mids;
+    if (!strip) return [];
+    mids = [...strip.querySelectorAll<HTMLElement>(".tab")].map((tab) => {
+      const box = tab.getBoundingClientRect();
+      return box.left + box.width / 2;
+    });
+    return mids;
+  }
+
+  function onPointerDown(event: PointerEvent, index: number) {
+    // Left button only: right opens the menu, middle closes.
+    if (event.button !== 0) return;
+    // A press on the cross is a press on the cross. Capturing it for the tab
+    // would hand the tab the click that was meant to close it.
+    if ((event.target as Element).closest(".close")) return;
+    dragged = false;
+    mids = null;
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    } catch {
+      /* no capture available for this pointer */
+    }
+    drag = { from: index, x: event.clientX, started: false, gap: index };
+  }
+
+  function onPointerMove(event: PointerEvent) {
+    if (!drag) return;
+    if (!drag.started) {
+      if (Math.abs(event.clientX - drag.x) < DRAG_SLOP) return;
+      drag.started = true;
+    }
+    drag.gap = dropGap(midpoints(), event.clientX);
+  }
+
+  function onPointerUp(event: PointerEvent) {
+    const current = drag;
+    drag = null;
+    if (!current?.started) return;
+
+    dragged = true;
+    const index = dropIndex(midpoints(), event.clientX, current.from);
+    if (index !== current.from) onmove(tabs[current.from].key, index);
+  }
+
+  function onPointerCancel() {
+    drag = null;
+    mids = null;
+  }
+
+  /** A drag finishes with a click on the same tab; that click is not a select. */
+  function onClick(key: number) {
+    if (dragged) {
+      dragged = false;
+      return;
+    }
+    onselect(key);
+  }
+
+  /**
+   * Where to paint the insertion line: before the tab at this index, or past
+   * the last one. Null while the gap is one the dragged tab already occupies.
+   */
+  const marker = $derived.by(() => {
+    if (!drag?.started) return null;
+    if (drag.gap === drag.from || drag.gap === drag.from + 1) return null;
+    return drag.gap;
+  });
+
+  function onKeydown(event: KeyboardEvent, key: number, index: number) {
+    if (event.key === "Enter" || event.key === " ") {
+      onselect(key);
+      return;
+    }
+    // Reordering without a mouse, as on the pins.
+    if (event.ctrlKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      const to = index + (event.key === "ArrowLeft" ? -1 : 1);
+      if (to >= 0 && to < tabs.length) onmove(key, to);
+    }
+  }
 </script>
 
-<div class="tabs" role="tablist" bind:this={strip} onwheel={onWheel}>
-  {#each tabs as tab (tab.key)}
+<div
+  class="tabs"
+  class:dragging={drag?.started}
+  role="tablist"
+  bind:this={strip}
+  onwheel={onWheel}
+>
+  {#each tabs as tab, index (tab.key)}
     <div
       class="tab"
       class:active={tab.key === activeKey}
       class:dirty={tab.dirty}
+      class:lifted={drag?.started && drag.from === index}
+      class:drop-before={marker === index}
+      class:drop-after={marker === tabs.length && index === tabs.length - 1}
       role="tab"
       tabindex="0"
       aria-selected={tab.key === activeKey}
       title={tab.detail}
-      onclick={() => onselect(tab.key)}
-      onkeydown={(e) => (e.key === "Enter" || e.key === " ") && onselect(tab.key)}
+      onclick={() => onClick(tab.key)}
+      onkeydown={(e) => onKeydown(e, tab.key, index)}
+      onpointerdown={(e) => onPointerDown(e, index)}
+      onpointermove={onPointerMove}
+      onpointerup={onPointerUp}
+      onpointercancel={onPointerCancel}
       onauxclick={(e) => onAuxClick(e, tab.key)}
       onmousedown={(e) => {
         // Stops the middle button starting the webview's autoscroll.
@@ -120,6 +238,7 @@
   }
 
   .tab {
+    position: relative;
     flex: none;
     display: flex;
     align-items: center;
@@ -147,6 +266,33 @@
   .tab:focus-visible {
     outline: 1px solid var(--accent);
     outline-offset: -1px;
+  }
+
+  /* While a tab is in flight the cursor says so along the whole strip. */
+  .tabs.dragging,
+  .tabs.dragging .tab {
+    cursor: grabbing;
+  }
+  /* The tab being carried: dimmed, so the line reads as what is being placed. */
+  .tab.lifted {
+    opacity: 0.4;
+  }
+  /* Where it will land. */
+  .drop-before::before,
+  .drop-after::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--accent);
+  }
+  .drop-before::before {
+    left: -1px;
+  }
+  .drop-after::after {
+    right: 0;
   }
 
   .tab img {
