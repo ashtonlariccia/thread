@@ -400,6 +400,15 @@
     if (next !== undefined) selectTab(next);
   }
 
+  // The last file closed, however it was closed, and there is a terminal
+  // open: that is what there is to show, so show it rather than a blank
+  // editor with a tab nobody is on.
+  $effect(() => {
+    if (docs.activeKey !== null || activeTerminal !== null || terminals.length === 0) return;
+    const back = terminals.find((t) => t.key === lastTerminal) ?? terminals.at(-1)!;
+    activeTerminal = back.key;
+  });
+
   function inTerminal(target: EventTarget | null): boolean {
     return target instanceof Element && target.closest("[data-terminal]") !== null;
   }

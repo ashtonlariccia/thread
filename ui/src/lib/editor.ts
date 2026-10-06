@@ -11,17 +11,25 @@
  * one. Some of it is the same for every file (the font, the palette) and some
  * is each file's own (its indentation, its language).
  */
+import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import {
   defaultKeymap,
   history,
   historyKeymap,
   indentLess,
   indentMore,
+  insertNewlineAndIndent,
   redo,
   selectAll,
   undo,
 } from "@codemirror/commands";
-import { HighlightStyle, indentUnit, syntaxHighlighting } from "@codemirror/language";
+import {
+  getIndentation,
+  HighlightStyle,
+  indentOnInput,
+  indentUnit,
+  syntaxHighlighting,
+} from "@codemirror/language";
 import {
   Compartment,
   countColumn,
@@ -66,6 +74,8 @@ export type EditorLook = {
   wordWrap: boolean;
   /** Glide the caret between positions rather than jumping. */
   smoothCaret: boolean;
+  /** Type the closing bracket or quote along with the opening one. */
+  autoClose: boolean;
 };
 
 type Events = {
@@ -77,6 +87,13 @@ type Events = {
    * anything that hangs off the view itself rather than off a file's state.
    */
   onview: (view: EditorView) => void;
+};
+
+/** Held, faded out, faded back in. The hold is what a moving caret is seen in. */
+const CARET_BLINK = {
+  "0%, 32%": { opacity: "1" },
+  "66%": { opacity: "0" },
+  "100%": { opacity: "1" },
 };
 
 // Colours come from app.css, so the editor follows the window's palette. The
@@ -111,6 +128,22 @@ const chrome = EditorView.theme(
       width: "2px",
       borderRadius: "1px",
       backgroundColor: "var(--caret)",
+    },
+    // The caret breathes: there for a moment, faded out, faded back. Only in
+    // the editor being typed into; the rules below for one that is not would
+    // lose to an animation.
+    //
+    // Two names for one set of keyframes. Changing which of them the caret
+    // wears is what starts the cycle over each time it moves (see
+    // `CaretMarker`), so a caret in motion is always solid and it is only one
+    // left alone that starts to fade.
+    "@keyframes thread-caret-a": CARET_BLINK,
+    "@keyframes thread-caret-b": CARET_BLINK,
+    "&.cm-focused .cm-threadCaret": {
+      animation: "thread-caret-a 1.25s ease-in-out infinite",
+    },
+    "&.cm-focused .cm-threadCaret.cm-threadCaret-again": {
+      animationName: "thread-caret-b",
     },
     // The vim extension marks the scroller while a block cursor is called
     // for: normal, visual and replace modes. The shape follows from that
@@ -186,6 +219,8 @@ class CaretMarker implements LayerMarker {
   // eased from one to the next.
   update(el: HTMLElement) {
     this.place(el);
+    // It moved, so its fade starts over from fully there.
+    el.classList.toggle("cm-threadCaret-again");
     return true;
   }
 
@@ -319,6 +354,9 @@ function lookExtension(look: EditorLook): Extension {
         ].join(", "),
       },
     }),
+    // Ahead of the keymap below it in each file's extensions, which is what
+    // lets Backspace between a pair take both of them.
+    look.autoClose ? [closeBrackets(), keymap.of(closeBracketsKeymap)] : [],
     look.lineNumbers ? [numbers, highlightActiveLineGutter()] : [],
     look.wordWrap ? EditorView.lineWrapping : [],
   ];
@@ -361,6 +399,86 @@ const insertIndent: Command = (view) => {
   );
   return true;
 };
+
+// --- indentation as you type ---------------------------------------------------
+
+const CLOSER: Record<string, string> = { "{": "}", "[": "]", "(": ")" };
+
+/**
+ * Enter.
+ *
+ * Where the file's language can say how a line should be indented, it does:
+ * that knows a continued statement from a new one, and a `case` from a brace.
+ * Where it cannot (plain text, a language with no grammar here, a grammar
+ * still being fetched) the rules are the ones every C-style editor shares:
+ *
+ * - a new line starts where the one above it did;
+ * - one step further in, after an opening bracket;
+ * - and between a pair, the pair is opened out, with the cursor on an
+ *   indented line of its own and the closing bracket back under the opener:
+ *
+ *       int main() {
+ *           |
+ *       }
+ */
+const newlineAndIndent: Command = (view) => {
+  const { state } = view;
+  if (state.readOnly) return false;
+  if (getIndentation(state, state.selection.main.head) !== null) {
+    return insertNewlineAndIndent(view);
+  }
+
+  const unit = state.facet(indentUnit);
+  view.dispatch(
+    state.changeByRange((range) => {
+      const line = state.doc.lineAt(range.from);
+      const before = line.text.slice(0, range.from - line.from);
+      const lead = /^[ \t]*/.exec(before)![0];
+      const opener = before.trimEnd().slice(-1);
+      const next = state.doc.sliceString(range.to, Math.min(range.to + 1, state.doc.length));
+
+      const inner = opener in CLOSER ? lead + unit : lead;
+      const between = opener in CLOSER && next === CLOSER[opener];
+      const insert = between ? `\n${inner}\n${lead}` : `\n${inner}`;
+      return {
+        changes: { from: range.from, to: range.to, insert },
+        range: EditorSelection.cursor(range.from + 1 + inner.length),
+      };
+    }),
+    { scrollIntoView: true, userEvent: "input" },
+  );
+  return true;
+};
+
+/**
+ * A closing bracket typed on a line of its own steps back out to where its
+ * block began. The language does this itself where it can (`indentOnInput`);
+ * this is the same thing for where it cannot.
+ */
+const dedentOnClose = EditorView.inputHandler.of((view, from, to, text) => {
+  if (from !== to || !Object.values(CLOSER).includes(text)) return false;
+  const { state } = view;
+  if (state.readOnly || getIndentation(state, from) !== null) return false;
+
+  const line = state.doc.lineAt(from);
+  const before = line.text.slice(0, from - line.from);
+  // Only at the start of an otherwise empty stretch of indentation, and not
+  // when the bracket is already there to be typed over.
+  if (before === "" || before.trim() !== "") return false;
+  if (state.doc.sliceString(from, from + 1) === text) return false;
+
+  const unit = state.facet(indentUnit);
+  const lead = before.endsWith(unit)
+    ? before.slice(0, -unit.length)
+    : before.replace(unit === "\t" ? /\t$/ : / {1,8}$/, "");
+  view.dispatch({
+    changes: { from: line.from, to: from, insert: lead + text },
+    selection: EditorSelection.cursor(line.from + lead.length + text.length),
+    scrollIntoView: true,
+    userEvent: "input.type",
+  });
+  return true;
+});
 
 function cursorOf(state: EditorState): Cursor {
   const head = state.selection.main.head;
@@ -422,8 +540,11 @@ export class EditorHost {
         drawSelection(),
         caretLayer,
         EditorState.allowMultipleSelections.of(true),
+        indentOnInput(),
+        dedentOnClose,
         keymap.of([
           { key: "Tab", run: insertIndent, shift: indentLess },
+          { key: "Enter", run: newlineAndIndent },
           ...defaultKeymap,
           ...historyKeymap,
         ]),

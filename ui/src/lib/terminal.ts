@@ -83,7 +83,8 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     fontSize: options.fontSize,
     cursorStyle: options.cursor,
     scrollback: options.scrollback,
-    cursorBlink: false,
+    // Eased rather than switched on and off: see `TerminalView`'s styles.
+    cursorBlink: true,
     // No hollow box while the editor has the keyboard: one caret at a time.
     cursorInactiveStyle: "none",
     allowTransparency: true,
@@ -106,19 +107,30 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
   };
 
   term.attachCustomKeyEventHandler((event) => {
-    if (event.type !== "keydown" || !event.ctrlKey || event.altKey) return true;
+    if (event.type !== "keydown" || event.altKey) return true;
     const key = event.key.toLowerCase();
 
+    // The keys Windows has always had for it, as well as the modern ones.
+    if (key === "insert") {
+      if (event.ctrlKey && !event.shiftKey) copy();
+      // Shift+Insert, left alone, is a paste to the webview as Ctrl+V is.
+      return !(event.ctrlKey || event.shiftKey);
+    }
+    if (!event.ctrlKey) return true;
+
     // Ctrl+C copies when something is selected, and is the interrupt it has
-    // always been when nothing is.
+    // always been when nothing is. With Shift it only ever copies.
     if (key === "c" && (event.shiftKey || term.hasSelection())) {
       copy();
       return false;
     }
-    // Left alone, the webview pastes into xterm's own text field, which is
-    // the path that brackets the paste for the program reading it. A
-    // full-screen program keeps the plain Ctrl+V: in vim it is block select.
-    if (key === "v" && (event.shiftKey || term.buffer.active.type !== "alternate")) return false;
+    // Ctrl+V pastes, whatever is running: a shell, or a full-screen program
+    // such as an agent or an editor. Left alone, the webview pastes into
+    // xterm's own text field, and that is the path that marks the text as a
+    // paste for a program that asked to be told — which is what lets one
+    // take several lines as a block instead of as so many presses of Enter.
+    // (Vim's block select, Ctrl+V there, is also on Ctrl+Q.)
+    if (key === "v") return false;
     return true;
   });
 

@@ -151,6 +151,7 @@ export class Documents {
       relativeLineNumbers: config.editor.relative_line_numbers,
       wordWrap: config.editor.word_wrap,
       smoothCaret: config.editor.smooth_caret,
+      autoClose: config.editor.auto_close,
     });
     this.editor.setHighlightStyle(syntaxTheme(config.theme.syntax));
     this.#setVim(config.vim.enabled);

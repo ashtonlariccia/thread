@@ -129,6 +129,7 @@
     },
     { key: "word_wrap", label: "Word wrap" },
     { key: "smooth_caret", label: "Smooth caret" },
+    { key: "auto_close", label: "Close brackets and quotes" },
   ];
 </script>
 

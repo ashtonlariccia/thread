@@ -58,6 +58,8 @@ relative_line_numbers = false
 word_wrap = false
 # Glide the caret to where it is going instead of jumping there.
 smooth_caret = true
+# Type the closing bracket or quote along with the opening one.
+auto_close = true
 
 [files]
 # Names the file tree leaves out. `*` is any run of characters and `?` is any
@@ -171,6 +173,8 @@ pub struct Editor {
     pub word_wrap: bool,
     /// Animate the caret between positions.
     pub smooth_caret: bool,
+    /// Close brackets and quotes as they are opened.
+    pub auto_close: bool,
 }
 
 impl Default for Editor {
@@ -186,6 +190,7 @@ impl Default for Editor {
             relative_line_numbers: false,
             word_wrap: false,
             smooth_caret: true,
+            auto_close: true,
         }
     }
 }

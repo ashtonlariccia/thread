@@ -31,6 +31,7 @@ export type EditorConfig = {
   relative_line_numbers: boolean;
   word_wrap: boolean;
   smooth_caret: boolean;
+  auto_close: boolean;
 };
 
 export type TerminalCursor = "block" | "bar" | "underline";
@@ -64,6 +65,7 @@ export const DEFAULTS: Config = {
     relative_line_numbers: false,
     word_wrap: false,
     smooth_caret: true,
+    auto_close: true,
   },
   files: { exclude: [".*"] },
   theme: { syntax: "catppuccin", accent: "#cba6f7" },

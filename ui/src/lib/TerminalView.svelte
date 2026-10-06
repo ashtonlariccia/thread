@@ -105,4 +105,22 @@
   .term :global(.xterm-viewport) {
     background-color: transparent !important;
   }
+
+  /* The cursor fades out and back rather than switching off and on. xterm
+     blinks it with keyframes of its own, stepped; the same keyframes eased
+     are a fade for the block and the bar. The underline's hide a border by
+     its style, which has nothing between there and gone, so it is given a
+     set that fades the colour instead. */
+  .term :global(.xterm-cursor.xterm-cursor-blink) {
+    animation-duration: 1.25s !important;
+    animation-timing-function: ease-in-out !important;
+  }
+  .term :global(.xterm-cursor.xterm-cursor-blink.xterm-cursor-underline) {
+    animation-name: thread-underline-fade !important;
+  }
+  @keyframes -global-thread-underline-fade {
+    50% {
+      border-bottom-color: transparent;
+    }
+  }
 </style>
