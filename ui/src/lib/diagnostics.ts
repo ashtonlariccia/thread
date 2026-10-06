@@ -1,23 +1,18 @@
 /**
  * What a language server has to say about a file, drawn where it applies.
  *
- * As the VS Code extension Error Lens draws it, at that extension's
- * defaults: a line with a problem is tinted, and the problem is written out
- * after the end of it, four characters on, in the colour of its severity.
- * One message to a line, the most serious there, on one line however long it
- * is: what does not fit is cut off at the edge of the editor. Hints are
- * underlined and not written out. The colours are the extension's own.
+ * A line with problems is tinted, and after the end of it is a dot for each
+ * of them, in the colour of its severity. On the line the cursor is on, the
+ * dots give way to the problem written out, as the VS Code extension Error
+ * Lens writes it at its defaults: four characters on, the most serious on
+ * the line, on one line however long it is, in that extension's colours.
+ * Hints are underlined, and get neither.
  *
- * One thing is added. On the line the cursor is on, or the one being pointed
- * at, the message opens into a box under the line with everything said about
- * the line, in full, wrapped to the width of the editor: which is how a
- * message too long for a small window gets read.
- *
- * None of it is text in the editor. Both are drawn by the line's own
+ * None of it is text in the editor. It is drawn by the line's own
  * stylesheet, from attributes, so there is nothing there for the cursor to
- * be beside, for a selection to take in, or for a copy to pick up; and the
- * box is laid over the lines below rather than among them, so opening it
- * moves nothing.
+ * be beside, for a selection to take in, or for a copy to pick up; and it is
+ * out of the line's flow, so a long message makes the line no wider and is
+ * simply cut off where the editor ends.
  *
  * This only draws. What the complaints are is whoever sets them's business.
  */
@@ -54,12 +49,21 @@ export function lensText(message: string): string {
   return flat.length > LENS_CHARS ? `${flat.slice(0, LENS_CHARS)}…` : flat;
 }
 
-/** Everything said about a line, in full: the most serious first, one to a paragraph. */
-export function lensDetail(all: Diagnostic[]): string {
-  return [...all]
+/** The most dots a line is given: past this it is "a lot" either way. */
+const MAX_DOTS = 8;
+
+/**
+ * The dots after a line, one for each problem and the most serious first, as
+ * the two things a stylesheet draws them from: the colour of the first, and
+ * the rest as shadows of it, each a step further along.
+ */
+export function lensDots(all: Diagnostic[]): { first: string; rest: string } {
+  const colours = [...all]
     .sort((a, b) => rank(a) - rank(b))
-    .map((d) => (d.source ? `${d.message.trim()} (${d.source})` : d.message.trim()))
-    .join("\n");
+    .slice(0, MAX_DOTS)
+    .map((d) => COLOURS[d.severity].text);
+  const rest = colours.slice(1).map((colour, index) => `${(index + 1) * DOT_STEP}em 0 0 ${colour}`);
+  return { first: colours[0], rest: rest.length > 0 ? rest.join(", ") : "none" };
 }
 
 function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
@@ -88,9 +92,13 @@ function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
     ...[...lines].map(([from, all]) => {
       // The first of the most serious, as they came.
       const worst = all.reduce((a, b) => (rank(b) < rank(a) ? b : a));
+      const dots = lensDots(all);
       return Decoration.line({
         class: `cm-lens-line cm-lens-line-${worst.severity}`,
-        attributes: { "data-lens": lensText(worst.message), "data-lens-detail": lensDetail(all) },
+        attributes: {
+          "data-lens": lensText(worst.message),
+          style: `--lens-dot: ${dots.first}; --lens-dots: ${dots.rest}`,
+        },
       }).range(from);
     }),
   ];
@@ -117,45 +125,39 @@ const COLOURS: Record<Severity, { text: string; line: string }> = {
   hint: { text: "#2faf64", line: "#17a2a220" },
 };
 
-/** The line the message opens on: the one pointed at, and the cursor's. */
-const OPEN = [".cm-lens-line:hover::after", "&.cm-focused .cm-activeLine.cm-lens-line::after"].join(", ");
+/** A dot's width, and how far each is from the one before, in ems. */
+const DOT_SIZE = 0.56;
+const DOT_STEP = 0.95;
 
 const look = EditorView.baseTheme({
-  // The message after the line. Out of the flow, though it sits where it
-  // would have in it, so that a long one makes the line no wider: what does
-  // not fit is cut off where the line ends, rather than giving the editor
-  // somewhere to scroll sideways to.
+  // After the line, and out of its flow though it sits where it would have
+  // in it: so that nothing drawn here makes the line any wider, and what
+  // does not fit is cut off where the line ends rather than giving the
+  // editor somewhere to scroll sideways to.
   ".cm-lens-line": { position: "relative", overflowX: "clip" },
+  // The dots. One is drawn, and the others are its shadows.
   ".cm-lens-line::after": {
-    content: "attr(data-lens)",
+    content: '""',
     position: "absolute",
+    width: `${DOT_SIZE}em`,
+    height: `${DOT_SIZE}em`,
     marginLeft: "4ch",
-    whiteSpace: "pre",
+    // Halfway down the row of text, whatever the line height is.
+    marginTop: `calc((1lh - ${DOT_SIZE}em) / 2)`,
+    borderRadius: "50%",
+    backgroundColor: "var(--lens-dot)",
+    boxShadow: "var(--lens-dots)",
   },
-  // Opened: everything said about the line, in a box hung under it. Taken
-  // out of the flow, so it is as tall as it needs to be and nothing moves to
-  // make room for it; and as wide as what it says, up to the width of the
-  // editor it is in, which is what wraps it to a small window or a narrow
-  // pane. The pointer goes through it, so the lines it lies over can still
-  // be pointed at and clicked.
-  ".cm-scroller": { containerType: "inline-size" },
-  [OPEN]: {
-    content: "attr(data-lens-detail)",
-    position: "absolute",
-    top: "100%",
-    left: "2ch",
-    zIndex: "5",
-    width: "max-content",
-    maxWidth: "calc(100cqw - 9ch)",
-    margin: "0",
-    padding: "1px 0.8em",
-    borderRadius: "0.2em",
-    border: "1px solid",
-    backgroundColor: "var(--bg-menu)",
-    boxShadow: "0 6px 18px #0008",
-    whiteSpace: "pre-wrap",
-    overflowWrap: "anywhere",
-    pointerEvents: "none",
+  // On the cursor's line, in the editor being typed into: the message.
+  "&.cm-focused .cm-activeLine.cm-lens-line::after": {
+    content: "attr(data-lens)",
+    width: "auto",
+    height: "auto",
+    marginTop: "0",
+    borderRadius: "0",
+    backgroundColor: "transparent",
+    boxShadow: "none",
+    whiteSpace: "pre",
   },
   ".cm-lens-range": {
     textDecorationLine: "underline",

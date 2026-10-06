@@ -1,7 +1,7 @@
 import { EditorState, Text } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 
-import { diagnostics, drawn, lensDetail, setDiagnostics } from "./diagnostics";
+import { diagnostics, drawn, lensDots, setDiagnostics } from "./diagnostics";
 import { toCompletions, toDiagnostic, toOffset, toPosition, toUri, uriKey } from "./lsp";
 
 const doc = Text.of(["fn main() {", "    let x = 1;", "}"]);
@@ -83,10 +83,11 @@ describe("what a server finds wrong", () => {
       "cm-lens-line cm-lens-line-error",
       "mismatched types ⏎ expected `()`",
     ]);
-    // And all of them, in full, for when the line is opened.
-    expect(lensDetail(found.map((w) => toDiagnostic(doc, w)))).toBe(
-      "mismatched types\nexpected `()`\nunused",
-    );
+    // And a dot for each, the most serious first.
+    expect(lensDots(found.map((w) => toDiagnostic(doc, w)))).toEqual({
+      first: "#ff6464",
+      rest: "0.95em 0 0 #fa973a",
+    });
   });
 
   it("goes when the server says there is nothing wrong any more", () => {
