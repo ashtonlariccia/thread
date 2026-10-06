@@ -13,6 +13,8 @@
   type Props = {
     /** Whether this is the tab being shown. The shell runs either way. */
     active: boolean;
+    /** Whether it is being shown in the pane the keyboard is in. */
+    focused: boolean;
     /** Where the shell starts. Read once, when it does. */
     cwd: string | null;
     look: TerminalLook;
@@ -22,7 +24,7 @@
     oncontext: (event: MouseEvent) => void;
   };
 
-  let { active, cwd, look, scrollback, onexit, oncontext }: Props = $props();
+  let { active, focused, cwd, look, scrollback, onexit, oncontext }: Props = $props();
 
   let host: HTMLElement;
   let handle = $state.raw<TerminalHandle | null>(null);
@@ -56,10 +58,12 @@
     };
   });
 
-  // Coming to a terminal's tab is asking to type in it.
+  // Coming to a terminal's tab, or to the pane it is showing in, is asking
+  // to type in it.
   $effect(() => {
-    if (active) handle?.focus();
+    if (focused) handle?.focus();
   });
+
 
   $effect(() => {
     handle?.restyle(look);

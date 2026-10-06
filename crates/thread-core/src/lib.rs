@@ -13,6 +13,8 @@ pub mod document;
 pub mod fsops;
 pub mod git;
 pub mod known_hosts;
+pub mod lsp;
+
 pub mod pins;
 pub mod remote;
 pub mod session;

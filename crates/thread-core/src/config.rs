@@ -75,7 +75,8 @@ accent = "#cba6f7"
 
 [vim]
 # Vim motions in the editor: modes, operators, registers, macros and the
-# `:` command line. `:w`, `:q`, `:wq`, `:bn` and `:bp` act on Thread's files.
+# `:` command line. `:w`, `:q`, `:wq`, `:e`, `:bn` and `:bp` act on Thread's
+# files, and `:sp`, `:vsp`, `:new`, `:vnew`, `:close` and `:only` on its panes.
 enabled = true
 
 [terminal]
@@ -88,6 +89,13 @@ font_size = 14
 cursor = "block"
 # How many lines that have scrolled off the top are kept to scroll back to.
 scrollback = 2000
+
+[lsp]
+# The language servers that are switched on, by name: completion as you type,
+# and what is wrong with a line written at the end of it. A server has to be
+# installed to run; Edit -> LSPs lists the ones Thread knows, says which are,
+# and switches them on and off. Such as: ["rust-analyzer", "typescript"].
+enabled = []
 
 # Per-language overrides for `tab_width` and `insert_spaces`. The name is the
 # one shown in the bottom bar, in lower case. Detected indentation still wins
@@ -330,6 +338,15 @@ impl Terminal {
     }
 }
 
+/// The language servers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Lsp {
+    /// The ids of the servers that are switched on (see [`crate::lsp::CATALOG`]).
+    /// One that is not installed, or not known, is simply not run.
+    pub enabled: Vec<String>,
+}
+
 /// What one language does differently from `[editor]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -350,6 +367,7 @@ pub struct Config {
     pub theme: Theme,
     pub vim: Vim,
     pub terminal: Terminal,
+    pub lsp: Lsp,
     /// By language name, lower-case.
     pub language: BTreeMap<String, LanguageOverride>,
 }

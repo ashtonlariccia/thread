@@ -11,8 +11,10 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
 
 use thread_core::connections::{SavedConnection, Store as ConnectionStore};
+use thread_core::lsp;
 use thread_core::remote::{self, ConnectError, DiscoveredKey, Failure, Remote, Target};
 use thread_core::terminal::{self, LocalTerminal, Terminal};
+
 use thread_core::{
     config, document, fsops, git, tree, Appearance, Config, Document, Entry, Eol, Material, Pin,
     PinStore, Session, Stamp,
@@ -979,6 +981,118 @@ pub fn terminal_resize(terminals: State<'_, Terminals>, id: u64, cols: u16, rows
 #[tauri::command]
 pub fn terminal_close(terminals: State<'_, Terminals>, id: u64) {
     drop(terminals.take(id));
+}
+
+// --- language servers ---------------------------------------------------------
+//
+// Each one is a program on this machine, started for a window when it first
+// opens a file in a language the server knows, and ended with the window.
+// Messages go through here whole and unread: what they say is between the
+// page and the server.
+
+/// Every running language server, by id, with the label of its window.
+#[derive(Default)]
+pub struct Servers(Mutex<HashMap<u64, (String, Arc<lsp::Server>)>>);
+
+impl Servers {
+    /// Take a server out. Dropping what comes back is what ends it, and is
+    /// left to the caller so that it happens outside the lock.
+    fn take(&self, id: u64) -> Option<Arc<lsp::Server>> {
+        let (_, server) = self.0.lock().ok()?.remove(&id)?;
+        Some(server)
+    }
+
+    /// The window has gone, or its page has been reloaded and can no longer
+    /// reach them: its servers go too.
+    pub fn close_window(&self, label: &str) {
+        let Ok(mut open) = self.0.lock() else {
+            return;
+        };
+        let ids: Vec<u64> = open
+            .iter()
+            .filter(|(_, (window, _))| window == label)
+            .map(|(id, _)| *id)
+            .collect();
+        let closed: Vec<_> = ids.iter().filter_map(|id| open.remove(id)).collect();
+        drop(open);
+        drop(closed);
+    }
+}
+
+/// The language servers Thread knows of, and which of them are installed.
+#[tauri::command]
+pub async fn lsp_catalog() -> Vec<lsp::Info> {
+    // Off the main thread: it looks along the whole of PATH for each one.
+    lsp::catalog()
+}
+
+/// Start a language server for this window, in `cwd`. Each message it sends
+/// arrives on `on_message`; `on_exit` hears once, when it has ended.
+#[tauri::command]
+pub async fn lsp_start(
+    app: AppHandle,
+    window: WebviewWindow,
+    server: String,
+    cwd: Option<String>,
+    on_message: Channel<String>,
+    on_exit: Channel<()>,
+) -> Result<u64, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    // The paths a window on a remote has open are the remote's, and a server
+    // here could make nothing of them.
+    if app.state::<Remotes>().of(&window).is_some() {
+        return Err("language servers do not run on a remote yet".into());
+    }
+
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let ended = {
+        let app = app.clone();
+        move || {
+            drop(app.state::<Servers>().take(id));
+            let _ = on_exit.send(());
+            tracing::info!(target: "thread::lsp", "ENDED #{id}");
+        }
+    };
+    let spawned = lsp::Server::spawn(
+        &server,
+        cwd.as_deref().map(Path::new),
+        move |message| {
+            // A channel that refuses is a page that has gone.
+            let _ = on_message.send(message.to_owned());
+        },
+        ended,
+    )
+    .map_err(|e| e.to_string())?;
+
+    tracing::info!(target: "thread::lsp", "STARTED #{id} {server} in {}", window.label());
+    if let Ok(mut open) = app.state::<Servers>().0.lock() {
+        open.insert(id, (window.label().to_owned(), Arc::new(spawned)));
+    }
+    Ok(id)
+}
+
+/// One message for a server, as JSON. Not `async`: they are written in the
+/// order they were sent.
+#[tauri::command]
+pub fn lsp_send(servers: State<'_, Servers>, id: u64, message: String) {
+    // Written outside the lock, which a server slow to read would otherwise
+    // hold against every other one.
+    let server = servers
+        .0
+        .lock()
+        .ok()
+        .and_then(|open| open.get(&id).map(|(_, server)| server.clone()));
+    if let Some(server) = server {
+        server.send(&message);
+    }
+}
+
+/// End a language server. Nothing happens if it has already gone.
+#[tauri::command]
+pub fn lsp_stop(servers: State<'_, Servers>, id: u64) {
+    drop(servers.take(id));
 }
 
 // --- pins -------------------------------------------------------------------

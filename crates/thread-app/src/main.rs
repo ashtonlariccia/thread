@@ -103,6 +103,7 @@ fn main() {
         .manage(commands::Applied::load())
         .manage(commands::Terminals::default())
         .manage(commands::Remotes::default())
+        .manage(commands::Servers::default())
         // However a window goes, its shells and its connection go with it.
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
@@ -112,6 +113,9 @@ fn main() {
                 window
                     .state::<commands::Remotes>()
                     .close_window(window.label());
+                window
+                    .state::<commands::Servers>()
+                    .close_window(window.label());
             }
         })
         .on_page_load(|webview, payload| {
@@ -120,6 +124,9 @@ fn main() {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                 webview
                     .state::<commands::Terminals>()
+                    .close_window(webview.label());
+                webview
+                    .state::<commands::Servers>()
                     .close_window(webview.label());
             }
             tracing::info!(
@@ -170,6 +177,10 @@ fn main() {
             commands::terminal_write,
             commands::terminal_resize,
             commands::terminal_close,
+            commands::lsp_catalog,
+            commands::lsp_start,
+            commands::lsp_send,
+            commands::lsp_stop,
             commands::pins,
             commands::add_pin,
             commands::remove_pin,

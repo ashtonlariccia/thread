@@ -1,10 +1,16 @@
 /**
- * The text editor: one CodeMirror view, and a state per open file.
+ * The text editor: a CodeMirror view for each pane, and a state for each
+ * file a pane has open.
  *
- * One view rather than one per file, swapped with `setState` — a view is the
- * expensive half (DOM, observers), while a state is just the document, its
- * selection and its undo history, which is exactly what has to survive a
- * switch to another file and back.
+ * One view to a pane rather than one per file, swapped with `setState` — a
+ * view is the expensive half (DOM, observers), while a state is just the
+ * document, its selection and its undo history, which is exactly what has to
+ * survive a switch to another file and back.
+ *
+ * A file open in two panes is two states of the one text. What is typed into
+ * either is passed on to the other as it happens, the way a collaborator's
+ * edits would be: each keeps its own cursor, its own scroll and its own undo
+ * history, and they never disagree about what the file says.
  *
  * Everything configurable sits in a compartment, so a change to the config
  * re-dresses the files that are already open instead of waiting for the next
@@ -31,6 +37,8 @@ import {
   syntaxHighlighting,
 } from "@codemirror/language";
 import {
+  Annotation,
+  type ChangeSet,
   Compartment,
   countColumn,
   EditorSelection,
@@ -38,6 +46,7 @@ import {
   type Extension,
   type StateEffect,
   type Text,
+  Transaction,
 } from "@codemirror/state";
 import {
   type Command,
@@ -81,13 +90,26 @@ export type EditorLook = {
 type Events = {
   /** A file's text now differs from, or matches again, what was last saved. */
   ondirty: (key: number, dirty: boolean) => void;
-  oncursor: (cursor: Cursor) => void;
+  /** A file's text changed, whichever pane it was changed in. */
+  onchange: (key: number) => void;
+  oncursor: (pane: number, cursor: Cursor) => void;
   /**
-   * The view was given a different file, or different extensions. For
+   * A pane's view was given a different file, or different extensions. For
    * anything that hangs off the view itself rather than off a file's state.
    */
-  onview: (view: EditorView) => void;
+  onview: (pane: number, view: EditorView) => void;
+  /** The keyboard has come to a pane's editor. */
+  onfocus: (pane: number) => void;
 };
+
+/** Marks an edit that was made in another pane and is being passed on here. */
+const passedOn = Annotation.define<boolean>();
+
+/**
+ * Where a file's state waits while no pane has it: just opened and not yet
+ * shown, or on its way from one pane to another. No pane has this id.
+ */
+const SPARE = 0;
 
 /** Held, faded out, faded back in. The hold is what a moving caret is seen in. */
 const CARET_BLINK = {
@@ -487,11 +509,20 @@ function cursorOf(state: EditorState): Cursor {
 }
 
 export class EditorHost {
-  private view: EditorView | null = null;
-  private states = new Map<number, EditorState>();
+  /** Each pane's view, and the file it is showing. */
+  private panes = new Map<number, { view: EditorView; current: number | null }>();
+  /** What each pane should show, asked for before its view existed. */
+  private wanted = new Map<number, number | null>();
+  /**
+   * Every state of every open file, by file and then by pane (or `SPARE`).
+   * The entry for a pane that is showing the file is out of date: the view
+   * has the live one.
+   */
+  private states = new Map<number, Map<number, EditorState>>();
+  /** Where each pane had each file scrolled to, to put back when it returns. */
+  private scrolls = new Map<string, StateEffect<unknown>>();
   /** Each file's text as of its last save, to tell "modified" from "edited and put back". */
   private saved = new Map<number, Text>();
-  private current: number | null = null;
 
   // Same for every file.
   private readonly vimMode = new Compartment();
@@ -500,40 +531,61 @@ export class EditorHost {
   // Each file's own.
   private readonly indent = new Compartment();
   private readonly language = new Compartment();
+  private readonly tools = new Compartment();
 
   private vimValue: Extension = [];
   private lookValue: Extension = [];
   /** Empty until the config names a palette; grammars colour nothing before then. */
   private highlightValue: Extension = [];
+  /** What each file's own compartments hold, for dressing another state of it. */
+  private own = new Map<number, { indent: Extension; language: Extension; tools: Extension }>();
+  /** The last thing its tools were told about each file, for a state made later. */
+  private kept = new Map<number, StateEffect<unknown>>();
 
-  /** What the view holds while no file is open: nothing, and not typeable. */
+  /** What a view holds while no file is open: nothing, and not typeable. */
   private readonly blank = EditorState.create({
     extensions: [chrome, EditorView.editable.of(false)],
   });
 
   constructor(private readonly events: Events) {}
 
-  mount(parent: HTMLElement) {
-    this.view = new EditorView({ parent, state: this.stateFor(this.current) });
+  /** Give a pane its view. */
+  mount(pane: number, parent: HTMLElement) {
+    const view = new EditorView({ parent, state: this.blank });
+    this.panes.set(pane, { view, current: null });
+    const wanted = this.wanted.get(pane) ?? null;
+    this.wanted.delete(pane);
+    if (wanted !== null && this.states.has(wanted)) this.show(pane, wanted);
   }
 
-  unmount() {
-    this.stash();
-    this.view?.destroy();
-    this.view = null;
+  unmount(pane: number) {
+    const slot = this.panes.get(pane);
+    if (!slot) return;
+    this.stash(pane);
+    slot.view.destroy();
+    this.panes.delete(pane);
   }
 
-  /** Start tracking a file. Its text is considered saved as given. */
-  create(key: number, text: string, indent: Indent) {
-    const state = EditorState.create({
-      doc: text,
+  /** A fresh state of a file: the text and a cursor, with nothing to undo. */
+  private make(key: number, doc: Text | string, selection?: EditorSelection): EditorState {
+    const kept = this.kept.get(key);
+    const state = this.dressed(key, doc, selection);
+    return kept ? state.update({ effects: kept }).state : state;
+  }
+
+  private dressed(key: number, doc: Text | string, selection?: EditorSelection): EditorState {
+    const own = this.own.get(key)!;
+    return EditorState.create({
+      doc,
+      selection,
       extensions: [
         // First, so its key handling is ahead of every keymap below: in
         // normal mode `d` is an operator, not a letter to type.
         this.vimMode.of(this.vimValue),
         this.look.of(this.lookValue),
-        this.indent.of(indentExtension(indent)),
-        this.language.of([]),
+        this.indent.of(own.indent),
+        this.language.of(own.language),
+        this.tools.of(own.tools),
         this.highlight.of(this.highlightValue),
         highlightActiveLine(),
         history(),
@@ -550,42 +602,140 @@ export class EditorHost {
         ]),
         chrome,
         EditorView.updateListener.of((update) => {
-          const current = this.current;
-          if (current === null) return;
+          const pane = this.paneOf(update.view);
+          if (pane === null) return;
           if (update.docChanged) {
-            const saved = this.saved.get(current);
-            this.events.ondirty(current, !saved || !update.state.doc.eq(saved));
+            // What was done here goes to every other state of the file; what
+            // arrived from one of them stops here.
+            for (const tr of update.transactions) {
+              if (tr.docChanged && !tr.annotation(passedOn)) this.passOn(key, pane, tr.changes);
+            }
+            const saved = this.saved.get(key);
+            this.events.ondirty(key, !saved || !update.state.doc.eq(saved));
+            this.events.onchange(key);
           }
           if (update.docChanged || update.selectionSet) {
-            this.events.oncursor(cursorOf(update.state));
+            this.events.oncursor(pane, cursorOf(update.state));
           }
+          if (update.focusChanged && update.view.hasFocus) this.events.onfocus(pane);
         }),
       ],
     });
-    this.states.set(key, state);
+  }
+
+  /** Make an edit from one pane in every other state of the file. */
+  private passOn(key: number, from: number, changes: ChangeSet) {
+    const states = this.states.get(key);
+    if (!states) return;
+    // Not theirs to undo: each pane's history is of what was done in it.
+    const spec = { changes, annotations: [passedOn.of(true), Transaction.addToHistory.of(false)] };
+    for (const [pane, state] of states) {
+      if (pane === from) continue;
+      const slot = this.panes.get(pane);
+      if (slot?.current === key) slot.view.dispatch(spec);
+      else states.set(pane, state.update(spec).state);
+    }
+  }
+
+  private paneOf(view: EditorView): number | null {
+    for (const [pane, slot] of this.panes) if (slot.view === view) return pane;
+    return null;
+  }
+
+  /** The file a view is showing, for whatever is handed a view and nothing else. */
+  keyOf(view: EditorView): number | null {
+    const pane = this.paneOf(view);
+    return pane === null ? null : this.panes.get(pane)!.current;
+  }
+
+  /** Start tracking a file. Its text is considered saved as given. */
+  create(key: number, text: string, indent: Indent) {
+    this.own.set(key, { indent: indentExtension(indent), language: [], tools: [] });
+    const state = this.make(key, text);
+    this.states.set(key, new Map([[SPARE, state]]));
     this.saved.set(key, state.doc);
   }
 
-  /** Put a file in the view, or `null` for none. */
-  show(key: number | null) {
-    this.stash();
-    this.current = key;
-    if (!this.view) return;
+  /** Put a file in a pane's view, or `null` for none. */
+  show(pane: number, key: number | null) {
+    const slot = this.panes.get(pane);
+    if (!slot) {
+      this.wanted.set(pane, key);
+      return;
+    }
+    if (slot.current === key) return;
+    this.stash(pane);
+    slot.current = key;
 
-    // Not `stateFor`: `current` already names the new file, so that would hand
-    // back whatever the view is showing now.
-    const state = (key !== null && this.states.get(key)) || this.blank;
-    this.view.setState(state);
+    const state = key === null ? this.blank : this.adopt(pane, key);
+    slot.view.setState(state);
+    const scroll = key === null ? undefined : this.scrolls.get(`${pane}:${key}`);
+    if (scroll) slot.view.dispatch({ effects: scroll });
     // `setState` is not an update, so the listener above never hears of it.
-    this.events.oncursor(cursorOf(state));
-    this.events.onview(this.view);
-    if (key !== null) this.view.focus();
+    this.events.oncursor(pane, cursorOf(state));
+    this.events.onview(pane, slot.view);
   }
 
+  /**
+   * The state a pane shows a file with: its own if it has had the file
+   * before, the spare one if there is one waiting, and otherwise a second
+   * look at the text another pane has, starting where that pane is.
+   */
+  private adopt(pane: number, key: number): EditorState {
+    const states = this.states.get(key)!;
+    const own = states.get(pane);
+    if (own) return own;
+
+    let state = states.get(SPARE);
+    if (state) {
+      states.delete(SPARE);
+      const scroll = this.scrolls.get(`${SPARE}:${key}`);
+      if (scroll) this.scrolls.set(`${pane}:${key}`, scroll);
+      this.scrolls.delete(`${SPARE}:${key}`);
+    } else {
+      const [other] = states.keys();
+      const from = this.live(other, key) ?? states.get(other)!;
+      // A new state rather than a copy of that one. Two histories of the
+      // same edits would each undo them, and the second to try would be
+      // undoing something already undone.
+      state = this.make(key, from.doc, from.selection);
+      const there = this.panes.get(other);
+      if (there?.current === key) {
+        this.scrolls.set(`${pane}:${key}`, there.view.scrollSnapshot());
+      }
+    }
+    states.set(pane, state);
+    return state;
+  }
+
+  /**
+   * A pane has let go of a file: its tab there was closed, or moved. The
+   * state waits as the spare one, so a tab dragged to another pane arrives
+   * with its cursor and its undo history.
+   */
+  release(pane: number, key: number) {
+    const states = this.states.get(key);
+    if (!states?.has(pane)) return;
+    const slot = this.panes.get(pane);
+    if (slot?.current === key) {
+      this.stash(pane);
+      slot.current = null;
+    }
+    states.set(SPARE, states.get(pane)!);
+    states.delete(pane);
+    const scroll = this.scrolls.get(`${pane}:${key}`);
+    if (scroll) this.scrolls.set(`${SPARE}:${key}`, scroll);
+    this.scrolls.delete(`${pane}:${key}`);
+  }
+
+  /** Stop tracking a file, in every pane. */
   drop(key: number) {
-    if (this.current === key) this.current = null;
+    for (const slot of this.panes.values()) if (slot.current === key) slot.current = null;
+    for (const pane of this.states.get(key)?.keys() ?? []) this.scrolls.delete(`${pane}:${key}`);
     this.states.delete(key);
     this.saved.delete(key);
+    this.own.delete(key);
+    this.kept.delete(key);
   }
 
   // --- configuration ----------------------------------------------------------
@@ -594,7 +744,7 @@ export class EditorHost {
   setVim(extension: Extension) {
     this.vimValue = extension;
     this.reconfigureAll(this.vimMode.reconfigure(extension));
-    if (this.view) this.events.onview(this.view);
+    for (const [pane, slot] of this.panes) this.events.onview(pane, slot.view);
   }
 
   /** The font and gutter, for every file. */
@@ -610,37 +760,86 @@ export class EditorHost {
   }
 
   setIndent(key: number, indent: Indent) {
-    this.reconfigure(key, this.indent.reconfigure(indentExtension(indent)));
+    const own = this.own.get(key);
+    if (!own) return;
+    own.indent = indentExtension(indent);
+    this.apply(key, this.indent.reconfigure(own.indent));
   }
 
   /** The file's grammar, or `[]` for plain text. */
   setLanguage(key: number, language: Extension) {
-    this.reconfigure(key, this.language.reconfigure(language));
+    const own = this.own.get(key);
+    if (!own) return;
+    own.language = language;
+    this.apply(key, this.language.reconfigure(language));
   }
+
+  /** What a language server adds to a file: completion, and its complaints. */
+  setTools(key: number, tools: Extension) {
+    const own = this.own.get(key);
+    if (!own) return;
+    own.tools = tools;
+    // Whatever the last tools were told is not something these were.
+    this.kept.delete(key);
+    this.apply(key, this.tools.reconfigure(tools));
+  }
+
+  /**
+   * Apply an effect to every state of a file, and to any made from now on:
+   * a second pane opened on the file is shown what the first already is.
+   * For what a file's tools are told, each telling replacing the last.
+   */
+  keep(key: number, effect: StateEffect<unknown>) {
+    if (!this.states.has(key)) return;
+    this.kept.set(key, effect);
+    this.apply(key, effect);
+  }
+
 
   private reconfigureAll(effect: StateEffect<unknown>) {
-    for (const key of this.states.keys()) this.reconfigure(key, effect);
+    for (const key of this.states.keys()) this.apply(key, effect);
   }
 
-  /** Apply an effect to a file, whether it is the one on screen or not. */
-  private reconfigure(key: number, effect: StateEffect<unknown>) {
-    if (key === this.current && this.view) {
-      this.view.dispatch({ effects: effect });
-      return;
+  /** Apply an effect to every state of a file, on screen or not. */
+  apply(key: number, effect: StateEffect<unknown>) {
+    const states = this.states.get(key);
+    if (!states) return;
+    for (const [pane, state] of states) {
+      const slot = this.panes.get(pane);
+      if (slot?.current === key) slot.view.dispatch({ effects: effect });
+      else states.set(pane, state.update({ effects: effect }).state);
     }
-    const state = this.states.get(key);
-    if (state) this.states.set(key, state.update({ effects: effect }).state);
   }
 
   // --- text -------------------------------------------------------------------
 
+  /** A file's state where it is on screen in `pane`, which is the only live one. */
+  private live(pane: number, key: number): EditorState | null {
+    const slot = this.panes.get(pane);
+    return slot?.current === key ? slot.view.state : null;
+  }
+
+  /** Any state of a file: they all hold the same text. */
+  private stateOf(key: number): EditorState | null {
+    const states = this.states.get(key);
+    if (!states) return null;
+    for (const [pane, state] of states) return this.live(pane, key) ?? state;
+    return null;
+  }
+
   /** A file's text, `\n`-separated. */
   text(key: number): string {
-    return this.stateFor(key).doc.toString();
+    return this.stateOf(key)?.doc.toString() ?? "";
+  }
+
+  /** A file's text as the editor holds it, for turning lines into offsets. */
+  doc(key: number): Text | null {
+    return this.stateOf(key)?.doc ?? null;
   }
 
   markSaved(key: number) {
-    this.saved.set(key, this.stateFor(key).doc);
+    const state = this.stateOf(key);
+    if (state) this.saved.set(key, state.doc);
     this.events.ondirty(key, false);
   }
 
@@ -657,10 +856,13 @@ export class EditorHost {
    * Ctrl+Z after a reload brings back what was there before it.
    */
   replace(key: number, text: string) {
-    const state = this.states.get(key);
-    const live = key === this.current && this.view ? this.view : null;
-    const from = live?.state ?? state;
-    if (!from) return;
+    const states = this.states.get(key);
+    if (!states) return;
+    // Made in one state, on screen for preference, and passed on to the rest
+    // as any edit is.
+    const panes = [...states.keys()];
+    const pane = panes.find((each) => this.live(each, key) !== null) ?? panes[0];
+    const from = this.live(pane, key) ?? states.get(pane)!;
 
     const doc = from.toText(text);
     const spec = {
@@ -668,28 +870,41 @@ export class EditorHost {
       // Roughly where it was; the text around it may be entirely different.
       selection: { anchor: Math.min(from.selection.main.head, doc.length) },
     };
-    if (live) live.dispatch(spec);
-    else this.states.set(key, from.update(spec).state);
+    if (this.live(pane, key)) {
+      this.panes.get(pane)!.view.dispatch(spec);
+      return;
+    }
+    const tr = from.update(spec);
+    states.set(pane, tr.state);
+    this.passOn(key, pane, tr.changes);
+    this.events.onchange(key);
+  }
+
+  /** The view the keyboard is in, if it is in one. */
+  private focusedView(): EditorView | null {
+    for (const slot of this.panes.values()) if (slot.view.hasFocus) return slot.view;
+    return null;
   }
 
   hasFocus(): boolean {
-    return this.view?.hasFocus ?? false;
+    return this.focusedView() !== null;
   }
 
-  focus() {
-    this.view?.focus();
+  focus(pane: number) {
+    this.panes.get(pane)?.view.focus();
   }
 
   run(command: EditorCommand) {
-    if (!this.view) return;
-    if (command === "undo") undo(this.view);
-    else if (command === "redo") redo(this.view);
-    else selectAll(this.view);
+    const view = this.focusedView();
+    if (!view) return;
+    if (command === "undo") undo(view);
+    else if (command === "redo") redo(view);
+    else selectAll(view);
   }
 
   /** Replace the selection, as a paste does. */
   insert(text: string) {
-    const view = this.view;
+    const view = this.focusedView();
     if (!view) return;
     view.dispatch(view.state.replaceSelection(view.state.toText(text)), {
       scrollIntoView: true,
@@ -697,15 +912,13 @@ export class EditorHost {
     });
   }
 
-  /** The live state for the file on screen; the stored one for any other. */
-  private stateFor(key: number | null): EditorState {
-    if (key === null) return this.blank;
-    if (key === this.current && this.view) return this.view.state;
-    return this.states.get(key) ?? this.blank;
-  }
-
-  /** Keep the on-screen file's state before the view moves on. */
-  private stash() {
-    if (this.view && this.current !== null) this.states.set(this.current, this.view.state);
+  /** Keep what a pane is showing, and where, before its view moves on. */
+  private stash(pane: number) {
+    const slot = this.panes.get(pane);
+    if (!slot || slot.current === null) return;
+    const states = this.states.get(slot.current);
+    if (!states?.has(pane)) return;
+    states.set(pane, slot.view.state);
+    this.scrolls.set(`${pane}:${slot.current}`, slot.view.scrollSnapshot());
   }
 }

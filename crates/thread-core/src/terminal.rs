@@ -323,7 +323,7 @@ fn launch(options: &Options, console: &Console) -> Result<(OwnedHandle, Option<O
 /// Ending a shell does not end what the shell started: a build or a server it
 /// launched would carry on with nothing left to stop it from. In a job, the
 /// whole tree goes with the terminal.
-fn job_for(process: &OwnedHandle) -> Result<OwnedHandle> {
+pub(crate) fn job_for(process: &OwnedHandle) -> Result<OwnedHandle> {
     // SAFETY: no attributes and no name is the documented default form.
     let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(os)?;
     // SAFETY: just created, and owned from here.

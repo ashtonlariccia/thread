@@ -23,6 +23,10 @@ pub struct Workspace {
     pub unfolded: Vec<String>,
     pub files: Vec<String>,
     pub active: Option<String>,
+    /// How the stage was split and which files were in which pane; `None`
+    /// for the one pane a window starts with. The frontend's to read: it is
+    /// kept here as it was given.
+    pub layout: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,6 +41,8 @@ pub struct Session {
     pub files: Vec<String>,
     /// The file that was being edited.
     pub active: Option<String>,
+    /// How the stage was split, as in [`Workspace::layout`].
+    pub layout: Option<serde_json::Value>,
     pub sidebar_collapsed: bool,
     pub sidebar_width: u32,
     /// The saved connection the window was on when it closed, to go back to.
@@ -54,6 +60,7 @@ impl Default for Session {
             unfolded: Vec::new(),
             files: Vec::new(),
             active: None,
+            layout: None,
             sidebar_collapsed: true,
             sidebar_width: 230,
             connection: None,
@@ -89,6 +96,14 @@ mod tests {
             unfolded: vec!["C:\\src\\thread".into(), "C:\\src\\thread\\ui".into()],
             files: vec!["C:\\src\\thread\\Cargo.toml".into()],
             active: Some("C:\\src\\thread\\Cargo.toml".into()),
+            layout: Some(serde_json::json!({
+                "dir": "row",
+                "sizes": [0.5, 0.5],
+                "children": [
+                    { "tabs": ["a.rs"], "active": "a.rs" },
+                    { "tabs": ["b.rs"], "active": null },
+                ],
+            })),
             sidebar_collapsed: false,
             sidebar_width: 300,
             connection: Some("a1b2".into()),

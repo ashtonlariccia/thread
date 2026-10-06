@@ -12,6 +12,8 @@
 import type { Extension } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 
+import type { SplitDir } from "./panes";
+
 export type VimMode = "normal" | "insert" | "visual" | "replace";
 
 /** What the ex commands that reach outside the buffer should do. */
@@ -20,8 +22,23 @@ export type VimHooks = {
   /** `force` is `:q!`: close the file and lose what is unsaved, unasked. */
   quit: (force: boolean) => void;
   writeQuit: () => void;
-  /** `:bn` / `:bp`: the next or previous open file. */
+  /** `:bn` / `:bp`: the next or previous tab of the pane. */
   cycle: (step: 1 | -1) => void;
+  /**
+   * `:sp` and `:vsp`: another pane, below or beside this one. On the file
+   * named after the command, or with none named a second view of this one.
+   */
+  split: (dir: SplitDir, file: string | null) => void;
+  /** `:new` and `:vnew`: another pane, on a new empty file. */
+  fresh: (dir: SplitDir) => void;
+  /** `:e`: open a file in this pane. */
+  edit: (file: string) => void;
+  /** `:close`: close this pane, and keep what was in it. */
+  close: () => void;
+  /** `:only`: close every pane but this one. */
+  only: () => void;
+  /** `:wincmd`: `h` `j` `k` `l` to the pane that way, `w` and `p` to step through them. */
+  wincmd: (arg: string) => void;
 };
 
 export type VimApi = {
@@ -86,6 +103,24 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
     Vim.defineEx("xit", "x", later(() => hooks?.writeQuit()));
     Vim.defineEx("bnext", "bn", later(() => hooks?.cycle(1)));
     Vim.defineEx("bprevious", "bp", later(() => hooks?.cycle(-1)));
+
+    // Windows, which here are panes. `:sp` is a split with one pane above
+    // the other, and `:vsp` one with them side by side.
+    type Params = { argString?: string };
+    const named = (params?: Params) => params?.argString?.trim() || null;
+    const withArg =
+      (act: (arg: string | null) => void) => (_cm: unknown, params?: Params) => {
+        const arg = named(params);
+        later(() => act(arg))();
+      };
+    Vim.defineEx("split", "sp", withArg((file) => hooks?.split("column", file)));
+    Vim.defineEx("vsplit", "vs", withArg((file) => hooks?.split("row", file)));
+    Vim.defineEx("new", "new", later(() => hooks?.fresh("column")));
+    Vim.defineEx("vnew", "vne", later(() => hooks?.fresh("row")));
+    Vim.defineEx("edit", "e", withArg((file) => file !== null && hooks?.edit(file)));
+    Vim.defineEx("close", "clo", later(() => hooks?.close()));
+    Vim.defineEx("only", "on", later(() => hooks?.only()));
+    Vim.defineEx("wincmd", "winc", withArg((arg) => arg !== null && hooks?.wincmd(arg)));
 
     const watched = new WeakSet<object>();
     return {

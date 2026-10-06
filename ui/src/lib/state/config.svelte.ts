@@ -47,6 +47,8 @@ export type Config = {
   vim: { enabled: boolean };
   /** `shell` is a command line; empty leaves the choice to the backend. */
   terminal: { shell: string; scrollback: number; font_size: number; cursor: TerminalCursor };
+  /** `enabled` is the language servers that are switched on, by id. */
+  lsp: { enabled: string[] };
   /** By language name, lower-case. */
   language: Record<string, LanguageOverride>;
 };
@@ -71,11 +73,13 @@ export const DEFAULTS: Config = {
   theme: { syntax: "catppuccin", accent: "#cba6f7" },
   vim: { enabled: true },
   terminal: { shell: "", scrollback: 2000, font_size: 14, cursor: "block" },
+  lsp: { enabled: [] },
   language: {},
 };
 
 /** The sections whose keys are plain values, settable one at a time. */
-type Settable = "appearance" | "editor" | "files" | "theme" | "vim" | "terminal";
+type Settable = "appearance" | "editor" | "files" | "theme" | "vim" | "terminal" | "lsp";
+
 
 export class ConfigStore {
   current = $state.raw<Config>(DEFAULTS);

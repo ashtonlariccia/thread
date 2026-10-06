@@ -3,16 +3,19 @@
 
   type Props = {
     host: EditorHost;
+    /** The pane this is the editor of. */
+    pane: number;
   };
 
-  let { host }: Props = $props();
+  let { host, pane }: Props = $props();
 
   let el = $state<HTMLElement | undefined>();
 
   $effect(() => {
     if (!el) return;
-    host.mount(el);
-    return () => host.unmount();
+    const id = pane;
+    host.mount(id, el);
+    return () => host.unmount(id);
   });
 </script>
 

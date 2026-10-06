@@ -39,6 +39,8 @@
     onreconnect: () => void;
     onnewwindow: () => void;
     onappearance: () => void;
+    /** Edit -> LSPs: the language servers, and which are switched on. */
+    onlsp: () => void;
     /** This window only. */
     onclosewindow: () => void;
     /** File -> Exit: the whole application. */
@@ -68,6 +70,7 @@
     onreconnect,
     onnewwindow,
     onappearance,
+    onlsp,
     onclosewindow,
     onquit,
   }: Props = $props();
@@ -261,6 +264,8 @@
           <button class="menu-item" role="menuitem" onclick={() => run(onappearance)}>
             Appearance…
           </button>
+          <button class="menu-item" role="menuitem" onclick={() => run(onlsp)}>LSPs…</button>
+
         </div>
       {/if}
     </div>

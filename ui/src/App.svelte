@@ -11,12 +11,13 @@
   import ConnectDialog from "./lib/ConnectDialog.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
   import Dialog from "./lib/Dialog.svelte";
-  import Editor from "./lib/Editor.svelte";
+  import LspDialog from "./lib/LspDialog.svelte";
+  import Pane from "./lib/Pane.svelte";
   import PinBar from "./lib/PinBar.svelte";
   import RemoteBrowseDialog, { type BrowseRequest } from "./lib/RemoteBrowseDialog.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import SidebarResizer from "./lib/SidebarResizer.svelte";
-  import TabBar, { type Tab } from "./lib/TabBar.svelte";
+  import type { Tab } from "./lib/TabBar.svelte";
   import TerminalView from "./lib/TerminalView.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import UnsavedDialog from "./lib/UnsavedDialog.svelte";
@@ -28,8 +29,12 @@
   import { indentLabel } from "./lib/indent";
   import { languageOf } from "./lib/languages";
   import { RAIL_WIDTH } from "./lib/layout";
+  import type { Direction, Divider, Rect, SavedNode, SplitDir } from "./lib/panes";
   import { ConfigStore, type Config } from "./lib/state/config.svelte";
   import { Documents } from "./lib/state/documents.svelte";
+  import { Layout } from "./lib/state/layout.svelte";
+  import { Lsp } from "./lib/state/lsp.svelte";
+  import { tabDrag } from "./lib/state/tabDrag.svelte";
   import { baseName, dirName, pathKey, samePath, segmentsBelow } from "./lib/paths";
   import { setRemotePicker, type RemotePicker } from "./lib/pick";
   import { fileIcon, folderIcon, loadFolderIcons, loadIcons } from "./lib/state/icons.svelte";
@@ -48,9 +53,15 @@
 
   const pins = new Pins();
   const config = new ConfigStore();
-  const docs = new Documents();
+  const layout = new Layout();
+  const docs = new Documents(layout);
   const tree = new Tree();
   const remote = new RemoteStore();
+  const lsp = new Lsp(docs, {
+    roots: () => tree.roots.map((root) => root.path),
+    remote: () => remote.status !== "local",
+  });
+  docs.watcher = lsp;
 
   const appWindow = getCurrentWindow();
 
@@ -58,6 +69,7 @@
   const DISK_POLL_MS = 1000;
 
   let appearanceOpen = $state(false);
+  let lspOpen = $state(false);
 
   // --- sidebar ----------------------------------------------------------------
   //
@@ -310,18 +322,34 @@
   };
 
   let terminals = $state<TerminalTab[]>([]);
-  /** The terminal being shown, or null while a file is. */
-  let activeTerminal = $state<number | null>(null);
-  /** The one last shown, for Ctrl+` to come back to. */
-  let lastTerminal: number | null = null;
   /** Each open terminal's view, by key, for the menus to act on. */
   const terminalViews = $state<Record<number, TerminalView | undefined>>({});
 
-  // Files are keyed upwards from 1 and terminals downwards from -1, so the
-  // tab strip can hold both under one kind of key and tell them apart.
+  // Files are keyed upwards from 1 and terminals downwards from -1, so a
+  // strip can hold both under one kind of key and tell them apart.
   let nextTerminalKey = -1;
   let nextTerminalNumber = 1;
   const isTerminal = (key: number) => key < 0;
+
+  /** The terminal showing in the focused pane, or null while a file is. */
+  const activeTerminal = $derived.by(() => {
+    const active = layout.current.active;
+    return active !== null && isTerminal(active) ? active : null;
+  });
+  /** The one last shown, for Ctrl+` to come back to. */
+  let lastTerminal: number | null = null;
+  $effect(() => {
+    if (activeTerminal !== null) lastTerminal = activeTerminal;
+  });
+
+  /**
+   * The file last worked on. With the keyboard in a terminal there is no
+   * file in front, and this is the one the window is still about.
+   */
+  let lastFile = $state<number | null>(null);
+  $effect(() => {
+    if (docs.activeKey !== null) lastFile = docs.activeKey;
+  });
 
   // The terminal is set in the editor's font, the two being read side by
   // side, at a size and with a cursor of its own.
@@ -338,7 +366,7 @@
    * backend, which uses the home folder.
    */
   function terminalDir(): string | null {
-    const file = docs.active?.path ?? null;
+    const file = (docs.active ?? docs.find(lastFile))?.path ?? null;
     const roots = tree.roots.map((root) => root.path);
     // The deepest: with a project and one of its subfolders both open, the
     // file belongs to the more specific one.
@@ -348,8 +376,8 @@
     return holding ?? roots[0] ?? (file ? dirName(file) : null);
   }
 
-  /** Terminal → New Terminal. */
-  function newTerminal() {
+  /** Start a terminal, as a tab that is not yet in any pane. */
+  function makeTerminal(): number {
     // Numbered from the top again once the last one has gone.
     if (terminals.length === 0) nextTerminalNumber = 1;
     const number = nextTerminalNumber++;
@@ -359,25 +387,25 @@
       name: number === 1 ? "Terminal" : `Terminal ${number}`,
       cwd: terminalDir(),
     });
-    activeTerminal = key;
+    return key;
   }
 
-  /** A file has come to the front; whichever terminal was showing gives way. */
-  function leaveTerminal() {
-    if (activeTerminal === null) return;
-    lastTerminal = activeTerminal;
-    activeTerminal = null;
+  /** Terminal → New Terminal: in the pane the keyboard is in. */
+  function newTerminal() {
+    layout.open(makeTerminal());
   }
-  docs.onselect = leaveTerminal;
 
   /** Ctrl+`: to the terminal and back, opening one if there is none. */
   function toggleTerminal() {
+    const leaf = layout.current;
     if (activeTerminal !== null) {
-      leaveTerminal();
-      docs.editor.focus();
+      // Back to the file this pane was on before, or any file it has.
+      const before = leaf.last !== null && !isTerminal(leaf.last) ? leaf.last : undefined;
+      const back = before ?? leaf.tabs.find((key) => !isTerminal(key));
+      if (back !== undefined) layout.open(back, leaf.id);
     } else if (terminals.length > 0) {
       const back = terminals.find((t) => t.key === lastTerminal) ?? terminals.at(-1)!;
-      activeTerminal = back.key;
+      layout.open(back.key);
     } else {
       newTerminal();
     }
@@ -388,26 +416,11 @@
    * it. Also where a shell that exits by itself lands.
    */
   function closeTerminal(key: number) {
-    const order = tabs.map((tab) => tab.key);
-    const index = order.indexOf(key);
     terminals = terminals.filter((t) => t.key !== key);
     delete terminalViews[key];
-    if (activeTerminal !== key) return;
-
-    // The neighbour that slides into its place, else the one before it.
-    activeTerminal = null;
-    const next = order[index + 1] ?? order[index - 1];
-    if (next !== undefined) selectTab(next);
+    // Its pane shows the neighbour that slides into its place.
+    layout.drop(key);
   }
-
-  // The last file closed, however it was closed, and there is a terminal
-  // open: that is what there is to show, so show it rather than a blank
-  // editor with a tab nobody is on.
-  $effect(() => {
-    if (docs.activeKey !== null || activeTerminal !== null || terminals.length === 0) return;
-    const back = terminals.find((t) => t.key === lastTerminal) ?? terminals.at(-1)!;
-    activeTerminal = back.key;
-  });
 
   function inTerminal(target: EventTarget | null): boolean {
     return target instanceof Element && target.closest("[data-terminal]") !== null;
@@ -427,8 +440,10 @@
     unfolded: string[];
     files: string[];
     active: string | null;
+    /** How the stage was split, and which files were in which pane; null for one pane. */
+    layout: SavedNode | null;
   };
-  const NOTHING: Workspace = { folders: [], unfolded: [], files: [], active: null };
+  const NOTHING: Workspace = { folders: [], unfolded: [], files: [], active: null, layout: null };
 
   /** What was open on this machine, put away while the window is on a remote. */
   let localStash = $state.raw<Workspace | null>(null);
@@ -444,16 +459,19 @@
   /** The remote folder last chosen from, which is where the next choice starts. */
   let lastBrowsed: string | null = null;
 
+  /** The path a tab is known by once the window has gone: a saved file's. */
+  const pathOf = (key: number) => (isTerminal(key) ? null : (docs.find(key)?.path ?? null));
+
   function captureWorkspace(): Workspace {
     return {
       folders: tree.roots.map((root) => root.path),
       unfolded: tree.unfolded,
-      // As the strip has them, so tabs dragged into an order come back in it.
-      files: tabs.flatMap((tab) => {
-        const path = docs.find(tab.key)?.path ?? null;
-        return path === null ? [] : [path];
-      }),
+      // As the strips have them, pane by pane, so tabs dragged into an order
+      // come back in it.
+      files: [...new Set(layout.leaves.flatMap((leaf) => leaf.tabs.flatMap((key) => pathOf(key) ?? [])))],
       active: docs.active?.path ?? null,
+      // One pane is what a window has anyway, and needs no writing down.
+      layout: layout.leaves.length > 1 ? layout.save(pathOf) : null,
     };
   }
 
@@ -462,6 +480,17 @@
     if (workspace.folders.length > 0) loadFolderIcons();
     await tree.restore(workspace.folders, workspace.unfolded);
     for (const path of workspace.files) await docs.open(path, { quiet: true });
+
+    if (workspace.layout) {
+      const keyOf = (path: string) =>
+        docs.list.find((doc) => doc.path !== null && samePath(doc.path, path))?.key ?? null;
+      const before = layout.leaves.map((leaf) => ({ id: leaf.id, tabs: [...leaf.tabs] }));
+      if (layout.restore(workspace.layout, keyOf, before.flatMap((leaf) => leaf.tabs))) {
+        // The panes they were opened into have gone; each file's state
+        // waits for whichever pane has it now.
+        for (const leaf of before) releaseFiles(leaf.id, leaf.tabs);
+      }
+    }
 
     const active = docs.list.find((d) => d.path !== null && d.path === workspace.active);
     if (active) docs.select(active.key);
@@ -472,9 +501,11 @@
     // Unmounting a terminal is what ends its shell.
     for (const terminal of terminals) delete terminalViews[terminal.key];
     terminals = [];
-    activeTerminal = null;
     lastTerminal = null;
+    // Each belongs to the machine the window is leaving.
+    lsp.reset();
     docs.clear();
+    layout.clear();
     tree.clear();
     selectedKey = null;
     naming = null;
@@ -802,6 +833,7 @@
       unfolded: session.unfolded,
       files: session.files,
       active: session.active,
+      layout: session.layout,
     };
 
     // A reloaded page starts over, but the connection it had is still up.
@@ -840,83 +872,201 @@
     return () => clearTimeout(timer);
   });
 
-  // --- tabs -------------------------------------------------------------------
+  // --- panes and tabs -----------------------------------------------------------
   //
-  // One strip for files and terminals, in the order they were opened until
-  // one is dragged somewhere else.
+  // The stage is one pane until it is split (`:sp`, `:vsp`, or the buttons at
+  // the end of a strip), and each pane has a strip of its own for files and
+  // terminals alike, in the order they were opened until one is dragged
+  // somewhere else. `Layout` holds which tab is where; this is what the
+  // gestures on them do.
 
-  /** Each tab's place in the strip: when it was first seen, unless moved since. */
-  const tabSeen = new Map<number, number>();
-  /** Counts the moves. The map is not watched, so this is what says it changed. */
-  let tabMoves = $state(0);
-
-  const tabs = $derived.by(() => {
-    void tabMoves;
-    const all = [
-      ...docs.list.map(
-        (doc): Tab => ({
-          key: doc.key,
-          name: doc.name,
-          detail: doc.path ?? "Not saved yet",
-          icon: fileIcon(doc.name),
-          dirty: doc.dirty,
-        }),
-      ),
-      ...terminals.map(
-        (terminal): Tab => ({
-          key: terminal.key,
-          name: terminal.name,
-          detail: terminal.cwd ?? "Terminal",
-          icon: iconUrl("console"),
-          dirty: false,
-        }),
-      ),
-    ];
-    for (const tab of all) if (!tabSeen.has(tab.key)) tabSeen.set(tab.key, tabSeen.size);
-    return all.sort((a, b) => tabSeen.get(a.key)! - tabSeen.get(b.key)!);
-  });
-
-  const activeTab = $derived(activeTerminal ?? docs.activeKey);
-  /** A file is what is on screen, rather than a terminal in front of one. */
-  const showingFile = $derived(docs.active !== null && activeTerminal === null);
-
-  function selectTab(key: number) {
+  function tabOf(key: number): Tab | null {
     if (isTerminal(key)) {
-      activeTerminal = key;
-      return;
+      const terminal = terminals.find((t) => t.key === key);
+      if (!terminal) return null;
+      return {
+        key,
+        name: terminal.name,
+        detail: terminal.cwd ?? "Terminal",
+        icon: iconUrl("console"),
+        dirty: false,
+      };
     }
-    const fromTerminal = activeTerminal !== null;
-    docs.select(key);
-    // Coming from a terminal the keyboard is still in it, behind the file.
-    if (fromTerminal) docs.editor.focus();
+    const doc = docs.find(key);
+    return (
+      doc && {
+        key,
+        name: doc.name,
+        detail: doc.path ?? "Not saved yet",
+        icon: fileIcon(doc.name),
+        dirty: doc.dirty,
+      }
+    );
   }
 
-  /** Put a tab at `index` of the strip, the others closing up around it. */
-  function moveTab(key: number, index: number) {
-    const order = tabs.map((tab) => tab.key);
-    const from = order.indexOf(key);
-    if (from === -1) return;
-    // The places stay the ones these tabs hold; which tab has which changes.
-    const places = order.map((each) => tabSeen.get(each)!);
-    order.splice(from, 1);
-    order.splice(index, 0, key);
-    order.forEach((each, at) => tabSeen.set(each, places[at]));
-    tabMoves++;
+  /** A file is what the focused pane is showing, rather than a terminal or nothing. */
+  const showingFile = $derived(docs.active !== null);
+
+  /**
+   * Panes that have let go of these files: the editor keeps each one's state
+   * aside, for whichever pane takes the file up next.
+   */
+  function releaseFiles(pane: number, keys: number[]) {
+    for (const key of keys) if (!isTerminal(key)) docs.editor.release(pane, key);
   }
 
-  /** Close a tab, the one showing unless told otherwise. */
-  function closeTab(key: number | null = activeTab) {
+  /**
+   * Close a tab: the one showing in the focused pane unless told otherwise.
+   * A file open in another pane as well only leaves this one. `force` is
+   * `:q!`, which does not ask about unsaved changes.
+   */
+  function closeTab(key = layout.current.active, pane = layout.focused, force = false) {
     if (key === null) return;
     if (isTerminal(key)) closeTerminal(key);
-    else void docs.close(key);
+    else if (layout.holding(key).length > 1) {
+      docs.vimLines[pane]?.replaceChildren();
+      releaseFiles(pane, [key]);
+      layout.closeTab(pane, key);
+    } else void docs.close(key, { force });
   }
 
-  /** Step to the next or previous tab, wrapping at the ends. */
+  /** Step to the next or previous tab of the focused pane, wrapping at the ends. */
   function cycleTabs(step: 1 | -1) {
-    if (tabs.length < 2) return;
-    const index = tabs.findIndex((tab) => tab.key === activeTab);
-    selectTab(tabs[(index + step + tabs.length) % tabs.length].key);
+    const { tabs, active, id } = layout.current;
+    if (tabs.length < 2 || active === null) return;
+    layout.open(tabs[(tabs.indexOf(active) + step + tabs.length) % tabs.length], id);
   }
+
+  /** A tab was dropped: at `index` of the strip of pane `to`. */
+  function moveTab(key: number, from: number, to: number, index: number) {
+    if (from !== to) releaseFiles(from, [key]);
+    layout.move(key, from, to, index);
+  }
+
+  /**
+   * Another pane beside this one or below it. On the same file, as `:sp`
+   * gives a second window on the buffer; a terminal gets a new terminal,
+   * there being no second view of a shell to give.
+   */
+  function splitPane(dir: SplitDir, pane = layout.focused, key = layout.leaf(pane)?.active ?? null) {
+    if (key === null) return;
+    layout.split(dir, [isTerminal(key) ? makeTerminal() : key], pane);
+  }
+
+  /** `:sp file` and `:vsp file`. */
+  async function splitOn(dir: SplitDir, file: string | null) {
+    const pane = layout.focused;
+    if (file === null) {
+      splitPane(dir, pane);
+      return;
+    }
+    const key = await docs.open(resolvePath(file), { show: false });
+    if (key !== null) layout.split(dir, [key], pane);
+  }
+
+  /** Close a pane and keep what is in it: its tabs join the pane beside it. */
+  function closePane(pane: number) {
+    const leaf = layout.leaf(pane);
+    if (!leaf || layout.leaves.length < 2) return;
+    releaseFiles(pane, leaf.tabs);
+    layout.closePane(pane);
+  }
+
+  /** `:only`. */
+  function onlyPane() {
+    for (const leaf of layout.leaves) {
+      if (leaf.id !== layout.focused) releaseFiles(leaf.id, leaf.tabs);
+    }
+    layout.only();
+  }
+
+  /**
+   * A path typed at vim's command line. A relative one is from the folder
+   * the window is working in, as it would be from vim's working directory.
+   */
+  function resolvePath(file: string): string {
+    if (/^([a-zA-Z]:[\\/]|[\\/])/.test(file)) return file;
+    const base = terminalDir();
+    if (base === null) return file;
+    const sep = base.includes("\\") ? "\\" : "/";
+    return base.replace(/[\\/]$/, "") + sep + file;
+  }
+
+  const WINCMD: Record<string, Direction> = { h: "left", j: "down", k: "up", l: "right" };
+
+  // Vim's commands that reach outside the buffer. `:q` closes the tab it is
+  // typed in, and with it the pane if that was its last: which is what vim's
+  // `:q` does to a window.
+  docs.vimHooks = {
+    write: () => void docs.save(),
+    quit: (force) => closeTab(undefined, undefined, force),
+    writeQuit: () =>
+      void docs.save().then((saved) => {
+        // A save that failed or was cancelled leaves the file open.
+        if (saved) closeTab();
+      }),
+    cycle: cycleTabs,
+    split: (dir, file) => void splitOn(dir, file),
+    fresh: (dir) => void layout.split(dir, [docs.newFile({ show: false })]),
+    edit: (file) => {
+      // In the pane it was typed in, wherever else the file may be open.
+      const pane = layout.focused;
+      void docs.open(resolvePath(file), { show: false }).then((key) => {
+        if (key !== null) layout.open(key, pane);
+      });
+    },
+    close: () => closePane(layout.focused),
+    only: onlyPane,
+    wincmd: (arg) => {
+      if (arg in WINCMD) layout.focusTowards(WINCMD[arg]);
+      else if (arg === "w") layout.focusNext(1);
+      else if (arg === "p" || arg === "W") layout.focusNext(-1);
+      else if (arg === "s") splitPane("column");
+      else if (arg === "v") splitPane("row");
+      else if (arg === "c") closePane(layout.focused);
+      else if (arg === "o") onlyPane();
+      else if (arg === "q") closeTab();
+    },
+  };
+
+  // --- the stage ------------------------------------------------------------------
+
+  let stage = $state<HTMLElement | undefined>();
+
+  /** Where a box of the layout goes, as CSS; `top` is how much of its top to leave. */
+  function place(box: Rect, top = "0px"): string {
+    return (
+      `left:${box.x * 100}%;top:calc(${box.y * 100}% + ${top});` +
+      `width:${box.w * 100}%;height:calc(${box.h * 100}% - ${top})`
+    );
+  }
+
+  /** The line being dragged between two panes, while one is. */
+  let dividing = $state<Divider | null>(null);
+
+  function startDivide(event: PointerEvent, line: Divider) {
+    if (event.button !== 0) return;
+    dividing = line;
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function divide(event: PointerEvent) {
+    if (!dividing || !stage) return;
+    const box = stage.getBoundingClientRect();
+    const at =
+      dividing.dir === "row"
+        ? (event.clientX - box.left) / box.width
+        : (event.clientY - box.top) / box.height;
+    layout.resize(dividing.split, dividing.index, at);
+  }
+
+  /** The pane a dragged tab would join the end of, while it is over one's body. */
+  const dropZone = $derived.by(() => {
+    const { from, over } = tabDrag;
+    if (!from || !over || over.gap !== null || over.pane === from.pane) return null;
+    return layout.boxes.get(over.pane) ?? null;
+  });
 
   // --- pins -------------------------------------------------------------------
 
@@ -961,15 +1111,45 @@
   const SHORTCUTS = new Set(["n", "o", "s", "w", "tab"]);
 
   function onKeydown(event: KeyboardEvent) {
-    if (!event.ctrlKey || event.altKey || event.metaKey) return;
     // A dialog is up; the window behind it is not taking commands.
     const blocked =
       docs.busy ||
       appearanceOpen ||
+      lspOpen ||
       question !== null ||
       connectOpen ||
       browse !== null ||
       remote.status === "connecting";
+
+    // F6 steps from pane to pane, and Shift+F6 back: the one way between
+    // them that works from a terminal, whose keys are otherwise the shell's.
+    if (event.key === "F6" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!blocked && layout.leaves.length > 1) layout.focusNext(event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (!event.ctrlKey || event.altKey || event.metaKey) return;
+
+    // Ctrl+H/J/K/L go to the pane that way, as most vim setups have them,
+    // while there is more than one pane and vim is not being typed into.
+    // (Vim's own Ctrl+W is this window's Close, and stays that.)
+    const towards = WINCMD[event.key.toLowerCase()];
+    if (
+      towards &&
+      !event.shiftKey &&
+      layout.leaves.length > 1 &&
+      docs.vimMode !== null &&
+      docs.vimMode !== "insert" &&
+      docs.vimMode !== "replace" &&
+      event.target instanceof Element &&
+      event.target.closest(".cm-content") !== null
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!blocked) layout.focusTowards(towards);
+      return;
+    }
 
     // Ctrl+` goes to the terminal and back, and with Shift opens another;
     // from anywhere, a terminal included.
@@ -1004,8 +1184,8 @@
     else if (key === "o" && event.shiftKey) void openFolder();
     else if (key === "o") void docs.openDialog();
     else if (key === "w") closeTab();
-    // There is a file behind a terminal's tab, but it is not what is on screen.
-    else if (activeTerminal !== null) return;
+    // A terminal is what is on screen, and there is nothing of it to save.
+    else if (!showingFile) return;
     else if (event.shiftKey) void docs.saveAs();
     else void docs.save();
   }
@@ -1101,19 +1281,26 @@
     };
   }
 
-  /** A tab. */
-  function onTabContextMenu(event: MouseEvent, key: number) {
+  /** A tab, in the strip of one pane. */
+  function onTabContextMenu(event: MouseEvent, key: number, pane: number) {
     const own = isTerminal(key)
       ? [item("Kill Terminal", () => closeTerminal(key), true)]
       : [
           item("Save", () => void docs.save(key)),
           item("Save As…", () => void docs.saveAs(key)),
-          item("Close", () => void docs.close(key)),
+          item("Close", () => closeTab(key, pane)),
         ];
     ctx = {
       x: event.clientX,
       y: event.clientY,
-      items: [...own, SEP, item("Refresh Page", refreshPage)],
+      items: [
+        ...own,
+        SEP,
+        item("Split Right", () => splitPane("row", pane, key)),
+        item("Split Down", () => splitPane("column", pane, key)),
+        SEP,
+        item("Refresh Page", refreshPage),
+      ],
     };
   }
 
@@ -1137,6 +1324,21 @@
     // Only the config is a dependency: `configure` walks the open files, and
     // must not re-run just because one was opened or closed.
     untrack(() => docs.configure(current));
+  });
+
+  // The language servers that are switched on. Which are installed is looked
+  // up once the window is up, and again each time the dialog is opened.
+  $effect(() => {
+    const enabled = config.current.lsp.enabled;
+    untrack(() => lsp.configure(enabled));
+  });
+
+  // A folder opened or closed can change which project a file belongs to,
+  // and coming back from a remote brings the servers back into play.
+  $effect(() => {
+    void tree.roots.length;
+    void remote.status;
+    untrack(() => lsp.sync());
   });
 
   /** A new config has arrived, from this window's dialog, another's, or the file. */
@@ -1178,6 +1380,7 @@
 
       // Not needed until a file is open, so not paid for before the window is up.
       loadIcons();
+      void lsp.refresh();
 
       // `thread.exe some-file`, `thread.exe .`, or "Open with" from Explorer.
       const startup = await invoke<{ path: string; dir: boolean }[]>("startup_files").catch(
@@ -1258,7 +1461,7 @@
     onclosefolder={() => void closeFolders(tree.roots.map((root) => root.path))}
     onsave={() => void docs.save()}
     onsaveas={() => void docs.saveAs()}
-    onclosefile={() => void docs.close()}
+    onclosefile={() => closeTab()}
     {sidebarCollapsed}
     ontogglesidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
     onnewterminal={newTerminal}
@@ -1271,6 +1474,7 @@
     onreconnect={() => void reconnect()}
     onnewwindow={newWindow}
     onappearance={() => (appearanceOpen = true)}
+    onlsp={() => (lspOpen = true)}
     onclosewindow={closeWindow}
     onquit={quit}
   />
@@ -1301,56 +1505,77 @@
 
     <!-- The resizer normally provides the gap on this side; collapsed, it is
          not rendered, so the stage supplies its own. -->
-    <section class="stage" class:railed={sidebarCollapsed}>
-      <!-- No strip with nothing open: an empty bar across the top of an empty
-           editor is a line with no reason to be there. -->
-      {#if tabs.length > 0}
-        <TabBar
-          {tabs}
-          activeKey={activeTab}
-          onselect={selectTab}
-          onclose={closeTab}
-          onmove={moveTab}
-          oncontext={onTabContextMenu}
+    <section class="stage" class:railed={sidebarCollapsed} bind:this={stage}>
+      <!-- Laid out flat, each where the layout says it goes, rather than
+           nested as the splits are: a pane then stays the same element
+           however the splits around it change, and keeps its editor. -->
+      {#each layout.leaves as leaf (leaf.id)}
+        <Pane
+          {leaf}
+          style={place(layout.boxes.get(leaf.id)!)}
+          focused={layout.focused === leaf.id}
+          tabs={leaf.tabs.flatMap((key) => tabOf(key) ?? [])}
+          closable={layout.leaves.length > 1}
+          {docs}
+          editor={config.current.editor}
+          onfocus={() => layout.focus(leaf.id)}
+          onselect={(key) => layout.open(key, leaf.id)}
+          onclose={(key) => closeTab(key, leaf.id)}
+          onmove={(key, to, index) => moveTab(key, leaf.id, to, index)}
+          oncontext={(event, key) => onTabContextMenu(event, key, leaf.id)}
+          onsplit={(dir) => splitPane(dir, leaf.id)}
+          onclosepane={() => closePane(leaf.id)}
         />
-      {/if}
+      {/each}
 
-      <div class="editor-area">
-        <!-- Hidden, not removed, behind a terminal: the editor keeps its
-             scroll position and its measurements. -->
-        <div class="pane editing" class:hidden={activeTerminal !== null}>
-          <div class="text">
-            <Editor host={docs.editor} />
-          </div>
-          <!-- Vim's `:` line, `/` search and messages are put here by
-               `vim.ts`: one line of the editor, in the editor's own font and
-               at its line height, that takes the place of the last line on
-               screen for as long as it has something in it. Always present,
-               so there is somewhere to put them the moment vim asks. -->
-          <div
-            class="vim-line"
-            data-vim-line
-            bind:this={docs.vimLine}
-            style:font-family={config.current.editor.font_family}
-            style:font-size="{config.current.editor.font_size}px"
-            style:height="{config.current.editor.font_size * config.current.editor.line_height}px"
-          ></div>
-        </div>
-
-        <!-- Each for as long as its tab is open: with the last one goes
-             xterm, and with each its shell. -->
-        {#each terminals as terminal (terminal.key)}
+      <!-- Each for as long as its tab is open: with the last one goes
+           xterm, and with each its shell. Beside the panes rather than
+           inside them, and laid over the body of whichever pane has its
+           tab, so one dragged to another pane is moved and not restarted. -->
+      {#each terminals as terminal (terminal.key)}
+        {@const leaf = layout.holding(terminal.key)[0]}
+        {@const box = leaf && layout.boxes.get(leaf.id)}
+        {@const front = leaf?.active === terminal.key}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="terminal"
+          data-pane={leaf?.id}
+          style={box ? place(box, "var(--tabs-height)") : "display:none"}
+          onfocusin={() => leaf && layout.focus(leaf.id)}
+          onpointerdowncapture={() => leaf && layout.focus(leaf.id)}
+        >
           <TerminalView
             bind:this={terminalViews[terminal.key]}
-            active={activeTerminal === terminal.key}
+            active={front}
+            focused={front && layout.focused === leaf?.id}
             cwd={terminal.cwd}
             look={terminalLook}
             scrollback={config.current.terminal.scrollback}
             onexit={() => closeTerminal(terminal.key)}
             oncontext={(event) => onTerminalContextMenu(event, terminal.key)}
           />
-        {/each}
-      </div>
+        </div>
+      {/each}
+
+      {#each layout.dividers as line (`${line.split}:${line.index}`)}
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div
+          class="divider"
+          class:across={line.dir === "column"}
+          class:dragging={dividing?.split === line.split && dividing.index === line.index}
+          role="separator"
+          aria-orientation={line.dir === "row" ? "vertical" : "horizontal"}
+          style="left:{line.x * 100}%;top:{line.y * 100}%;--length:{line.length * 100}%"
+          onpointerdown={(event) => startDivide(event, line)}
+          onpointermove={divide}
+          onpointerup={() => (dividing = null)}
+          onpointercancel={() => (dividing = null)}
+        ></div>
+      {/each}
+
+      {#if dropZone}
+        <div class="drop-zone" style={place(dropZone)}></div>
+      {/if}
     </section>
   </main>
 
@@ -1415,7 +1640,16 @@
     onclose={() => (appearanceOpen = false)}
   />
 
+  <LspDialog
+    open={lspOpen}
+    {lsp}
+    {config}
+    remote={remote.status !== "local"}
+    onclose={() => (lspOpen = false)}
+  />
+
   <ConnectDialog
+
     open={connectOpen}
     {keys}
     busy={remote.status === "connecting"}
@@ -1472,11 +1706,16 @@
 
      It is also the painted surface for the tabs and the editor, which draw no
      background of their own: one layer here is what keeps the window a single
-     opacity. */
+     opacity.
+
+     The panes, their terminals and the lines between them are all placed
+     in it absolutely, so it is the positioning context for them. */
   .stage {
-    display: flex;
-    flex-direction: column;
+    --tabs-height: 26px;
+
+    position: relative;
     flex: 1;
+
     min-width: 0;
     min-height: 0;
     margin: var(--viewport-inset) var(--viewport-inset) var(--viewport-inset) 0;
@@ -1492,85 +1731,58 @@
     margin-left: var(--viewport-inset);
   }
 
-  /* Whatever the tab strip leaves. The editor and the terminals fill it
-     absolutely, so it is the positioning context for them. */
-  .editor-area {
-    position: relative;
-    flex: 1;
-    min-height: 0;
+  /* A terminal, over the body of the pane its tab is in: everything of the
+     pane but its strip. */
+  .terminal {
+    position: absolute;
   }
 
-  .pane {
+  /* The line between two panes, and the handle that moves it. The handle is
+     wide enough to hit; what shows is a hairline down its middle. */
+  .divider {
     position: absolute;
-    inset: 0;
+    z-index: 5;
+    width: 7px;
+    height: var(--length);
+    transform: translateX(-50%);
+    cursor: col-resize;
   }
-  .pane.hidden {
-    visibility: hidden;
+  .divider.across {
+    width: var(--length);
+    height: 7px;
+    transform: translateY(-50%);
+    cursor: row-resize;
   }
-  /* The editor's pane is the text, and under it vim's line when it has
-     something to say: the text gives up that much height and gets it back. */
-  .pane.editing {
-    display: flex;
-    flex-direction: column;
+  .divider::after {
+    content: "";
+    position: absolute;
+    inset: 0 3px;
+    background: var(--border);
+    transition: background 120ms ease;
   }
-  .text {
-    position: relative;
-    flex: 1;
-    min-height: 0;
+  .divider.across::after {
+    inset: 3px 0;
+  }
+  .divider:hover::after,
+  .divider.dragging::after {
+    background: var(--accent);
+  }
+
+  /* The pane a dragged tab would join. Not there to be clicked: the pane
+     under it is still what the pointer is over. */
+  .drop-zone {
+    position: absolute;
+    z-index: 6;
+    background: var(--accent-soft);
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+    pointer-events: none;
   }
 
   @media (prefers-reduced-motion: reduce) {
     .stage {
       transition: none;
     }
-  }
-
-  /* Vim's command line: a line across the foot of the editor, as vim has it.
-     It is set as a line of the file is (the font and the height come from the
-     config, inline), and the text above gives up exactly that much, so it
-     reads as the last line on screen having been swapped for it. Nothing is
-     drawn for it, no surface and no rule. Not there at all while it is empty.
-     What goes in it is built by the vim extension, not by this component, so
-     it is reached with `:global`. */
-  .vim-line {
-    flex: none;
-    box-sizing: content-box;
-    display: flex;
-    align-items: center;
-    /* In line with the line numbers above it, which also clears the card's
-       rounded corner. */
-    padding: 0 14px;
-    color: var(--fg);
-  }
-  .vim-line:empty {
-    display: none;
-  }
-  /* The extension's panel fills the bar, so the field in it has the width. */
-  .vim-line :global(> *) {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-  }
-  /* Everything the extension puts in here takes the window's own font and
-     colour, over the monospace and the hard red it asks for inline. */
-  .vim-line :global(*) {
-    color: inherit !important;
-    font-family: inherit !important;
-    font-size: inherit !important;
-  }
-  .vim-line :global(input) {
-    flex: 1;
-    min-width: 0;
-    padding: 0;
-    background: transparent;
-    border: none;
-    outline: none;
-  }
-  .vim-line :global(.cm-vim-message) {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* The left end of the bottom bar. Every item is the bar's own text, in the

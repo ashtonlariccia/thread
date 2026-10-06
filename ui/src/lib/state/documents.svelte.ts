@@ -19,9 +19,10 @@ import { baseName, samePath, segmentsBelow } from "../paths";
 import { pickFiles, pickSave } from "../pick";
 import { loadSyntax } from "../syntax";
 import { syntaxTheme } from "../themes";
-import { loadVim, type VimApi, type VimMode } from "../vim";
+import { loadVim, type VimApi, type VimHooks, type VimMode } from "../vim";
 import { substitutePreview } from "../vimSubstitute";
 import { DEFAULTS, type Config } from "./config.svelte";
+import type { Layout } from "./layout.svelte";
 
 export type Eol = "lf" | "crlf";
 
@@ -57,6 +58,17 @@ type Loaded = {
 
 export type UnsavedChoice = "save" | "discard" | "cancel";
 
+/** Told about a file's life, for whatever follows files around: language servers. */
+export type DocWatcher = {
+  opened: (doc: Doc) => void;
+  /** Its text changed. */
+  changed: (key: number) => void;
+  saved: (doc: Doc) => void;
+  /** It has a different path, or name, than it had: `from` is the old path. */
+  moved: (doc: Doc, from: string | null) => void;
+  closed: (doc: Doc) => void;
+};
+
 function report(error: unknown) {
   void message(String(error), { title: "Thread", kind: "error" });
 }
@@ -68,18 +80,22 @@ function sameStamp(a: Stamp | null, b: Stamp | null): boolean {
 
 export class Documents {
   list = $state<Doc[]>([]);
-  activeKey = $state<number | null>(null);
-  cursor = $state<Cursor>({ line: 1, col: 1 });
+  /** Where the cursor is in each pane's editor, by pane. */
+  cursors = $state<Record<number, Cursor>>({});
 
-  /** The vim mode the editor is in, or null while vim motions are off. */
-  vimMode = $state<VimMode | null>(null);
-  /** Where vim's `:` line and messages are shown; set by whoever draws it. */
-  vimLine: HTMLElement | null = null;
+  /** The vim mode each pane's editor is in, by pane. */
+  vimModes = $state<Record<number, VimMode>>({});
+  /** Whether vim motions are on. */
+  vimOn = $state(false);
   /**
-   * Called when a file is brought to the front: opened, clicked, cycled to.
-   * Not when one merely becomes current because its neighbour was closed.
+   * Where each pane shows vim's `:` line and messages, by pane; set by
+   * whoever draws it.
    */
-  onselect: (() => void) | null = null;
+  vimLines: Record<number, HTMLElement | null> = {};
+  /** What vim's commands for files and panes do; set by whoever owns the panes. */
+  vimHooks: VimHooks | null = null;
+  /** Whoever wants to hear what happens to the files. */
+  watcher: DocWatcher | null = null;
 
   /** Set while the user is being asked what to do with unsaved files. */
   asking = $state.raw<{ docs: Doc[]; resolve: (proceed: boolean) => void } | null>(null);
@@ -92,14 +108,18 @@ export class Documents {
       const doc = this.find(key);
       if (doc && doc.dirty !== dirty) doc.dirty = dirty;
     },
-    oncursor: (cursor) => (this.cursor = cursor),
-    onview: (view) =>
+    onchange: (key) => this.watcher?.changed(key),
+    oncursor: (pane, cursor) => (this.cursors[pane] = cursor),
+    onview: (pane, view) =>
       this.#vim?.watch(
         view,
-        (mode) => (this.vimMode = mode),
-        () => this.vimLine,
+        (mode) => (this.vimModes[pane] = mode),
+        () => this.vimLines[pane] ?? null,
       ),
+    onfocus: (pane) => this.panes.focus(pane),
   });
+
+  constructor(private readonly panes: Layout) {}
 
   #config: Config = DEFAULTS;
   /** The vim extension, once fetched and while switched on. */
@@ -113,8 +133,23 @@ export class Documents {
   #saving = new Set<number>();
   #checking = false;
 
+  /** The file showing in the focused pane, if a file is what is showing there. */
+  get activeKey(): number | null {
+    return this.panes.activeFile;
+  }
+
   get active(): Doc | null {
     return this.find(this.activeKey);
+  }
+
+  /** Where the cursor is in the focused pane. */
+  get cursor(): Cursor {
+    return this.cursors[this.panes.focused] ?? { line: 1, col: 1 };
+  }
+
+  /** The vim mode the focused pane is in, or null while vim motions are off. */
+  get vimMode(): VimMode | null {
+    return this.vimOn ? (this.vimModes[this.panes.focused] ?? "normal") : null;
   }
 
   get dirty(): Doc[] {
@@ -130,14 +165,12 @@ export class Documents {
     return this.list.find((d) => d.key === key) ?? null;
   }
 
-  select(key: number | null) {
-    this.#show(key);
-    this.onselect?.();
-  }
-
-  #show(key: number | null) {
-    this.activeKey = key;
-    this.editor.show(key);
+  /**
+   * Bring a file to the front: in `pane` if one is named, and otherwise
+   * wherever it already is, or as a new tab of the focused pane.
+   */
+  select(key: number, pane?: number) {
+    this.panes.open(key, pane);
   }
 
   /** Take on a new config: every open file is re-dressed, not just the next. */
@@ -164,25 +197,29 @@ export class Documents {
 
     if (!enabled) {
       this.#vim = null;
-      this.vimMode = null;
+      this.vimOn = false;
       this.editor.setVim([]);
       return;
     }
 
+    // Looked up as each command runs, so whoever sets them can do so late.
     void loadVim({
-      write: () => void this.save(),
-      quit: (force) => void this.close(this.activeKey, { force }),
-      writeQuit: () =>
-        void this.save().then((saved) => {
-          // A save that failed or was cancelled leaves the file open.
-          if (saved) void this.close();
-        }),
-      cycle: (step) => this.cycle(step),
+      write: () => this.vimHooks?.write(),
+      quit: (force) => this.vimHooks?.quit(force),
+      writeQuit: () => this.vimHooks?.writeQuit(),
+      cycle: (step) => this.vimHooks?.cycle(step),
+      split: (dir, file) => this.vimHooks?.split(dir, file),
+      fresh: (dir) => this.vimHooks?.fresh(dir),
+      edit: (file) => this.vimHooks?.edit(file),
+      close: () => this.vimHooks?.close(),
+      only: () => this.vimHooks?.only(),
+      wincmd: (arg) => this.vimHooks?.wincmd(arg),
     })
       .then((vim) => {
         // Switched off again while it was being fetched.
         if (!this.#vimWanted) return;
         this.#vim = vim;
+        this.vimOn = true;
         this.editor.setVim([vim.extension, substitutePreview()]);
       })
       .catch((e) => {
@@ -219,16 +256,11 @@ export class Documents {
     });
   }
 
-  /** Step to the next or previous open file, wrapping at the ends. */
-  cycle(step: 1 | -1) {
-    const count = this.list.length;
-    if (count < 2) return;
-    const index = this.list.findIndex((d) => d.key === this.activeKey);
-    this.select(this.list[(index + step + count) % count].key);
-  }
-
-  /** File → New File: an empty buffer with nowhere to live until it is saved. */
-  newFile() {
+  /**
+   * File → New File: an empty buffer with nowhere to live until it is saved.
+   * Not brought to the front if `show` is false; whoever asked puts it somewhere.
+   */
+  newFile({ show = true } = {}): number {
     const key = this.#nextKey++;
     const name = `Untitled-${this.#nextUntitled++}`;
     const indent = this.#indentFor(name, null);
@@ -245,7 +277,9 @@ export class Documents {
       indent,
     });
     this.#dress(this.list.at(-1)!);
-    this.select(key);
+    this.watcher?.opened(this.list.at(-1)!);
+    if (show) this.select(key);
+    return key;
   }
 
   /** File → Open File. */
@@ -258,14 +292,16 @@ export class Documents {
    *
    * `quiet` is for files nobody just asked for by hand — the ones a session
    * is restoring — where a file that has since gone is skipped, not announced.
+   * With `show` false it is opened and not brought to the front: whoever
+   * asked puts it in a pane. Returns the file's key, or null if it would not open.
    */
-  async open(path: string, { quiet = false } = {}) {
+  async open(path: string, { quiet = false, show = true } = {}): Promise<number | null> {
     // Opening a file that is already open goes to it, rather than making a
     // second buffer whose edits would fight the first's on save.
     const existing = this.list.find((d) => d.path !== null && samePath(d.path, path));
     if (existing) {
-      this.select(existing.key);
-      return;
+      if (show) this.select(existing.key);
+      return existing.key;
     }
 
     try {
@@ -286,9 +322,12 @@ export class Documents {
         indent,
       });
       this.#dress(this.list.at(-1)!);
-      this.select(key);
+      this.watcher?.opened(this.list.at(-1)!);
+      if (show) this.select(key);
+      return key;
     } catch (e) {
       if (!quiet) report(e);
+      return null;
     }
   }
 
@@ -335,11 +374,14 @@ export class Documents {
       this.#saving.delete(doc.key);
     }
 
+    const from = doc.path;
     doc.path = path;
     doc.name = baseName(path);
     // A new name can mean a new language, with settings of its own.
     this.#dress(doc);
     this.editor.markSaved(doc.key);
+    if (from === null || !samePath(from, path)) this.watcher?.moved(doc, from);
+    this.watcher?.saved(doc);
     return true;
   }
 
@@ -357,16 +399,18 @@ export class Documents {
       const next = samePath(doc.path, from) ? to : below ? [to, ...below].join(sep) : null;
       if (next === null) continue;
 
+      const was = doc.path;
       doc.path = next;
       doc.name = baseName(next);
       // A new name can mean a new language, with settings of its own.
       this.#dress(doc);
+      this.watcher?.moved(doc, was);
     }
   }
 
   /**
-   * Close a file, asking first if it has unsaved changes. `force` does not
-   * ask: it is `:q!`, which is the answer already.
+   * Close a file, in every pane that has it, asking first if it has unsaved
+   * changes. `force` does not ask: it is `:q!`, which is the answer already.
    */
   async close(key: number | null = this.activeKey, { force = false } = {}) {
     const doc = this.find(key);
@@ -399,13 +443,17 @@ export class Documents {
     const index = this.list.findIndex((d) => d.key === doc.key);
     if (index === -1) return;
     this.list.splice(index, 1);
+    // Whatever vim was showing was about this file, or was asked from it.
+    for (const leaf of this.panes.holding(doc.key)) {
+      if (leaf.active === doc.key) this.vimLines[leaf.id]?.replaceChildren();
+    }
+    this.watcher?.closed(doc);
     this.editor.drop(doc.key);
     this.#grammars.delete(doc.key);
-    // Whatever vim was showing was about this file, or was asked from it.
-    if (this.activeKey === doc.key) this.vimLine?.replaceChildren();
-    // The neighbour that slid into its place, else the one before it.
-    if (this.activeKey === doc.key) this.#show((this.list[index] ?? this.list.at(-1))?.key ?? null);
+    // Each pane that had it shows the neighbour that slides into its place.
+    this.panes.drop(doc.key);
   }
+
 
   /**
    * Ask what to do with unsaved files before something would lose them.
