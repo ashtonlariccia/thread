@@ -11,6 +11,8 @@ import { invoke } from "@tauri-apps/api/core";
 export type RemoteInfo = {
   /** `user@host`. */
   label: string;
+  user: string;
+  host: string;
   /** The folder the server puts us in. */
   home: string;
   /** Its id, if it is one of the saved connections. */

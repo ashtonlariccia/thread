@@ -10,9 +10,9 @@
     onunpin: (pin: Pin) => void;
     /** Drop a pin at a new position. `index` counts the reordered strip. */
     onmove: (pin: Pin, index: number) => void;
-    /** Status for the right-hand end of the bar. */
+    /** Status for the right-hand half of the bar. */
     info?: Snippet;
-    /** What leads the bar, at its left-hand end, and takes the room there is. */
+    /** What leads the bar, in its left-hand half. */
     start?: Snippet;
   };
 
@@ -268,28 +268,19 @@
     overflow: hidden;
   }
 
-  .start {
-    display: flex;
-    align-items: center;
-    /* Set exactly as `.info` at the other end is, so the two ends of the
-       bar are one strip of status rather than two styles of it. */
-    gap: 0.9rem;
-    flex: 1;
-    min-width: 0;
-    padding: 0 0.45rem;
-    color: var(--fg-dim);
-    font-size: 0.71rem;
-    white-space: nowrap;
-  }
-
-  /* Pushed to the right-hand end whether or not there are pins before it. */
+  /* The bar is two halves, and each group is centred in its own: where the
+     window is working on the left, and the file's particulars on the right.
+     Set alike, so they read as one strip of status rather than two styles. */
+  .start,
   .info {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 0.9rem;
+    flex: 1;
     min-width: 0;
-    margin-left: auto;
     padding: 0 0.6rem;
+    overflow: hidden;
     color: var(--fg-dim);
     font-size: 0.71rem;
     white-space: nowrap;
@@ -302,7 +293,8 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    flex: 1;
+    /* Between the two halves, and no wider than what is pinned. */
+    flex: 0 1 auto;
     min-width: 0;
     overflow-x: auto;
     overflow-y: hidden;

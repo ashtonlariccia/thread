@@ -690,6 +690,47 @@
     checkDisk();
   }
 
+  // --- the bottom bar ------------------------------------------------------------
+  //
+  // Its left half says where the window is working: on which machine, as
+  // whom, and on what branch.
+
+  /** This machine and whoever is at it, for while the window is working here. */
+  let identity = $state.raw({ user: "", host: "" });
+
+  /** Who and where the bar names: the remote's while on one, or being joined. */
+  const where = $derived.by(() => {
+    if (remote.remote && remote.info) return { user: remote.info.user, host: remote.info.host };
+    if (remote.status === "connecting" && remote.pending) {
+      const [user, host] = remote.pending.split("@");
+      return { user, host: host ?? "" };
+    }
+    return identity;
+  });
+
+  /** The folder the window is working in, which is whose branch is shown. */
+  const workDir = $derived(terminalDir());
+  let gitBranch = $state<string | null>(null);
+
+  /** Read the branch again. It moves when something is checked out elsewhere. */
+  async function refreshGit() {
+    const dir = workDir;
+    if (dir === null || remote.status === "connecting" || remote.status === "lost") {
+      if (dir === null) gitBranch = null;
+      return;
+    }
+    const branch = await invoke<string | null>("git_branch", { dir }).catch(() => null);
+    // Still the folder that was asked about.
+    if (dir === workDir) gitBranch = branch;
+  }
+
+  // At once when the folder changes, or the machine it is on; then on a timer.
+  $effect(() => {
+    void workDir;
+    void remote.status;
+    untrack(() => void refreshGit());
+  });
+
   /** The indicator in the bottom bar: what can be done from where the window is. */
   function onRemoteIndicator(event: MouseEvent) {
     const items =
@@ -1090,6 +1131,7 @@
   }
 
   let diskTicks = 0;
+  let gitTicks = 0;
 
   function checkDisk() {
     // Not while the window is between machines, when the paths that are open
@@ -1100,6 +1142,8 @@
     if (remote.remote && diskTicks++ % 3 !== 0) return;
     void docs.checkDisk();
     void tree.poll();
+    // A checkout is rarer than a save; every third of these is often enough.
+    if (gitTicks++ % 3 === 0) void refreshGit();
   }
 
   onMount(() => {
@@ -1107,6 +1151,7 @@
 
     void (async () => {
       await Promise.all([pins.refresh(), config.load(), remote.refreshKnown()]);
+      void invoke<{ user: string; host: string }>("identity").then((who) => (identity = who));
 
       // Liveness beacon: proof in the backend's log that the frontend came up.
       void invoke("ui_ready", {
@@ -1255,6 +1300,11 @@
              scroll position and its measurements. -->
         <div class="pane" class:hidden={activeTerminal !== null}>
           <Editor host={docs.editor} />
+          <!-- Vim's `:` line, `/` search and messages are put here by
+               `vim.ts`: a popup over the foot of the text, there only while
+               there is something in it. Always present, so there is somewhere
+               to put them the moment vim asks. -->
+          <div class="vim-line" data-vim-line bind:this={docs.vimLine}></div>
         </div>
 
         <!-- Each for as long as its tab is open: with the last one goes
@@ -1285,32 +1335,39 @@
     onmove={(pin, index) => void pins.move(pin, index)}
   >
     {#snippet start()}
-      <!-- Where the window is working: this machine, or a remote. Text and a
-           colour, and a click away from changing it. -->
+      <!-- Where the window is working, and a click away from changing it:
+           this machine or a remote, then as whom, on what, in which mode, and
+           on which branch. Each its own colour, so the eye finds one without
+           reading the rest. -->
       <button
-        class="remote"
+        class="place"
         data-status={remote.status}
         disabled={remote.status === "connecting"}
         title={remote.remote ? "Connected over SSH" : "Connect to a remote"}
         onclick={onRemoteIndicator}
       >
         {#if remote.status === "connecting"}
-          Connecting to {remote.pending}…
+          Connecting
         {:else if remote.status === "connected"}
-          SSH: {remote.info?.label}
+          Remote
         {:else if remote.status === "lost"}
-          Disconnected: {remote.info?.label}
+          Disconnected
         {:else}
           Local
         {/if}
       </button>
+      {#if where.user}
+        <span class="user">{where.user}</span>
+      {/if}
+      {#if where.host}
+        <span class="host">{where.host}</span>
+      {/if}
       {#if docs.vimMode && showingFile}
         <span class="mode" data-mode={docs.vimMode}>{docs.vimMode}</span>
       {/if}
-      <!-- Vim's `:` line, `/` search and messages are put here by `vim.ts`,
-           beside the mode, where vim itself shows them. Always present, so
-           there is somewhere to put them the moment vim asks. -->
-      <span class="vim-line" data-vim-line bind:this={docs.vimLine}></span>
+      {#if gitBranch}
+        <span class="git" title="Git branch">{gitBranch}</span>
+      {/if}
     {/snippet}
     {#snippet info()}
       {#if docs.active && showingFile}
@@ -1428,71 +1485,99 @@
     }
   }
 
-  /* What goes in here is built by the vim extension, not by this component,
-     so it is reached with `:global`. Its own inline styles ask for a default
-     monospace font and, for messages, a hard red. */
+  /* Vim's command line: a popup over the foot of the text, as wide as it
+     needs up to most of the editor, and not there at all while it is empty.
+     What goes in it is built by the vim extension, not by this component, so
+     it is reached with `:global`. */
   .vim-line {
+    position: absolute;
+    left: 50%;
+    bottom: 12px;
+    z-index: 20;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    min-width: min(320px, 80%);
+    max-width: 80%;
+    padding: 0.35rem 0.7rem;
+    background: var(--bg-menu);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px #0009;
+    color: var(--fg);
+    font-size: 0.8rem;
+  }
+  .vim-line:empty {
+    display: none;
+  }
+  /* The extension's panel fills the popup, so the field in it has the width. */
+  .vim-line :global(> *) {
     flex: 1;
     min-width: 0;
     display: flex;
     align-items: center;
-    overflow: hidden;
   }
-  /* Everything the extension puts in here takes the bar's own font, size and
-     colour, over the monospace and the colours it asks for inline -- so the
-     left-hand end of the bar reads as the same strip of status as the right. */
+  /* Everything the extension puts in here takes the popup's own font and
+     colour, over the monospace and the hard red it asks for inline. */
   .vim-line :global(*) {
     color: inherit !important;
     font-family: inherit !important;
     font-size: inherit;
   }
   .vim-line :global(input) {
+    flex: 1;
     min-width: 0;
     padding: 0;
     background: transparent;
     border: none;
     outline: none;
   }
+  .vim-line :global(.cm-vim-message) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
-  /* The remote indicator: the bar's own text, and nothing around it. Its
-     colour is the whole of what it has to say at a glance. */
-  .remote {
+  /* The left half of the bottom bar. Every item is the bar's own text, with
+     nothing drawn round it; the colour is what tells one from the next. */
+  .place {
     flex: none;
     padding: 0;
     background: transparent;
     border: none;
-    color: var(--fg-dim);
+    color: #94e2d5;
     cursor: pointer;
     font: inherit;
   }
-  .remote:hover:not(:disabled) {
-    filter: brightness(1.25);
+  .place:hover:not(:disabled) {
+    filter: brightness(1.2);
   }
-  .remote[data-status="connected"] {
+  .place[data-status="connected"] {
     color: var(--ok);
   }
-  .remote[data-status="connecting"] {
+  .place[data-status="connecting"] {
     color: #f9e2af;
     cursor: default;
   }
-  .remote[data-status="lost"] {
+  .place[data-status="lost"] {
     color: var(--danger);
   }
 
-  /* The mode, set like the status items across the bar from it. It is named
-     the way they are too: "Normal", not vim's shouted "NORMAL". */
+  .user {
+    color: #fab387;
+  }
+  .host {
+    color: #89b4fa;
+  }
+  /* Named the way the status items are: "Normal", not vim's shouted "NORMAL". */
   .mode {
+    color: var(--accent);
     text-transform: capitalize;
   }
-
-  /* Vim's end of the bar is the one part of it that is typed into and that
-     changes what the next key does, so it takes the accent: same font and
-     size as the status opposite, but not something to hunt for among it. */
-  .mode,
-  .vim-line {
-    color: var(--accent);
+  .git {
+    color: #f5c2e7;
   }
-  .vim-line :global(.cm-vim-message) {
+  .host,
+  .git {
     overflow: hidden;
     text-overflow: ellipsis;
   }

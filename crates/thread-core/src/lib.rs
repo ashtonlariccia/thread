@@ -11,6 +11,7 @@ pub mod config;
 pub mod connections;
 pub mod document;
 pub mod fsops;
+pub mod git;
 pub mod known_hosts;
 pub mod pins;
 pub mod remote;

@@ -628,6 +628,36 @@ impl Remote {
         !matches!(self.sftp.symlink_metadata(path).await, Err(e) if missing(&e))
     }
 
+    /// The branch `dir` is on, as [`crate::git::branch`] finds it here: its
+    /// own repository's, or the nearest one above it.
+    pub async fn git_branch(&self, dir: &str) -> Option<String> {
+        let text = |bytes: Vec<u8>| String::from_utf8(bytes).ok();
+
+        let mut folder = dir.trim_end_matches('/');
+        for _ in 0..crate::git::MAX_DEPTH {
+            let dot_git = format!("{folder}/.git");
+            if let Ok(head) = self.sftp.read(format!("{dot_git}/HEAD")).await {
+                return crate::git::head_label(&text(head)?);
+            }
+            // Not a folder with a `HEAD` in it; a worktree's pointer, perhaps.
+            if let Ok(pointer) = self.sftp.read(dot_git.as_str()).await {
+                let pointer = text(pointer)?;
+                let gitdir = crate::git::gitdir_of(&pointer)?;
+                let gitdir = match gitdir.starts_with('/') {
+                    true => gitdir.to_owned(),
+                    false => format!("{folder}/{gitdir}"),
+                };
+                let head = self.sftp.read(format!("{gitdir}/HEAD")).await.ok()?;
+                return crate::git::head_label(&text(head)?);
+            }
+            if folder.is_empty() {
+                break;
+            }
+            folder = folder.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+        None
+    }
+
     // --- terminals ------------------------------------------------------------
 
     /// Start a shell on the remote, in `cwd`, as a channel on this connection.

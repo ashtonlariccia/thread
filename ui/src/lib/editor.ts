@@ -121,7 +121,7 @@ const chrome = EditorView.theme(
     ".cm-vimMode .cm-threadCaret": {
       width: "calc(var(--caret-cell) + 2px)",
       marginLeft: "-1px",
-      borderRadius: "3px",
+      borderRadius: "1.5px",
       backgroundColor: "var(--caret-block)",
     },
     // No caret in an editor that is not being typed into; a faint block in
@@ -138,9 +138,9 @@ const chrome = EditorView.theme(
       color: "var(--fg)",
     },
     ".cm-panels-bottom": { borderTop: "1px solid var(--border)" },
-    // The command line is shown in the bottom bar (see `vim.ts`), which
-    // leaves the panel it was made for empty; an empty strip under the text
-    // with a rule above it is not worth keeping.
+    // The command line is shown in a popup over the foot of the text (see
+    // `vim.ts`), which leaves the panel it was made for empty; an empty strip
+    // under the text with a rule above it is not worth keeping.
     ".cm-panels:has(.cm-vim-panel:empty)": { display: "none" },
     ".cm-vim-panel": { padding: "3px 14px", fontFamily: "inherit" },
     ".cm-vim-panel input": { color: "var(--fg)", fontFamily: "inherit", fontSize: "inherit" },

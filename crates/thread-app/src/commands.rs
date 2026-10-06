@@ -14,7 +14,7 @@ use thread_core::connections::{SavedConnection, Store as ConnectionStore};
 use thread_core::remote::{self, ConnectError, DiscoveredKey, Failure, Remote, Target};
 use thread_core::terminal::{self, LocalTerminal, Terminal};
 use thread_core::{
-    config, document, fsops, tree, Appearance, Config, Document, Entry, Eol, Material, Pin,
+    config, document, fsops, git, tree, Appearance, Config, Document, Entry, Eol, Material, Pin,
     PinStore, Session, Stamp,
 };
 
@@ -438,6 +438,37 @@ pub async fn file_stamps(
     Ok(stamps)
 }
 
+/// Who is at the keyboard and what this machine is called, for the bottom
+/// bar to show while the window is working here.
+#[derive(serde::Serialize)]
+pub struct Identity {
+    user: String,
+    host: String,
+}
+
+#[tauri::command]
+pub fn identity() -> Identity {
+    let var = |name| std::env::var(name).unwrap_or_default();
+    Identity {
+        user: var("USERNAME"),
+        host: var("COMPUTERNAME"),
+    }
+}
+
+/// The branch the folder is on, or `None` if it is not in a repository.
+/// Asked again every few seconds, so that a checkout made in a terminal shows.
+#[tauri::command]
+pub async fn git_branch(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    dir: String,
+) -> Result<Option<String>, String> {
+    Ok(match remotes.of(&window) {
+        Some(link) => link.remote.git_branch(&dir).await,
+        None => git::branch(Path::new(&dir)),
+    })
+}
+
 // --- remote -----------------------------------------------------------------
 //
 // A window is on this machine, or connected to one remote. While it is
@@ -460,8 +491,11 @@ pub struct Link {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteInfo {
-    /// `user@host`, for the indicator.
+    /// `user@host`, to name it by.
     label: String,
+    /// Who the window is signed in as, and where, for the bottom bar.
+    user: String,
+    host: String,
     /// The folder the server puts us in, where a browse for one starts.
     home: String,
     /// Its id, if it is one of the saved connections.
@@ -509,6 +543,8 @@ async fn link_window(
         .and_then(|store| store.find(&target.host, target.port, &target.username));
     let info = RemoteInfo {
         label: target.label(),
+        user: target.username.clone(),
+        host: target.host.clone(),
         home: remote.home().to_owned(),
         saved: saved.map(|connection| connection.id),
     };
