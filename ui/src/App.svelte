@@ -732,27 +732,6 @@
     untrack(() => void refreshGit());
   });
 
-  /** The indicator in the bottom bar: what can be done from where the window is. */
-  function onRemoteIndicator(event: MouseEvent) {
-    const items =
-      remote.status === "connected"
-        ? [item("Disconnect", () => void disconnect())]
-        : remote.status === "lost"
-          ? [item("Reconnect", () => void reconnect()), item("Disconnect", () => void disconnect())]
-          : [
-              item("Connect…", openConnect),
-              ...(remote.known.length > 0 ? [SEP] : []),
-              ...remote.known.map((known) =>
-                item(connectionLabel(known), () => void connectKnown(known.id)),
-              ),
-            ];
-
-    // Above the bar: it sits on the window's bottom edge, and a menu hanging
-    // below it would have nowhere to go.
-    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    ctx = { x: box.left, y: box.top - items.length * 28 - 12, items };
-  }
-
   // --- session ------------------------------------------------------------------
   //
   // What is open is written down as it changes and put back at the next
@@ -1257,6 +1236,7 @@
     onconnectknown={(id) => void connectKnown(id)}
     onforgetknown={(id) => void forgetKnown(id)}
     ondisconnect={() => void disconnect()}
+    onreconnect={() => void reconnect()}
     onnewwindow={newWindow}
     onappearance={() => (appearanceOpen = true)}
     onclosewindow={closeWindow}
@@ -1307,11 +1287,6 @@
              scroll position and its measurements. -->
         <div class="pane" class:hidden={activeTerminal !== null}>
           <Editor host={docs.editor} />
-          <!-- Vim's `:` line, `/` search and messages are put here by
-               `vim.ts`: a popup over the foot of the text, there only while
-               there is something in it. Always present, so there is somewhere
-               to put them the moment vim asks. -->
-          <div class="vim-line" data-vim-line bind:this={docs.vimLine}></div>
         </div>
 
         <!-- Each for as long as its tab is open: with the last one goes
@@ -1342,17 +1317,11 @@
     onmove={(pin, index) => void pins.move(pin, index)}
   >
     {#snippet start()}
-      <!-- Where the window is working, and a click away from changing it:
-           this machine or a remote, then as whom, on what, in which mode, and
-           on which branch. Each its own colour, so the eye finds one without
-           reading the rest. -->
-      <button
-        class="place"
-        data-status={remote.status}
-        disabled={remote.status === "connecting"}
-        title={remote.remote ? "Connected over SSH" : "Connect to a remote"}
-        onclick={onRemoteIndicator}
-      >
+      <!-- Where the window is working: this machine or a remote, then as
+           whom, on what, in which mode, and on which branch. Each its own
+           colour, so the eye finds one without reading the rest. All of it is
+           for reading; changing any of it is done from the menus. -->
+      <span class="place" data-status={remote.status}>
         {#if remote.status === "connecting"}
           Connecting
         {:else if remote.status === "connected"}
@@ -1362,7 +1331,7 @@
         {:else}
           Local
         {/if}
-      </button>
+      </span>
       {#if where.user}
         <span class="user">{where.user}</span>
       {/if}
@@ -1375,6 +1344,12 @@
       {#if gitBranch}
         <span class="git" title="Git branch">{gitBranch}</span>
       {/if}
+    {/snippet}
+    {#snippet middle()}
+      <!-- Vim's `:` line, `/` search and messages are put here by `vim.ts`.
+           The box is always present, so there is somewhere to put them the
+           moment vim asks, and cannot be seen until there is something in it. -->
+      <div class="vim-line" data-vim-line bind:this={docs.vimLine}></div>
     {/snippet}
     {#snippet info()}
       {#if docs.active && showingFile}
@@ -1492,39 +1467,33 @@
     }
   }
 
-  /* Vim's command line: a popup over the foot of the text, as wide as it
-     needs up to most of the editor, and not there at all while it is empty.
-     What goes in it is built by the vim extension, not by this component, so
-     it is reached with `:global`. */
+  /* Vim's command line, in the box in the middle of the bottom bar. It fills
+     the box, and is nothing but its contents: no surface until there is a
+     command in it, and then only a faint one, enough to say where the typing
+     is going. What goes in it is built by the vim extension, not by this
+     component, so it is reached with `:global`. */
   .vim-line {
-    position: absolute;
-    left: 50%;
-    bottom: 12px;
-    z-index: 20;
-    transform: translateX(-50%);
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
-    min-width: min(320px, 80%);
-    max-width: 80%;
-    padding: 0.35rem 0.7rem;
-    background: var(--bg-menu);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    box-shadow: 0 8px 24px #0009;
+    height: calc(var(--pinbar-height) - 2 * var(--chip-inset));
+    padding: 0 0.55rem;
+    border-radius: var(--chip-radius);
     color: var(--fg);
-    font-size: 0.8rem;
+    transition: background 90ms ease;
   }
-  .vim-line:empty {
-    display: none;
+  .vim-line:not(:empty) {
+    background: var(--hover);
   }
-  /* The extension's panel fills the popup, so the field in it has the width. */
+  /* The extension's panel fills the box, so the field in it has the width. */
   .vim-line :global(> *) {
     flex: 1;
     min-width: 0;
     display: flex;
     align-items: center;
   }
-  /* Everything the extension puts in here takes the popup's own font and
+  /* Everything the extension puts in here takes the bar's own font and
      colour, over the monospace and the hard red it asks for inline. */
   .vim-line :global(*) {
     color: inherit !important;
@@ -1542,28 +1511,19 @@
   .vim-line :global(.cm-vim-message) {
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  /* The left half of the bottom bar. Every item is the bar's own text, with
+  /* The left of the bottom bar. Every item is the bar's own text, with
      nothing drawn round it; the colour is what tells one from the next. */
   .place {
-    flex: none;
-    padding: 0;
-    background: transparent;
-    border: none;
     color: #94e2d5;
-    cursor: pointer;
-    font: inherit;
-  }
-  .place:hover:not(:disabled) {
-    filter: brightness(1.2);
   }
   .place[data-status="connected"] {
     color: var(--ok);
   }
   .place[data-status="connecting"] {
     color: #f9e2af;
-    cursor: default;
   }
   .place[data-status="lost"] {
     color: var(--danger);

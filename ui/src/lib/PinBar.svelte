@@ -10,13 +10,15 @@
     onunpin: (pin: Pin) => void;
     /** Drop a pin at a new position. `index` counts the reordered strip. */
     onmove: (pin: Pin, index: number) => void;
-    /** Status for the right-hand half of the bar. */
+    /** Status for the right of the bar. */
     info?: Snippet;
-    /** What leads the bar, in its left-hand half. */
+    /** What leads the bar, on its left. */
     start?: Snippet;
+    /** What the box in the middle of the bar holds. */
+    middle?: Snippet;
   };
 
-  let { pins, onopen, onunpin, onmove, info, start }: Props = $props();
+  let { pins, onopen, onunpin, onmove, info, start, middle }: Props = $props();
 
   // The context menu is positioned in *viewport* coordinates rather than inside
   // the row, because the strip scrolls horizontally -- and `overflow` clips any
@@ -190,6 +192,9 @@
 <svelte:window onkeydown={onWindowKey} onclick={() => (menu = null)} />
 
 <footer class="pinbar">
+  <!-- Three columns: a box of fixed width dead centre, and to either side of
+       it whatever room is left, with a group centred in each. -->
+  <div class="side">
   {#if start}
     <div class="start">{@render start()}</div>
   {/if}
@@ -223,10 +228,15 @@
       {/each}
     </ul>
   {/if}
+  </div>
 
-  {#if info}
-    <div class="info">{@render info()}</div>
-  {/if}
+  <div class="middle">{@render middle?.()}</div>
+
+  <div class="side">
+    {#if info}
+      <div class="info">{@render info()}</div>
+    {/if}
+  </div>
 </footer>
 
 {#if menu}
@@ -252,7 +262,10 @@
   .pinbar {
     --pinbar-height: 24px;
 
-    display: flex;
+    display: grid;
+    /* The middle is the width vim's command line has always opened at; the
+       sides share what is left equally, which is what keeps it centred. */
+    grid-template-columns: minmax(0, 1fr) min(320px, 40%) minmax(0, 1fr);
     align-items: stretch;
     height: var(--pinbar-height);
     flex: none;
@@ -260,17 +273,19 @@
        inset plus this bar, so the inset is handed to the bottom and the chips
        rise onto that band's centre line. */
     padding-bottom: var(--viewport-inset);
-    /* Less the chip's own padding, so the first pin's label starts on the same
-       vertical line as "File" above it. */
-    padding-left: calc(var(--bar-text-inset) - 0.45rem);
-    padding-right: 2px;
     user-select: none;
     overflow: hidden;
   }
 
-  /* The bar is two halves, and each group is centred in its own: where the
-     window is working on the left, and the file's particulars on the right.
-     Set alike, so they read as one strip of status rather than two styles. */
+  .side {
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+  }
+
+  /* Each group is centred in the room its side of the middle box has: where
+     the window is working on the left, and the file's particulars on the
+     right. Set alike, so they read as one strip of status. */
   .start,
   .info {
     display: flex;
@@ -284,6 +299,15 @@
     color: var(--fg-dim);
     font-size: 0.71rem;
     white-space: nowrap;
+  }
+
+  /* The box in the middle. It is the height of a chip and draws nothing of
+     its own: whatever is put in it decides whether it can be seen. */
+  .middle {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    font-size: 0.71rem;
   }
 
   .strip {

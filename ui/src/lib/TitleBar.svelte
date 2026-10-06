@@ -35,6 +35,8 @@
     /** Stop saving a connection. */
     onforgetknown: (id: string) => void;
     ondisconnect: () => void;
+    /** Connect again to what the window was on, after the connection dropped. */
+    onreconnect: () => void;
     onnewwindow: () => void;
     onappearance: () => void;
     /** This window only. */
@@ -63,6 +65,7 @@
     onconnectknown,
     onforgetknown,
     ondisconnect,
+    onreconnect,
     onnewwindow,
     onappearance,
     onclosewindow,
@@ -360,6 +363,12 @@
 
           <div class="sep"></div>
 
+          <!-- Only while there is a dropped connection to make again. -->
+          {#if remoteStatus === "lost"}
+            <button class="menu-item" role="menuitem" onclick={() => run(onreconnect)}>
+              Reconnect
+            </button>
+          {/if}
           <button
             class="menu-item"
             role="menuitem"

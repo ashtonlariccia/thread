@@ -27,7 +27,7 @@ export type VimApi = {
   extension: Extension;
   /**
    * Follow whatever is in `view` now: report its mode, and show its command
-   * line and messages in `line()`, a popup the window owns, rather than in a
+   * line and messages in `line()`, a box in the bottom bar, rather than in a
    * panel under the text. Call
    * again whenever the view is given a different file or its extensions
    * change: the object the events come from is the view's, and may have been

@@ -73,7 +73,7 @@ export class Documents {
 
   /** The vim mode the editor is in, or null while vim motions are off. */
   vimMode = $state<VimMode | null>(null);
-  /** The popup vim's `:` line and messages are shown in; set by whoever draws it. */
+  /** The box vim's `:` line and messages are shown in; set by whoever draws it. */
   vimLine: HTMLElement | null = null;
   /**
    * Called when a file is brought to the front: opened, clicked, cycled to.
