@@ -228,11 +228,18 @@ const caretLayer = layer({
       const at = block && !range.empty && range.head > range.anchor ? range.head - 1 : range.head;
       const coords = view.coordsAtPos(at, 1);
       if (!coords) continue;
+      // The full height of the line, not of the letters on it: at a line
+      // height of 1.6 a block only as tall as the text is a small box adrift
+      // in the row. Centred on the text, so it fills the same row the active
+      // line's highlight does -- and measured from the text rather than the
+      // line's block, which for a wrapped line is every row of it.
+      const height = view.defaultLineHeight;
+      const middle = (coords.top + coords.bottom) / 2;
       carets.push(
         new CaretMarker(
           (coords.left - baseLeft) / view.scaleX,
-          (coords.top - baseTop) / view.scaleY,
-          (coords.bottom - coords.top) / view.scaleY,
+          (middle - baseTop) / view.scaleY - height / 2,
+          height,
           view.defaultCharacterWidth,
         ),
       );

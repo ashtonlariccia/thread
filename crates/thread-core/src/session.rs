@@ -7,11 +7,23 @@
 //! Nothing here is ever worth failing over. A session that cannot be read is
 //! an empty one, and the app starts as it would the first time.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{data_dir, strip_bom, Error, Result};
 
 const FILE: &str = "session.json";
+
+/// What was open on one machine: this one, or a remote.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Workspace {
+    pub folders: Vec<String>,
+    pub unfolded: Vec<String>,
+    pub files: Vec<String>,
+    pub active: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -27,6 +39,12 @@ pub struct Session {
     pub active: Option<String>,
     pub sidebar_collapsed: bool,
     pub sidebar_width: u32,
+    /// The saved connection the window was on when it closed, to go back to.
+    /// The fields above are then what was open here before it connected.
+    pub connection: Option<String>,
+    /// What was open on each saved connection, by its id, the last time the
+    /// window was on it.
+    pub remote: BTreeMap<String, Workspace>,
 }
 
 impl Default for Session {
@@ -38,6 +56,8 @@ impl Default for Session {
             active: None,
             sidebar_collapsed: true,
             sidebar_width: 230,
+            connection: None,
+            remote: BTreeMap::new(),
         }
     }
 }
@@ -71,6 +91,15 @@ mod tests {
             active: Some("C:\\src\\thread\\Cargo.toml".into()),
             sidebar_collapsed: false,
             sidebar_width: 300,
+            connection: Some("a1b2".into()),
+            remote: BTreeMap::from([(
+                "a1b2".into(),
+                Workspace {
+                    folders: vec!["/srv/app".into()],
+                    files: vec!["/srv/app/main.py".into()],
+                    ..Default::default()
+                },
+            )]),
         };
 
         let json = serde_json::to_string(&session).unwrap();
@@ -86,5 +115,7 @@ mod tests {
         assert!(session.folders.is_empty());
         assert!(session.sidebar_collapsed);
         assert_eq!(session.sidebar_width, 230);
+        assert_eq!(session.connection, None);
+        assert!(session.remote.is_empty());
     }
 }

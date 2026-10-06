@@ -1,6 +1,11 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { canEdit, runEdit, type EditCommand } from "./edit";
+  import {
+    connectionLabel,
+    type RemoteStatus,
+    type SavedConnection,
+  } from "./state/remote.svelte";
 
   type Props = {
     /** Whether a file is open, so entries that need one can be disabled. */
@@ -20,6 +25,16 @@
     ontogglesidebar: () => void;
     /** Terminal -> New Terminal: a shell in a tab of its own. */
     onnewterminal: () => void;
+    /** Whether the window is on this machine, or on a remote. */
+    remoteStatus: RemoteStatus;
+    /** The saved connections, for Remote -> Connect Known. */
+    known: SavedConnection[];
+    /** Remote -> Connect: ask who to connect to. */
+    onconnect: () => void;
+    onconnectknown: (id: string) => void;
+    /** Stop saving a connection. */
+    onforgetknown: (id: string) => void;
+    ondisconnect: () => void;
     onnewwindow: () => void;
     onappearance: () => void;
     /** This window only. */
@@ -42,15 +57,25 @@
     sidebarCollapsed,
     ontogglesidebar,
     onnewterminal,
+    remoteStatus,
+    known,
+    onconnect,
+    onconnectknown,
+    onforgetknown,
+    ondisconnect,
     onnewwindow,
     onappearance,
     onclosewindow,
     onquit,
   }: Props = $props();
 
-  type MenuName = "file" | "edit" | "terminal";
+  type MenuName = "file" | "edit" | "terminal" | "remote";
 
   let openMenu = $state<MenuName | null>(null);
+  /** Whether the list under Remote -> Connect Known is out. */
+  let knownOpen = $state(false);
+  // One connection at a time: a window on a remote leaves it before joining another.
+  const canConnect = $derived(remoteStatus === "local");
   let menuWrap: HTMLElement | undefined;
   let maximized = $state(false);
   /** Whether a text field had focus when the menu opened. */
@@ -69,11 +94,13 @@
 
   function closeMenus() {
     openMenu = null;
+    knownOpen = false;
   }
 
   function show(menu: MenuName | null) {
     // Sampled as the menu opens: it is the answer to "what would these act on".
     if (menu === "edit") editable = canEdit();
+    knownOpen = false;
     openMenu = menu;
   }
 
@@ -251,6 +278,95 @@
           <button class="menu-item" role="menuitem" onclick={() => run(onnewterminal)}>
             <span>New Terminal</span>
             <span class="hint">Ctrl+Shift+`</span>
+          </button>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Remote -->
+    <div class="menu-host">
+      <button
+        class="menu-trigger"
+        class:open={openMenu === "remote"}
+        onclick={() => toggle("remote")}
+        onmouseenter={() => hover("remote")}
+      >
+        Remote
+      </button>
+
+      {#if openMenu === "remote"}
+        <div class="menu" role="menu">
+          <button
+            class="menu-item"
+            role="menuitem"
+            disabled={!canConnect}
+            onclick={() => run(onconnect)}
+          >
+            Connect…
+          </button>
+
+          <!-- The saved connections fly out beside the entry, as a submenu
+               does: one move to the right, and the one wanted is under the
+               pointer. -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="sub-host"
+            onmouseenter={() => (knownOpen = true)}
+            onmouseleave={() => (knownOpen = false)}
+          >
+            <button
+              class="menu-item"
+              role="menuitem"
+              aria-haspopup="menu"
+              aria-expanded={knownOpen}
+              disabled={!canConnect || known.length === 0}
+              onclick={() => (knownOpen = !knownOpen)}
+            >
+              <span>Connect Known</span>
+              <span class="hint">▸</span>
+            </button>
+
+            {#if knownOpen && canConnect && known.length > 0}
+              <div class="menu sub" role="menu">
+                {#each known as connection (connection.id)}
+                  <div class="known">
+                    <button
+                      class="menu-item"
+                      role="menuitem"
+                      onclick={() => run(() => onconnectknown(connection.id))}
+                    >
+                      {connectionLabel(connection)}
+                    </button>
+                    <button
+                      class="forget"
+                      title="Forget this connection"
+                      aria-label="Forget {connectionLabel(connection)}"
+                      onclick={() => run(() => onforgetknown(connection.id))}
+                    >
+                      <svg width="8" height="8" viewBox="0 0 10 10" aria-hidden="true">
+                        <path
+                          d="M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5"
+                          stroke="currentColor"
+                          stroke-width="1.3"
+                          stroke-linecap="round"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <div class="sep"></div>
+
+          <button
+            class="menu-item"
+            role="menuitem"
+            disabled={remoteStatus !== "connected" && remoteStatus !== "lost"}
+            onclick={() => run(ondisconnect)}
+          >
+            Disconnect
           </button>
         </div>
       {/if}
@@ -504,6 +620,51 @@
   }
   .menu-item:disabled .hint {
     color: var(--fg-faint);
+  }
+
+  /* A submenu hangs off the entry that opens it, level with it. */
+  .sub-host {
+    position: relative;
+  }
+  .menu.sub {
+    top: calc(-0.2rem - 1px);
+    left: 100%;
+    min-width: 170px;
+  }
+
+  /* A saved connection, and beside it the way to stop saving it: there on
+     the row you are pointing at, so a list of them is not a list of buttons. */
+  .known {
+    display: flex;
+    align-items: center;
+  }
+  .known .menu-item {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .forget {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    margin-left: 2px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    visibility: hidden;
+  }
+  .known:hover .forget,
+  .forget:focus-visible {
+    visibility: visible;
+  }
+  .forget:hover {
+    background: #f38ba81f;
+    color: var(--danger);
   }
 
   .sep {

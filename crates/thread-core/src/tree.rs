@@ -42,7 +42,7 @@ pub fn matches(pattern: &str, name: &str) -> bool {
 
 /// Folders first, then files, each in name order ignoring case — the order
 /// every file explorer uses, so nothing has to be hunted for.
-fn sort(entries: &mut [Entry]) {
+pub(crate) fn sort(entries: &mut [Entry]) {
     entries.sort_by_cached_key(|e| (!e.dir, e.name.to_lowercase()));
 }
 

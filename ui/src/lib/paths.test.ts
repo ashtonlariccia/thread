@@ -11,6 +11,16 @@ describe("dirName", () => {
   it("keeps the slash of a drive root", () => {
     expect(dirName("C:\\main.rs")).toBe("C:\\");
   });
+
+  it("takes a remote path apart the same way", () => {
+    expect(dirName("/home/ash/main.rs")).toBe("/home/ash");
+    expect(dirName("/a/b")).toBe("/a");
+    expect(dirName("/main.rs")).toBe("/");
+  });
+
+  it("is empty for a bare name", () => {
+    expect(dirName("main.rs")).toBe("");
+  });
 });
 
 describe("segmentsBelow", () => {
@@ -26,6 +36,12 @@ describe("segmentsBelow", () => {
     expect(segmentsBelow("C:\\src", "C:\\other\\a.ts")).toBeNull();
     // A sibling whose name merely starts the same way is not inside it.
     expect(segmentsBelow("C:\\src", "C:\\src-old\\a.ts")).toBeNull();
+  });
+
+  it("is exact about a remote's paths, where case tells files apart", () => {
+    expect(segmentsBelow("/srv/app", "/srv/app/src/Main.py")).toEqual(["src", "Main.py"]);
+    expect(segmentsBelow("/srv/App", "/srv/app/src/main.py")).toBeNull();
+    expect(samePath("/srv/Makefile", "/srv/makefile")).toBe(false);
   });
 
   it("is null for the root itself", () => {

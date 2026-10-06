@@ -102,11 +102,15 @@ fn main() {
         .manage(commands::PendingFiles::from_args())
         .manage(commands::Applied::load())
         .manage(commands::Terminals::default())
-        // However a window goes, its shell goes with it.
+        .manage(commands::Remotes::default())
+        // However a window goes, its shells and its connection go with it.
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window
                     .state::<commands::Terminals>()
+                    .close_window(window.label());
+                window
+                    .state::<commands::Remotes>()
                     .close_window(window.label());
             }
         })
@@ -148,6 +152,16 @@ fn main() {
             commands::create_dir,
             commands::rename_path,
             commands::delete_path,
+            commands::remote_connect,
+            commands::remote_connect_saved,
+            commands::remote_reconnect,
+            commands::remote_state,
+            commands::remote_disconnect,
+            commands::remote_save,
+            commands::remote_known,
+            commands::remote_forget,
+            commands::remote_keys,
+            commands::remote_browse,
             commands::session_load,
             commands::session_save,
             commands::terminal_open,

@@ -8,9 +8,12 @@
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
   import ChangedDialog from "./lib/ChangedDialog.svelte";
   import ConfirmDialog, { type Confirmation } from "./lib/ConfirmDialog.svelte";
+  import ConnectDialog from "./lib/ConnectDialog.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
+  import Dialog from "./lib/Dialog.svelte";
   import Editor from "./lib/Editor.svelte";
   import PinBar from "./lib/PinBar.svelte";
+  import RemoteBrowseDialog, { type BrowseRequest } from "./lib/RemoteBrowseDialog.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import SidebarResizer from "./lib/SidebarResizer.svelte";
   import TabBar, { type Tab } from "./lib/TabBar.svelte";
@@ -26,9 +29,19 @@
   import { RAIL_WIDTH } from "./lib/layout";
   import { ConfigStore, type Config } from "./lib/state/config.svelte";
   import { Documents } from "./lib/state/documents.svelte";
-  import { dirName, pathKey, samePath, segmentsBelow } from "./lib/paths";
+  import { baseName, dirName, pathKey, samePath, segmentsBelow } from "./lib/paths";
+  import { setRemotePicker, type RemotePicker } from "./lib/pick";
   import { fileIcon, folderIcon, loadFolderIcons, loadIcons } from "./lib/state/icons.svelte";
   import { Pins } from "./lib/state/pins.svelte";
+  import {
+    connectionLabel,
+    RemoteStore,
+    type ConnectError,
+    type ConnectRequest,
+    type DiscoveredKey,
+    type RemoteInfo,
+    type SavedConnection,
+  } from "./lib/state/remote.svelte";
   import { Tree } from "./lib/state/tree.svelte";
   import type { Pin, SidebarItem } from "./lib/types";
 
@@ -36,6 +49,7 @@
   const config = new ConfigStore();
   const docs = new Documents();
   const tree = new Tree();
+  const remote = new RemoteStore();
 
   const appWindow = getCurrentWindow();
 
@@ -237,7 +251,9 @@
       message: row.folder
         ? `Delete the folder "${row.title}" and everything in it?`
         : `Delete "${row.title}"?`,
-      note: "It goes to the Recycle Bin, and can be restored from there.",
+      note: remote.remote
+        ? "It is deleted from the remote for good; there is no bin there to restore it from."
+        : "It goes to the Recycle Bin, and can be restored from there.",
       confirm: "Delete",
       danger: true,
     });
@@ -385,47 +401,394 @@
     return target instanceof Element && target.closest("[data-terminal]") !== null;
   }
 
+  // --- remote -------------------------------------------------------------------
+  //
+  // A window is on this machine or on one remote, never some of each. Going
+  // to a remote puts away what was open here and brings out what was last
+  // open there; disconnecting does the reverse. The backend decides where a
+  // path leads by which of the two the window is on, so nothing below this
+  // has to know.
+
+  /** What is open on one machine. */
+  type Workspace = {
+    folders: string[];
+    unfolded: string[];
+    files: string[];
+    active: string | null;
+  };
+  const NOTHING: Workspace = { folders: [], unfolded: [], files: [], active: null };
+
+  /** What was open on this machine, put away while the window is on a remote. */
+  let localStash = $state.raw<Workspace | null>(null);
+  /** What was open on each saved connection, by its id, when last on it. */
+  let remoteStashes = $state.raw<Record<string, Workspace>>({});
+
+  let connectOpen = $state(false);
+  let connectError = $state<string | null>(null);
+  let keys = $state.raw<DiscoveredKey[]>([]);
+
+  /** A file or folder being chosen on the remote. */
+  let browse = $state.raw<BrowseRequest | null>(null);
+  /** The remote folder last chosen from, which is where the next choice starts. */
+  let lastBrowsed: string | null = null;
+
+  function captureWorkspace(): Workspace {
+    return {
+      folders: tree.roots.map((root) => root.path),
+      unfolded: tree.unfolded,
+      files: docs.list.flatMap((doc) => (doc.path === null ? [] : [doc.path])),
+      active: docs.active?.path ?? null,
+    };
+  }
+
+  /** Open what a workspace had open. What has since gone is left out quietly. */
+  async function restoreWorkspace(workspace: Workspace) {
+    if (workspace.folders.length > 0) loadFolderIcons();
+    await tree.restore(workspace.folders, workspace.unfolded);
+    for (const path of workspace.files) await docs.open(path, { quiet: true });
+
+    const active = docs.list.find((d) => d.path !== null && d.path === workspace.active);
+    if (active) docs.select(active.key);
+  }
+
+  /** Close everything, without asking: whoever calls this already has. */
+  function clearWorkspace() {
+    // Unmounting a terminal is what ends its shell.
+    for (const terminal of terminals) delete terminalViews[terminal.key];
+    terminals = [];
+    activeTerminal = null;
+    lastTerminal = null;
+    docs.clear();
+    tree.clear();
+    selectedKey = null;
+    naming = null;
+  }
+
+  function browseRemote(mode: BrowseRequest["mode"], suggested = ""): Promise<string | null> {
+    // A file that already lives somewhere is saved from there; anything else
+    // starts where the last choice was made, or in the folder that is open.
+    const start = suggested.includes("/") ? dirName(suggested) : (lastBrowsed ?? terminalDir());
+    return new Promise((resolve) => {
+      browse = {
+        mode,
+        start,
+        name: baseName(suggested),
+        resolve: (path) => {
+          browse = null;
+          if (path !== null) lastBrowsed = mode === "folder" ? path : dirName(path);
+          resolve(path);
+        },
+      };
+    });
+  }
+
+  const remotePicker: RemotePicker = {
+    files: async () => {
+      const path = await browseRemote("file");
+      return path === null ? null : [path];
+    },
+    folder: () => browseRemote("folder"),
+    save: (suggested) => browseRemote("save", suggested),
+  };
+
+  type Attempt = { info: RemoteInfo } | { error: string } | null;
+
+  /**
+   * Make a connection, asking about the host's key if it comes to that.
+   * Null means the question was answered "no"; nothing else is wrong.
+   */
+  async function attempt(
+    who: string,
+    make: (trustNewKey: boolean) => Promise<RemoteInfo>,
+  ): Promise<Attempt> {
+    const failure = (e: unknown): ConnectError =>
+      e !== null && typeof e === "object" && "message" in e
+        ? (e as ConnectError)
+        : { kind: "session", message: String(e) };
+
+    const before = remote.status;
+    remote.pending = who;
+    remote.status = "connecting";
+    try {
+      try {
+        return { info: await make(false) };
+      } catch (e) {
+        const error = failure(e);
+        const changed = error.kind === "hostKeyChanged";
+        if (!changed && error.kind !== "unknownHostKey") return { error: error.message };
+
+        // Only a person can say whether this is the machine they meant.
+        const trusted = await confirm({
+          title: changed ? "The host's key has changed" : "Trust this host?",
+          message: error.message,
+          note: changed
+            ? `It was ${error.expectedFingerprint}, and is now ${error.fingerprint}.`
+            : `Its key's fingerprint is ${error.fingerprint}. Trusting it remembers the key, ` +
+              "and Thread will refuse to connect if it ever changes.",
+          confirm: changed ? "Trust the New Key" : "Trust and Connect",
+          danger: changed,
+        });
+        if (!trusted) return null;
+
+        try {
+          return { info: await make(true) };
+        } catch (again) {
+          return { error: failure(again).message };
+        }
+      }
+    } finally {
+      remote.pending = null;
+      // Whoever asked decides what a success means; until then, as it was.
+      remote.status = before;
+    }
+  }
+
+  /**
+   * Move the window onto a remote it has just connected to: put away what is
+   * open here, and bring out what was last open there.
+   */
+  async function goRemote(info: RemoteInfo, local: Workspace = captureWorkspace()) {
+    sessionRestored = false;
+    localStash = local;
+    clearWorkspace();
+    remote.info = info;
+    remote.status = "connected";
+    setRemotePicker(remotePicker);
+    lastBrowsed = null;
+
+    const last = info.saved === null ? undefined : remoteStashes[info.saved];
+    if (last) await restoreWorkspace(last);
+    sessionRestored = keepsSession;
+  }
+
+  /** Remote → Connect. */
+  function openConnect() {
+    connectError = null;
+    connectOpen = true;
+    void invoke<DiscoveredKey[]>("remote_keys").then((found) => (keys = found));
+  }
+
+  /** The connect dialog was filled in. It stays up until this succeeds. */
+  async function connectNew(request: ConnectRequest) {
+    connectError = null;
+    // Before anything is connected: a save made after would go to the remote.
+    if (!(await docs.confirm())) return;
+
+    const result = await attempt(connectionLabel(request), (trustNewKey) =>
+      invoke<RemoteInfo>("remote_connect", { target: { ...request, trustNewKey } }),
+    );
+    if (result === null) return;
+    if ("error" in result) {
+      connectError = result.error;
+      return;
+    }
+
+    connectOpen = false;
+    await goRemote(result.info);
+    await offerToSave();
+  }
+
+  /**
+   * Once signed in to somewhere new: keep it, or not. Kept, it can be
+   * connected to again without asking and is what the next launch comes back
+   * to. Not kept, it lasts as long as this window does.
+   */
+  async function offerToSave() {
+    const info = remote.info;
+    if (!info || info.saved !== null) return;
+
+    const save = await confirm({
+      title: "Save this connection?",
+      message: `Keep ${info.label}, so Thread can connect to it again without asking.`,
+      note:
+        "A saved connection is listed under Remote → Connect Known, and Thread reopens it, " +
+        "with what you had open on it, the next time it starts. What you signed in with is " +
+        "stored encrypted for your Windows account. Not saved, it ends when this window closes.",
+      confirm: "Save",
+      cancel: "Not Now",
+    });
+    if (!save) return;
+
+    try {
+      const saved = await invoke<SavedConnection>("remote_save");
+      if (remote.info) remote.info = { ...remote.info, saved: saved.id };
+      await remote.refreshKnown();
+    } catch (e) {
+      void message(String(e), { title: "Thread", kind: "error" });
+    }
+  }
+
+  const savedLabel = (id: string) => {
+    const saved = remote.known.find((connection) => connection.id === id);
+    return saved ? connectionLabel(saved) : "the remote";
+  };
+
+  /** Remote → Connect Known. */
+  async function connectKnown(id: string) {
+    if (!(await docs.confirm())) return;
+
+    const result = await attempt(savedLabel(id), (trustNewKey) =>
+      invoke<RemoteInfo>("remote_connect_saved", { id, trustNewKey }),
+    );
+    if (result === null) return;
+    if ("error" in result) {
+      void message(result.error, { title: `Could not connect to ${savedLabel(id)}`, kind: "error" });
+      return;
+    }
+    await goRemote(result.info);
+  }
+
+  async function forgetKnown(id: string) {
+    const forget = await confirm({
+      title: "Forget connection",
+      message: `Forget ${savedLabel(id)}?`,
+      note: "What it signs in with is deleted. A window connected to it stays connected.",
+      confirm: "Forget",
+      danger: true,
+    });
+    if (!forget) return;
+
+    await remote.forget(id);
+    const { [id]: _gone, ...rest } = remoteStashes;
+    remoteStashes = rest;
+  }
+
+  /** Remote → Disconnect: back to this machine, and what was open on it. */
+  async function disconnect() {
+    if (!remote.remote) return;
+    // While still connected, so that "Save" has somewhere to save to.
+    if (!(await docs.confirm())) return;
+
+    sessionRestored = false;
+    const id = remote.info?.saved ?? null;
+    if (id !== null) remoteStashes = { ...remoteStashes, [id]: captureWorkspace() };
+    clearWorkspace();
+
+    await invoke("remote_disconnect").catch((e) => console.error("remote_disconnect failed", e));
+    remote.status = "local";
+    remote.info = null;
+    setRemotePicker(null);
+
+    const back = localStash;
+    localStash = null;
+    if (back) await restoreWorkspace(back);
+    sessionRestored = keepsSession;
+  }
+
+  /** Connect again after the connection was lost. Nothing open is touched. */
+  async function reconnect() {
+    const result = await attempt(remote.info?.label ?? "the remote", () =>
+      invoke<RemoteInfo>("remote_reconnect"),
+    );
+    if (result === null) return;
+    if ("error" in result) {
+      void message(result.error, { title: "Could not reconnect", kind: "error" });
+      return;
+    }
+    remote.info = result.info;
+    remote.status = "connected";
+    checkDisk();
+  }
+
+  /** The indicator in the bottom bar: what can be done from where the window is. */
+  function onRemoteIndicator(event: MouseEvent) {
+    const items =
+      remote.status === "connected"
+        ? [item("Disconnect", () => void disconnect())]
+        : remote.status === "lost"
+          ? [item("Reconnect", () => void reconnect()), item("Disconnect", () => void disconnect())]
+          : [
+              item("Connect…", openConnect),
+              ...(remote.known.length > 0 ? [SEP] : []),
+              ...remote.known.map((known) =>
+                item(connectionLabel(known), () => void connectKnown(known.id)),
+              ),
+            ];
+
+    // Above the bar: it sits on the window's bottom edge, and a menu hanging
+    // below it would have nowhere to go.
+    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    ctx = { x: box.left, y: box.top - items.length * 28 - 12, items };
+  }
+
   // --- session ------------------------------------------------------------------
   //
   // What is open is written down as it changes and put back at the next
   // launch. Only the main window does either: a session is one window's worth
   // of state, and two windows taking turns to overwrite it would restore
   // whichever happened to write last.
+  //
+  // It holds what is open on this machine, what was open on each saved
+  // connection, and which of those the window was on, so a window that was
+  // working on a remote comes back to it.
 
-  type Session = {
-    folders: string[];
-    unfolded: string[];
-    files: string[];
-    active: string | null;
+  type Session = Workspace & {
     sidebarCollapsed: boolean;
     sidebarWidth: number;
+    /** The saved connection the window is on, to come back to. */
+    connection: string | null;
+    remote: Record<string, Workspace>;
   };
 
   const keepsSession = appWindow.label === "main";
   /** Nothing is saved until the last session is back: half of it is not a session. */
   let sessionRestored = $state(false);
 
+  /**
+   * Go back to the saved connection the window was on when it closed. False
+   * if that could not be done, for the caller to carry on here instead.
+   */
+  async function resume(id: string, local: Workspace): Promise<boolean> {
+    if (!remote.known.some((connection) => connection.id === id)) return false;
+
+    const result = await attempt(savedLabel(id), (trustNewKey) =>
+      invoke<RemoteInfo>("remote_connect_saved", { id, trustNewKey }),
+    );
+    if (result !== null && "info" in result) {
+      await goRemote(result.info, local);
+      return true;
+    }
+    if (result !== null) {
+      void message(`${result.error}\n\nCarrying on with what was open on this machine.`, {
+        title: `Could not reconnect to ${savedLabel(id)}`,
+        kind: "warning",
+      });
+    }
+    return false;
+  }
+
   async function restoreSession() {
     const session = await invoke<Session>("session_load");
     sidebarWidth = session.sidebarWidth;
+    remoteStashes = session.remote;
+    const local: Workspace = {
+      folders: session.folders,
+      unfolded: session.unfolded,
+      files: session.files,
+      active: session.active,
+    };
 
-    if (session.folders.length > 0) loadFolderIcons();
-    await tree.restore(session.folders, session.unfolded);
-    for (const path of session.files) await docs.open(path, { quiet: true });
+    // A reloaded page starts over, but the connection it had is still up.
+    const live = await invoke<RemoteInfo | null>("remote_state").catch(() => null);
+    if (live) await goRemote(live, local);
+    else if (session.connection === null || !(await resume(session.connection, local)))
+      await restoreWorkspace(local);
 
-    const active = docs.list.find((d) => d.path !== null && d.path === session.active);
-    if (active) docs.select(active.key);
     // Last, so the tree is already there when the sidebar opens onto it.
     sidebarCollapsed = session.sidebarCollapsed;
   }
 
-  const session = $derived<Session>({
-    folders: tree.roots.map((root) => root.path),
-    unfolded: tree.unfolded,
-    files: docs.list.flatMap((doc) => (doc.path === null ? [] : [doc.path])),
-    active: docs.active?.path ?? null,
-    sidebarCollapsed,
-    sidebarWidth: Math.round(sidebarWidth),
+  const session = $derived.by((): Session => {
+    const here = captureWorkspace();
+    // On a remote, "this machine" is what was put away on the way there.
+    const id = remote.remote ? (remote.info?.saved ?? null) : null;
+    return {
+      ...(remote.remote ? (localStash ?? NOTHING) : here),
+      sidebarCollapsed,
+      sidebarWidth: Math.round(sidebarWidth),
+      connection: id,
+      remote: id === null ? remoteStashes : { ...remoteStashes, [id]: here },
+    };
   });
 
   $effect(() => {
@@ -547,7 +910,13 @@
   function onKeydown(event: KeyboardEvent) {
     if (!event.ctrlKey || event.altKey || event.metaKey) return;
     // A dialog is up; the window behind it is not taking commands.
-    const blocked = docs.busy || appearanceOpen || question !== null;
+    const blocked =
+      docs.busy ||
+      appearanceOpen ||
+      question !== null ||
+      connectOpen ||
+      browse !== null ||
+      remote.status === "connecting";
 
     // Ctrl+` goes to the terminal and back, and with Shift opens another;
     // from anywhere, a terminal included.
@@ -720,7 +1089,15 @@
     if (JSON.stringify(next.files.exclude) !== exclude) void tree.refresh();
   }
 
+  let diskTicks = 0;
+
   function checkDisk() {
+    // Not while the window is between machines, when the paths that are open
+    // and the machine that would be asked about them do not match; and not
+    // of a connection that has dropped, which cannot answer.
+    if (remote.status === "connecting" || remote.status === "lost") return;
+    // Every stamp is a round trip on a remote, so it is asked a third as often.
+    if (remote.remote && diskTicks++ % 3 !== 0) return;
     void docs.checkDisk();
     void tree.poll();
   }
@@ -729,7 +1106,7 @@
     setEditor(docs.editor);
 
     void (async () => {
-      await Promise.all([pins.refresh(), config.load()]);
+      await Promise.all([pins.refresh(), config.load(), remote.refreshKnown()]);
 
       // Liveness beacon: proof in the backend's log that the frontend came up.
       void invoke("ui_ready", {
@@ -750,6 +1127,10 @@
       if (keepsSession) {
         if (startup.length === 0) await restoreSession().catch((e) => console.error(e));
         sessionRestored = true;
+      } else {
+        // A reloaded page starts over, but the connection it had is still up.
+        const live = await invoke<RemoteInfo | null>("remote_state").catch(() => null);
+        if (live) await goRemote(live);
       }
     })();
 
@@ -774,11 +1155,18 @@
       void message(event.payload, { title: "Config not applied", kind: "error" });
     });
 
+    // The connection died under us. What is open stays open, unsaved edits
+    // and all, to be saved once it is back.
+    const stopRemoteLost = listen<RemoteInfo>("remote-lost", () => {
+      if (remote.status === "connected") remote.status = "lost";
+    });
+
     return () => {
       setEditor(null);
       clearInterval(diskPoll);
       void stopConfig.then((unlisten) => unlisten());
       void stopConfigError.then((unlisten) => unlisten());
+      void stopRemoteLost.then((unlisten) => unlisten());
       void stopClose.then((unlisten) => unlisten());
     };
   });
@@ -811,6 +1199,12 @@
     {sidebarCollapsed}
     ontogglesidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
     onnewterminal={newTerminal}
+    remoteStatus={remote.status}
+    known={remote.known}
+    onconnect={openConnect}
+    onconnectknown={(id) => void connectKnown(id)}
+    onforgetknown={(id) => void forgetKnown(id)}
+    ondisconnect={() => void disconnect()}
     onnewwindow={newWindow}
     onappearance={() => (appearanceOpen = true)}
     onclosewindow={closeWindow}
@@ -896,6 +1290,25 @@
     onmove={(pin, index) => void pins.move(pin, index)}
   >
     {#snippet start()}
+      <!-- Where the window is working: this machine, or a remote. Text and a
+           colour, and a click away from changing it. -->
+      <button
+        class="remote"
+        data-status={remote.status}
+        disabled={remote.status === "connecting"}
+        title={remote.remote ? "Connected over SSH" : "Connect to a remote"}
+        onclick={onRemoteIndicator}
+      >
+        {#if remote.status === "connecting"}
+          Connecting to {remote.pending}…
+        {:else if remote.status === "connected"}
+          SSH: {remote.info?.label}
+        {:else if remote.status === "lost"}
+          Disconnected: {remote.info?.label}
+        {:else}
+          Local
+        {/if}
+      </button>
       {#if docs.vimMode && showingFile}
         <span class="mode" data-mode={docs.vimMode}>{docs.vimMode}</span>
       {/if}
@@ -920,6 +1333,28 @@
     {config}
     onclose={() => (appearanceOpen = false)}
   />
+
+  <ConnectDialog
+    open={connectOpen}
+    {keys}
+    busy={remote.status === "connecting"}
+    error={connectError}
+    onsubmit={(request) => void connectNew(request)}
+    oncancel={() => (connectOpen = false)}
+  />
+
+  <!-- A connection being made with no dialog of its own to wait in: a saved
+       one, or one being made again. It holds the window still meanwhile. -->
+  <Dialog
+    open={remote.status === "connecting" && !connectOpen}
+    title="Connecting"
+    width={360}
+    onclose={null}
+  >
+    <p class="dlg-empty">Connecting to {remote.pending}…</p>
+  </Dialog>
+
+  <RemoteBrowseDialog request={browse} />
 
   <UnsavedDialog docs={docs.asking?.docs ?? null} onanswer={(choice) => void docs.answer(choice)} />
 
@@ -1038,6 +1473,31 @@
     background: transparent;
     border: none;
     outline: none;
+  }
+
+  /* The remote indicator: the bar's own text, and nothing around it. Its
+     colour is the whole of what it has to say at a glance. */
+  .remote {
+    flex: none;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--fg-dim);
+    cursor: pointer;
+    font: inherit;
+  }
+  .remote:hover:not(:disabled) {
+    filter: brightness(1.25);
+  }
+  .remote[data-status="connected"] {
+    color: var(--ok);
+  }
+  .remote[data-status="connecting"] {
+    color: #f9e2af;
+    cursor: default;
+  }
+  .remote[data-status="lost"] {
+    color: var(--danger);
   }
 
   /* The mode, set like the status items across the bar from it. It is named

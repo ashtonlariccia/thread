@@ -22,11 +22,18 @@ tracing.workspace = true
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
+russh = { version = "0.62", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh-sftp = "3.0.1"
+tokio = { version = "1.53.2", features = ["rt", "sync", "net", "time", "io-util", "macros"] }
+getrandom = "0.4.3"
 
 [dev-dependencies]
+rand = "0.10"
 tempfile = "3.27.0"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros"] }

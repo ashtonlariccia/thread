@@ -8,12 +8,16 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub mod config;
+pub mod connections;
 pub mod document;
 pub mod fsops;
+pub mod known_hosts;
 pub mod pins;
+pub mod remote;
 pub mod session;
 pub mod terminal;
 pub mod tree;
+pub mod vault;
 
 pub use config::{Appearance, Config, Material};
 pub use document::{Document, Eol, Stamp};

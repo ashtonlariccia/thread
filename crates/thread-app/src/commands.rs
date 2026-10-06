@@ -1,15 +1,17 @@
-//! Tauri command surface: windows, files, the config, the terminal, and the
-//! pinned strip.
+//! Tauri command surface: windows, files, remote connections, the config,
+//! terminals, and the pinned strip.
 //!
 //! This layer owns the windows and the IPC transport. Anything that can be
 //! decided without a window lives in `thread-core`.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
 
+use thread_core::connections::{SavedConnection, Store as ConnectionStore};
+use thread_core::remote::{self, ConnectError, DiscoveredKey, Failure, Remote, Target};
 use thread_core::terminal::{self, LocalTerminal, Terminal};
 use thread_core::{
     config, document, fsops, tree, Appearance, Config, Document, Entry, Eol, Material, Pin,
@@ -220,13 +222,26 @@ pub fn startup_files(window: WebviewWindow, files: State<'_, PendingFiles>) -> V
 }
 
 // --- file tree --------------------------------------------------------------
+//
+// Every command from here to the config is asked about a path, and answers
+// for whichever machine the window is on: this one, or the remote it is
+// connected to. The window does not say which. It cannot mix them up that
+// way, and nothing in the page has to know there are two.
 
 /// One folder's children, for the tree to show when it is unfolded. What it
 /// leaves out is the config's `files.exclude`.
 #[tauri::command]
-pub async fn read_dir(path: String) -> Result<Vec<Entry>, String> {
+pub async fn read_dir(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+) -> Result<Vec<Entry>, String> {
     let exclude = stored_config().files.exclude;
-    tree::list(Path::new(&path), &exclude).map_err(|e| e.to_string())
+    match remotes.of(&window) {
+        Some(link) => link.remote.list(&path, &exclude).await,
+        None => tree::list(Path::new(&path), &exclude),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// When each folder's contents last changed, in order; `None` where it is gone.
@@ -235,41 +250,97 @@ pub async fn read_dir(path: String) -> Result<Vec<Entry>, String> {
 /// for open files: a `stat` each, and a folder is only re-read once its stamp
 /// has moved.
 #[tauri::command]
-pub async fn dir_stamps(paths: Vec<String>) -> Vec<Option<u64>> {
-    paths
-        .iter()
-        .map(|path| tree::dir_stamp(Path::new(path)))
-        .collect()
+pub async fn dir_stamps(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    paths: Vec<String>,
+) -> Result<Vec<Option<u64>>, String> {
+    let Some(link) = remotes.of(&window) else {
+        return Ok(paths
+            .iter()
+            .map(|path| tree::dir_stamp(Path::new(path)))
+            .collect());
+    };
+    let mut stamps = Vec::with_capacity(paths.len());
+    for path in &paths {
+        stamps.push(
+            link.remote
+                .dir_stamp(path)
+                .await
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    Ok(stamps)
 }
 
 // The tree's file operations. Each hands back the path it made, spelled as the
 // listing will spell it, so the frontend can go straight to the new entry.
 
 #[tauri::command]
-pub async fn create_file(dir: String, name: String) -> Result<String, String> {
-    let path = fsops::create_file(Path::new(&dir), &name).map_err(|e| e.to_string())?;
-    tracing::info!(target: "thread::files", "CREATED {}", path.display());
-    Ok(path.to_string_lossy().into_owned())
+pub async fn create_file(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    dir: String,
+    name: String,
+) -> Result<String, String> {
+    let path = match remotes.of(&window) {
+        Some(link) => link.remote.create_file(&dir, &name).await,
+        None => fsops::create_file(Path::new(&dir), &name)
+            .map(|path| path.to_string_lossy().into_owned()),
+    }
+    .map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "CREATED {path}");
+    Ok(path)
 }
 
 #[tauri::command]
-pub async fn create_dir(dir: String, name: String) -> Result<String, String> {
-    let path = fsops::create_dir(Path::new(&dir), &name).map_err(|e| e.to_string())?;
-    tracing::info!(target: "thread::files", "CREATED {}", path.display());
-    Ok(path.to_string_lossy().into_owned())
+pub async fn create_dir(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    dir: String,
+    name: String,
+) -> Result<String, String> {
+    let path = match remotes.of(&window) {
+        Some(link) => link.remote.create_dir(&dir, &name).await,
+        None => fsops::create_dir(Path::new(&dir), &name)
+            .map(|path| path.to_string_lossy().into_owned()),
+    }
+    .map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "CREATED {path}");
+    Ok(path)
 }
 
 #[tauri::command]
-pub async fn rename_path(path: String, name: String) -> Result<String, String> {
-    let renamed = fsops::rename(Path::new(&path), &name).map_err(|e| e.to_string())?;
-    tracing::info!(target: "thread::files", "RENAMED {path} -> {}", renamed.display());
-    Ok(renamed.to_string_lossy().into_owned())
+pub async fn rename_path(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+    name: String,
+) -> Result<String, String> {
+    let renamed = match remotes.of(&window) {
+        Some(link) => link.remote.rename(&path, &name).await,
+        None => {
+            fsops::rename(Path::new(&path), &name).map(|path| path.to_string_lossy().into_owned())
+        }
+    }
+    .map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::files", "RENAMED {path} -> {renamed}");
+    Ok(renamed)
 }
 
-/// Move a file or folder to the Recycle Bin.
+/// Delete a file or folder: to the Recycle Bin here, and for good on a
+/// remote, which has no bin to send it to.
 #[tauri::command]
-pub async fn delete_path(path: String) -> Result<(), String> {
-    fsops::delete(Path::new(&path)).map_err(|e| e.to_string())?;
+pub async fn delete_path(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+) -> Result<(), String> {
+    match remotes.of(&window) {
+        Some(link) => link.remote.delete(&path).await,
+        None => fsops::delete(Path::new(&path)),
+    }
+    .map_err(|e| e.to_string())?;
     tracing::info!(target: "thread::files", "DELETED {path}");
     Ok(())
 }
@@ -288,8 +359,16 @@ fn is_config_file(path: &Path) -> bool {
 }
 
 #[tauri::command]
-pub async fn read_file(path: String) -> Result<Document, String> {
-    let doc = document::read(Path::new(&path)).map_err(|e| e.to_string())?;
+pub async fn read_file(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+) -> Result<Document, String> {
+    let doc = match remotes.of(&window) {
+        Some(link) => link.remote.read(&path).await,
+        None => document::read(Path::new(&path)),
+    }
+    .map_err(|e| e.to_string())?;
     tracing::info!(target: "thread::files", "OPENED {path} ({} bytes)", doc.text.len());
     Ok(doc)
 }
@@ -299,11 +378,23 @@ pub async fn read_file(path: String) -> Result<Document, String> {
 #[tauri::command]
 pub async fn write_file(
     app: AppHandle,
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
     path: String,
     text: String,
     eol: Eol,
     bom: bool,
 ) -> Result<Option<Stamp>, String> {
+    if let Some(link) = remotes.of(&window) {
+        let stamp = link
+            .remote
+            .write(&path, &text, eol, bom)
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!(target: "thread::files", "SAVED {path} on {}", link.info.label);
+        return Ok(stamp);
+    }
+
     let stamp = document::write(Path::new(&path), &text, eol, bom).map_err(|e| e.to_string())?;
     tracing::info!(target: "thread::files", "SAVED {path}");
 
@@ -329,11 +420,280 @@ pub async fn write_file(
 /// The frontend polls this for its open files to notice changes made outside
 /// the editor. One `stat` per file, and no file is read unless its stamp moved.
 #[tauri::command]
-pub async fn file_stamps(paths: Vec<String>) -> Vec<Option<Stamp>> {
-    paths
-        .iter()
-        .map(|path| document::stamp(Path::new(path)))
-        .collect()
+pub async fn file_stamps(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    paths: Vec<String>,
+) -> Result<Vec<Option<Stamp>>, String> {
+    let Some(link) = remotes.of(&window) else {
+        return Ok(paths
+            .iter()
+            .map(|path| document::stamp(Path::new(path)))
+            .collect());
+    };
+    let mut stamps = Vec::with_capacity(paths.len());
+    for path in &paths {
+        stamps.push(link.remote.stamp(path).await.map_err(|e| e.to_string())?);
+    }
+    Ok(stamps)
+}
+
+// --- remote -----------------------------------------------------------------
+//
+// A window is on this machine, or connected to one remote. While it is
+// connected, the file commands above and `terminal_open` below act on that
+// remote instead.
+//
+// Passwords come in from the connect dialog and go no further than this
+// process: a saved one is unsealed here, and what the page is told about a
+// connection has no secret in it.
+
+/// What a window is connected to.
+pub struct Link {
+    remote: Remote,
+    info: RemoteInfo,
+    /// What it was made with, kept to save it or to make it again.
+    target: Target,
+}
+
+/// A connection, as the page is told about it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteInfo {
+    /// `user@host`, for the indicator.
+    label: String,
+    /// The folder the server puts us in, where a browse for one starts.
+    home: String,
+    /// Its id, if it is one of the saved connections.
+    saved: Option<String>,
+}
+
+/// Each connected window's link, by window label.
+#[derive(Default)]
+pub struct Remotes(Mutex<HashMap<String, Arc<Link>>>);
+
+impl Remotes {
+    /// The window's link, if it is connected. Cloned out, so nothing waits on
+    /// the network with the lock held.
+    fn of(&self, window: &WebviewWindow) -> Option<Arc<Link>> {
+        self.0.lock().ok()?.get(window.label()).cloned()
+    }
+
+    fn set(&self, label: &str, link: Option<Arc<Link>>) -> Option<Arc<Link>> {
+        let mut links = self.0.lock().ok()?;
+        match link {
+            Some(link) => links.insert(label.to_owned(), link),
+            None => links.remove(label),
+        }
+    }
+
+    /// The window has gone; its connection goes with it, by being dropped.
+    pub fn close_window(&self, label: &str) {
+        drop(self.set(label, None));
+    }
+}
+
+/// How often a connection is checked for having died under us.
+const LINK_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Connect a window to `target`, in place of anything it was connected to.
+async fn link_window(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    target: Target,
+) -> Result<RemoteInfo, ConnectError> {
+    let remote = Remote::connect(&target).await?;
+
+    let saved = ConnectionStore::load()
+        .ok()
+        .and_then(|store| store.find(&target.host, target.port, &target.username));
+    let info = RemoteInfo {
+        label: target.label(),
+        home: remote.home().to_owned(),
+        saved: saved.map(|connection| connection.id),
+    };
+    tracing::info!(target: "thread::remote", "CONNECTED {} to {}", window.label(), info.label);
+
+    let link = Arc::new(Link {
+        remote,
+        info: info.clone(),
+        target,
+    });
+    let label = window.label().to_owned();
+    let remotes = app.state::<Remotes>();
+    if let Some(old) = remotes.set(&label, Some(Arc::clone(&link))) {
+        old.remote.disconnect().await;
+    }
+
+    // Nothing tells us when a connection dies, so it is asked. The page is
+    // told once, and only if this is still the connection the window is on:
+    // one that was hung up on purpose has been taken out of the map by then.
+    let app = app.clone();
+    let watched = Arc::downgrade(&link);
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(LINK_CHECK).await;
+            let Some(link) = watched.upgrade() else {
+                return;
+            };
+            if !link.remote.is_closed() {
+                continue;
+            }
+            let current = app
+                .state::<Remotes>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|links| links.get(&label).cloned());
+            if current.is_some_and(|current| Arc::ptr_eq(&current, &link)) {
+                tracing::warn!(target: "thread::remote", "LOST {}", link.info.label);
+                let _ = app.emit_to(&label, "remote-lost", &link.info);
+            }
+            return;
+        }
+    });
+
+    Ok(info)
+}
+
+/// Remote -> Connect: sign in with what was typed into the dialog.
+#[tauri::command]
+pub async fn remote_connect(
+    app: AppHandle,
+    window: WebviewWindow,
+    target: Target,
+) -> Result<RemoteInfo, ConnectError> {
+    link_window(&app, &window, target).await
+}
+
+/// Remote -> Connect Known: sign in with what was saved.
+///
+/// `trust_new_key` is the answer to a question about the host's key, should
+/// it have come to one; a saved connection normally needs none.
+#[tauri::command]
+pub async fn remote_connect_saved(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: String,
+    trust_new_key: bool,
+) -> Result<RemoteInfo, ConnectError> {
+    let (saved, auth) = ConnectionStore::load()
+        .and_then(|store| store.credentials(&id))
+        .map_err(|e| ConnectError::new(Failure::Auth, e.to_string()))?;
+    let target = Target {
+        host: saved.host,
+        port: saved.port,
+        username: saved.username,
+        auth,
+        trust_new_key,
+    };
+    link_window(&app, &window, target).await
+}
+
+/// Connect again to what the window was on, after the connection was lost.
+#[tauri::command]
+pub async fn remote_reconnect(
+    app: AppHandle,
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<RemoteInfo, ConnectError> {
+    let link = remotes
+        .of(&window)
+        .ok_or_else(|| ConnectError::new(Failure::Session, "This window is not connected."))?;
+    link_window(&app, &window, link.target.clone()).await
+}
+
+/// What the window is connected to. For a page that has just loaded to ask:
+/// a reload starts the page over, but leaves the connection up.
+#[tauri::command]
+pub fn remote_state(window: WebviewWindow, remotes: State<'_, Remotes>) -> Option<RemoteInfo> {
+    remotes.of(&window).map(|link| link.info.clone())
+}
+
+#[tauri::command]
+pub async fn remote_disconnect(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<(), String> {
+    if let Some(link) = remotes.set(window.label(), None) {
+        link.remote.disconnect().await;
+        tracing::info!(target: "thread::remote", "DISCONNECTED {}", link.info.label);
+    }
+    Ok(())
+}
+
+/// Save the connection the window is on, with what it signed in with, so it
+/// can be made again without asking. Returns it as saved.
+#[tauri::command]
+pub async fn remote_save(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<SavedConnection, String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    let target = &link.target;
+
+    let mut store = ConnectionStore::load().map_err(|e| e.to_string())?;
+    let saved = store
+        .upsert(&target.host, target.port, &target.username, &target.auth)
+        .map_err(|e| e.to_string())?;
+    store.save().map_err(|e| e.to_string())?;
+    tracing::info!(target: "thread::remote", "SAVED {}", link.info.label);
+    Ok(saved)
+}
+
+/// The saved connections, for Remote -> Connect Known.
+#[tauri::command]
+pub fn remote_known() -> Result<Vec<SavedConnection>, String> {
+    Ok(ConnectionStore::load().map_err(|e| e.to_string())?.list())
+}
+
+/// Forget a saved connection. Returns the ones that are left.
+#[tauri::command]
+pub fn remote_forget(id: String) -> Result<Vec<SavedConnection>, String> {
+    let mut store = ConnectionStore::load().map_err(|e| e.to_string())?;
+    if store.remove(&id) {
+        store.save().map_err(|e| e.to_string())?;
+    }
+    Ok(store.list())
+}
+
+/// The private keys in `~\.ssh`, for the connect dialog to offer.
+#[tauri::command]
+pub async fn remote_keys() -> Vec<DiscoveredKey> {
+    remote::discover_keys()
+}
+
+/// A folder on the remote, for the dialog that stands in for the system's
+/// file picker there.
+#[derive(serde::Serialize)]
+pub struct Browse {
+    /// The folder, as the server spells it.
+    path: String,
+    entries: Vec<Entry>,
+}
+
+/// List a remote folder to browse. `path` may be relative or have `..` in
+/// it; none at all is the home folder. Nothing is left out: this is for
+/// finding things, dotfiles included.
+#[tauri::command]
+pub async fn remote_browse(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: Option<String>,
+) -> Result<Browse, String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    let asked = path.unwrap_or_else(|| link.info.home.clone());
+    let path = link
+        .remote
+        .resolve(&asked)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = link
+        .remote
+        .list(&path, &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Browse { path, entries })
 }
 
 // --- config -----------------------------------------------------------------
@@ -524,32 +884,42 @@ pub async fn terminal_open(
     let label = window.label().to_owned();
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
 
-    let options = terminal::Options {
-        shell: stored_config().terminal.shell,
-        cwd: cwd.map(Into::into),
-        cols,
-        rows,
+    let on_data = move |chunk: &[u8]| {
+        // A channel that refuses is a page that has gone.
+        let _ = on_output.send(InvokeResponseBody::Raw(chunk.to_vec()));
     };
-    let spawned = LocalTerminal::spawn(
-        options,
-        move |chunk| {
-            // A channel that refuses is a page that has gone.
-            let _ = on_output.send(InvokeResponseBody::Raw(chunk.to_vec()));
-        },
-        {
-            let app = app.clone();
-            move || {
-                drop(app.state::<Terminals>().take(id));
-                let _ = on_exit.send(());
-                tracing::info!(target: "thread::terminal", "ENDED #{id}");
-            }
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    let ended = {
+        let app = app.clone();
+        move || {
+            drop(app.state::<Terminals>().take(id));
+            let _ = on_exit.send(());
+            tracing::info!(target: "thread::terminal", "ENDED #{id}");
+        }
+    };
+
+    // Wherever the window is working: a shell there, not here, when it is
+    // connected to a remote.
+    let spawned: Box<dyn Terminal> = match app.state::<Remotes>().of(&window) {
+        Some(link) => Box::new(
+            link.remote
+                .shell(cwd.as_deref(), cols, rows, on_data, ended)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        None => {
+            let options = terminal::Options {
+                shell: stored_config().terminal.shell,
+                cwd: cwd.map(Into::into),
+                cols,
+                rows,
+            };
+            Box::new(LocalTerminal::spawn(options, on_data, ended).map_err(|e| e.to_string())?)
+        }
+    };
 
     tracing::info!(target: "thread::terminal", "OPENED #{id} in {label} {cols}x{rows}");
     if let Ok(mut open) = app.state::<Terminals>().0.lock() {
-        open.insert(id, (label, Box::new(spawned)));
+        open.insert(id, (label, spawned));
     }
     Ok(id)
 }

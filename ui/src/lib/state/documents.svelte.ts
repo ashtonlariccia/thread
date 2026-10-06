@@ -10,12 +10,13 @@
  * that goes on showing the old text will overwrite their work on the next save.
  */
 import { invoke } from "@tauri-apps/api/core";
-import { message, open, save } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 
 import { EditorHost, type Cursor } from "../editor";
 import { detectIndent, resolveIndent, type Detected, type Indent } from "../indent";
 import { languageOf } from "../languages";
 import { baseName, samePath, segmentsBelow } from "../paths";
+import { pickFiles, pickSave } from "../pick";
 import { loadSyntax } from "../syntax";
 import { syntaxTheme } from "../themes";
 import { loadVim, type VimApi, type VimMode } from "../vim";
@@ -248,9 +249,7 @@ export class Documents {
 
   /** File → Open File. */
   async openDialog() {
-    const picked = await open({ title: "Open File", multiple: true });
-    if (!picked) return;
-    for (const path of Array.isArray(picked) ? picked : [picked]) await this.open(path);
+    for (const path of (await pickFiles()) ?? []) await this.open(path);
   }
 
   /**
@@ -315,7 +314,7 @@ export class Documents {
     const doc = this.find(key);
     if (!doc) return false;
 
-    const picked = await save({ title: "Save As", defaultPath: doc.path ?? doc.name });
+    const picked = await pickSave(doc.path ?? doc.name);
     return picked ? this.#write(doc, picked) : false;
   }
 
@@ -382,6 +381,14 @@ export class Documents {
     if (!(await this.confirm(docs.filter((doc) => doc.dirty)))) return false;
     for (const doc of docs) this.#remove(doc);
     return true;
+  }
+
+  /**
+   * Close every file, unsaved or not, without a word. For when the window
+   * moves to another machine: whoever calls this has already asked.
+   */
+  clear() {
+    for (const doc of [...this.list]) this.#remove(doc);
   }
 
   #remove(doc: Doc) {

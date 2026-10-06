@@ -9,9 +9,10 @@
  * the settings file says otherwise) is decided by the backend.
  */
 import { invoke } from "@tauri-apps/api/core";
-import { message, open } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 
 import { baseName, samePath, segmentsBelow } from "../paths";
+import { pickFolder } from "../pick";
 
 export type Entry = { name: string; path: string; dir: boolean };
 
@@ -64,8 +65,8 @@ export class Tree {
 
   /** File → Open Folder. */
   async openDialog() {
-    const picked = await open({ title: "Open Folder", directory: true });
-    if (typeof picked === "string") await this.open(picked);
+    const picked = await pickFolder();
+    if (picked !== null) await this.open(picked);
   }
 
   /** Every unfolded folder, the opened ones included. */
@@ -117,6 +118,12 @@ export class Tree {
   /** Close one open folder. What is unfolded under the others is untouched. */
   close(path: string) {
     this.roots = this.roots.filter((root) => root.path !== path);
+    this.#prune();
+  }
+
+  /** Close every open folder. */
+  clear() {
+    this.roots = [];
     this.#prune();
   }
 

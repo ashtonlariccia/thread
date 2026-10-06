@@ -9,6 +9,8 @@
     note?: string;
     /** The label on the button that goes ahead. */
     confirm: string;
+    /** The label on the other one, where "Cancel" would be the wrong word. */
+    cancel?: string;
     /** The action destroys something, so the button that does it is red. */
     danger?: boolean;
   };
@@ -37,7 +39,9 @@
     {/if}
 
     <div class="dlg-actions">
-      <button class="btn ghost" use:focusOnMount onclick={() => onanswer(false)}>Cancel</button>
+      <button class="btn ghost" use:focusOnMount onclick={() => onanswer(false)}>
+        {question.cancel ?? "Cancel"}
+      </button>
       <button
         class="btn"
         class:danger={question.danger}
