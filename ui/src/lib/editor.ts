@@ -138,9 +138,9 @@ const chrome = EditorView.theme(
       color: "var(--fg)",
     },
     ".cm-panels-bottom": { borderTop: "1px solid var(--border)" },
-    // The command line is shown in a strip of the window's own over the foot
-    // of the text (see `vim.ts`), which leaves the panel it was made for
-    // empty; an empty strip with a rule above it is not worth keeping.
+    // The command line is shown in a bar of the window's own under the text
+    // (see `vim.ts`), which leaves the panel it was made for empty; an empty
+    // strip with a rule above it is not worth keeping.
     ".cm-panels:has(.cm-vim-panel:empty)": { display: "none" },
     ".cm-vim-panel": { padding: "3px 14px", fontFamily: "inherit" },
     ".cm-vim-panel input": { color: "var(--fg)", fontFamily: "inherit", fontSize: "inherit" },

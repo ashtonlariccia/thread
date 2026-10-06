@@ -28,8 +28,8 @@ export type VimApi = {
   extension: Extension;
   /**
    * Follow whatever is in `view` now: report its mode, and show its command
-   * line and messages in `line()`, a strip the window draws over the foot of
-   * the text, rather than in a panel under it. Call
+   * line and messages in `line()`, a bar the window draws under the text,
+   * rather than in the extension's own panel. Call
    * again whenever the view is given a different file or its extensions
    * change: the object the events come from is the view's, and may have been
    * replaced.
@@ -114,9 +114,9 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
             host.replaceChildren(dialog);
 
             // A prompt goes when it is answered. A message has nothing to
-            // answer: the extension leaves it up until the next prompt, which
-            // was harmless in a panel of its own and is not over the text. So
-            // it goes at the next key, or by itself after a moment.
+            // answer, and the extension leaves it up until the next prompt,
+            // holding a line of the editor's height for something already
+            // read. So it goes at the next key, or by itself after a moment.
             if (dialog.querySelector("input")) return;
             const dismiss = () => {
               clearTimeout(timer);

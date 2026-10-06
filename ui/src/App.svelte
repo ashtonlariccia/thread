@@ -1285,12 +1285,14 @@
       <div class="editor-area">
         <!-- Hidden, not removed, behind a terminal: the editor keeps its
              scroll position and its measurements. -->
-        <div class="pane" class:hidden={activeTerminal !== null}>
-          <Editor host={docs.editor} />
+        <div class="pane editing" class:hidden={activeTerminal !== null}>
+          <div class="text">
+            <Editor host={docs.editor} />
+          </div>
           <!-- Vim's `:` line, `/` search and messages are put here by
-               `vim.ts`: a strip over the foot of the text, centred, and not
-               there at all while it is empty. Always present, so there is
-               somewhere to put them the moment vim asks. -->
+               `vim.ts`: a bar the width of the editor, under the text, that
+               is not there at all while it is empty. Always present, so
+               there is somewhere to put them the moment vim asks. -->
           <div class="vim-line" data-vim-line bind:this={docs.vimLine}></div>
         </div>
 
@@ -1465,6 +1467,17 @@
   .pane.hidden {
     visibility: hidden;
   }
+  /* The editor's pane is the text, and under it vim's line when it has
+     something to say: the text gives up that much height and gets it back. */
+  .pane.editing {
+    display: flex;
+    flex-direction: column;
+  }
+  .text {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .stage {
@@ -1472,33 +1485,24 @@
     }
   }
 
-  /* Vim's command line: a strip over the foot of the text, centred under it
-     and the width it has always opened at. Quiet, since it sits on top of
-     what is being edited: a veil of the window's own dark with the text
-     behind it blurred, a hairline, and no shadow. Not there at all while it
-     is empty. What goes in it is built by the vim extension, not by this
-     component, so it is reached with `:global`. */
+  /* Vim's command line: a bar across the foot of the editor, as vim has it.
+     Nothing is drawn for it, no surface and no rule: it is the text in it,
+     on the editor's own background. Not there at all while it is empty. What
+     goes in it is built by the vim extension, not by this component, so it
+     is reached with `:global`. */
   .vim-line {
-    position: absolute;
-    left: 50%;
-    bottom: 10px;
-    z-index: 20;
-    transform: translateX(-50%);
+    flex: none;
     display: flex;
     align-items: center;
-    width: min(320px, 80%);
-    padding: 0.3rem 0.65rem;
-    background: rgb(34 34 34 / 0.72);
-    backdrop-filter: blur(10px);
-    border: 1px solid #ffffff12;
-    border-radius: 6px;
+    /* In line with the line numbers above it. */
+    padding: 3px 14px 5px;
     color: var(--fg);
-    font-size: 0.78rem;
+    font-size: 0.8rem;
   }
   .vim-line:empty {
     display: none;
   }
-  /* The extension's panel fills the strip, so the field in it has the width. */
+  /* The extension's panel fills the bar, so the field in it has the width. */
   .vim-line :global(> *) {
     flex: 1;
     min-width: 0;
