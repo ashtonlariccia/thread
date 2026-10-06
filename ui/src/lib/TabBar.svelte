@@ -100,7 +100,7 @@
 <style>
   /* Deliberately thin: it names the files, it is not a toolbar. Sits inside
      the viewport card, so it paints nothing of its own and shares the card's
-     surface with the editor below the hairline. */
+     surface with the editor below, with no line between them. */
   .tabs {
     --tabs-height: 26px;
 
@@ -108,7 +108,6 @@
     display: flex;
     align-items: stretch;
     height: var(--tabs-height);
-    border-bottom: 1px solid var(--border);
     overflow-x: auto;
     overflow-y: hidden;
     user-select: none;
@@ -127,9 +126,7 @@
     gap: 0.35rem;
     max-width: 220px;
     padding: 0 0.3rem 0 0.6rem;
-    /* Above the bar's hairline, so the active tab's underline replaces it
-       rather than stacking on it. */
-    margin-bottom: -1px;
+    /* Only the active tab's shows: the underline that says which one it is. */
     border-bottom: 1px solid transparent;
     color: var(--fg-dim);
     cursor: pointer;

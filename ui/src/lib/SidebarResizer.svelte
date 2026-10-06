@@ -84,11 +84,11 @@
     background: transparent;
   }
 
-  /* The hover indicator lands exactly on the viewport's left border rather
+  /* The hover indicator lands exactly on the viewport's left edge rather
      than floating in the middle of the gap, so dragging looks like taking
      hold of the edge you are actually moving.
      
-     `right: -1px` puts it over the card's 1px border, which begins where this
+     `right: -1px` puts it on the card's first pixel, which begins where this
      element ends. The radius is subtracted top and bottom so it covers only
      the straight run between the card's rounded corners -- a straight line
      carried on past them would cut the curve. */

@@ -1386,9 +1386,8 @@
     user-select: none;
   }
 
-  /* The one bordered thing in the window. The chrome around it is seamless, so
-     this line is what separates "the app" from "what the app is showing" --
-     the same trick a browser plays with its content area.
+  /* What the app is showing, set apart from the chrome around it by being a
+     shade darker and nothing else: no line is drawn round it.
 
      It is also the painted surface for the tabs and the editor, which draw no
      background of their own: one layer here is what keeps the window a single
@@ -1401,7 +1400,6 @@
     min-height: 0;
     margin: var(--viewport-inset) var(--viewport-inset) var(--viewport-inset) 0;
     background: var(--bg-viewport-wash);
-    border: 1px solid var(--border);
     border-radius: var(--viewport-radius);
     transition: margin-left 170ms cubic-bezier(0.2, 0.7, 0.3, 1);
     /* Keeps the content inside the rounded corners. Safe here, unlike on the
