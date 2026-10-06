@@ -33,6 +33,8 @@ export type EditorConfig = {
   smooth_caret: boolean;
 };
 
+export type TerminalCursor = "block" | "bar" | "underline";
+
 export type LanguageOverride = { tab_width?: number; insert_spaces?: boolean };
 
 export type Config = {
@@ -43,7 +45,7 @@ export type Config = {
   theme: { syntax: string; accent: string };
   vim: { enabled: boolean };
   /** `shell` is a command line; empty leaves the choice to the backend. */
-  terminal: { shell: string; scrollback: number };
+  terminal: { shell: string; scrollback: number; font_size: number; cursor: TerminalCursor };
   /** By language name, lower-case. */
   language: Record<string, LanguageOverride>;
 };
@@ -66,12 +68,12 @@ export const DEFAULTS: Config = {
   files: { exclude: [".*"] },
   theme: { syntax: "catppuccin", accent: "#cba6f7" },
   vim: { enabled: true },
-  terminal: { shell: "", scrollback: 2000 },
+  terminal: { shell: "", scrollback: 2000, font_size: 14, cursor: "block" },
   language: {},
 };
 
 /** The sections whose keys are plain values, settable one at a time. */
-type Settable = "appearance" | "editor" | "files" | "theme" | "vim";
+type Settable = "appearance" | "editor" | "files" | "theme" | "vim" | "terminal";
 
 export class ConfigStore {
   current = $state.raw<Config>(DEFAULTS);
@@ -125,5 +127,10 @@ export class ConfigStore {
         await this.set(section, key as never, defaults[key] as never);
       }
     }
+    // Of the terminal's settings only these two are the dialog's. Which
+    // shell it runs is not a look, and is not undone by resetting one.
+    const { font_size, cursor } = DEFAULTS.terminal;
+    if (this.current.terminal.font_size !== font_size) await this.set("terminal", "font_size", font_size);
+    if (this.current.terminal.cursor !== cursor) await this.set("terminal", "cursor", cursor);
   }
 }

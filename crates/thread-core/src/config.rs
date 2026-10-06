@@ -78,9 +78,12 @@ enabled = true
 
 [terminal]
 # The command line the terminal runs, such as "cmd.exe" or "wsl.exe". Empty
-# picks PowerShell 7 if it is installed, and Windows PowerShell if not. The
-# font is the editor's.
+# picks PowerShell 7 if it is installed, and Windows PowerShell if not.
 shell = ""
+# The size of the text, in pixels. The font itself is the editor's.
+font_size = 14
+# The cursor's shape: "block", "bar" or "underline".
+cursor = "block"
 # How many lines that have scrolled off the top are kept to scroll back to.
 scrollback = 2000
 
@@ -272,6 +275,16 @@ impl Default for Vim {
     }
 }
 
+/// The shape of a terminal's cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalCursor {
+    #[default]
+    Block,
+    Bar,
+    Underline,
+}
+
 /// The terminals that open as tabs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -281,6 +294,10 @@ pub struct Terminal {
     pub shell: String,
     /// Lines kept above the screen. Every one is held in memory.
     pub scrollback: u32,
+    /// Pixels, before the interface scale. Its own, not the editor's: what
+    /// reads well as prose to edit and as output to scan are not the same.
+    pub font_size: f64,
+    pub cursor: TerminalCursor,
 }
 
 impl Default for Terminal {
@@ -288,7 +305,23 @@ impl Default for Terminal {
         Self {
             shell: String::new(),
             scrollback: 2000,
+            font_size: 14.0,
+            cursor: TerminalCursor::default(),
         }
+    }
+}
+
+impl Terminal {
+    fn sanitised(mut self) -> Self {
+        // Scrollback is memory; a slip of the hand should not cost a gigabyte.
+        self.scrollback = self.scrollback.min(100_000);
+        // `clamp` passes NaN through, and text of no size cannot be read.
+        self.font_size = if self.font_size.is_finite() {
+            self.font_size.clamp(6.0, 72.0)
+        } else {
+            Self::default().font_size
+        };
+        self
     }
 }
 
@@ -321,8 +354,7 @@ impl Config {
         self.appearance = self.appearance.sanitised();
         self.editor = self.editor.sanitised();
         self.theme = self.theme.sanitised();
-        // Scrollback is memory; a slip of the hand should not cost a gigabyte.
-        self.terminal.scrollback = self.terminal.scrollback.min(100_000);
+        self.terminal = self.terminal.sanitised();
         // Keyed in lower case, so `[language.Rust]` and `[language.rust]` are
         // the same thing to whoever looks one up.
         self.language = self
@@ -631,6 +663,32 @@ mod tests {
         assert_eq!(accent("[theme]\naccent = \"blue\""), "#cba6f7");
         assert_eq!(accent("[theme]\naccent = \"#fff\""), "#cba6f7");
         assert_eq!(accent("[theme]\naccent = \"#12345g\""), "#cba6f7");
+    }
+
+    #[test]
+    fn the_terminal_has_a_size_and_a_cursor_of_its_own() {
+        let terminal = parse("[terminal]\nfont_size = 12\ncursor = \"bar\"")
+            .unwrap()
+            .terminal;
+        assert_eq!(terminal.font_size, 12.0);
+        assert_eq!(terminal.cursor, TerminalCursor::Bar);
+
+        assert_eq!(
+            parse("[terminal]\nfont_size = 900\nscrollback = 99999999")
+                .unwrap()
+                .terminal,
+            Terminal {
+                font_size: 72.0,
+                scrollback: 100_000,
+                ..Default::default()
+            }
+        );
+        assert!(parse("[terminal]\ncursor = \"wedge\"").is_err());
+
+        let (after, config) =
+            patched(TEMPLATE, "terminal", "cursor", &json("underline".into())).unwrap();
+        assert_eq!(config.terminal.cursor, TerminalCursor::Underline);
+        assert!(after.contains("cursor = \"underline\""), "got {after}");
     }
 
     #[test]

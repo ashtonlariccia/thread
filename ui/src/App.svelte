@@ -323,10 +323,12 @@
   let nextTerminalNumber = 1;
   const isTerminal = (key: number) => key < 0;
 
-  // The terminal is set in the editor's font: the two are read side by side.
+  // The terminal is set in the editor's font, the two being read side by
+  // side, at a size and with a cursor of its own.
   const terminalLook = $derived({
     fontFamily: config.current.editor.font_family,
-    fontSize: config.current.editor.font_size,
+    fontSize: config.current.terminal.font_size,
+    cursor: config.current.terminal.cursor,
   });
 
   /**

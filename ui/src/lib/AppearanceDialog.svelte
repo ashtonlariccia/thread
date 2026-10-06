@@ -3,7 +3,7 @@
 
   import { ACCENT_PRESETS, applyAccent, isHexColor } from "./accent";
   import Dialog from "./Dialog.svelte";
-  import type { ConfigStore, EditorConfig } from "./state/config.svelte";
+  import type { ConfigStore, EditorConfig, TerminalCursor } from "./state/config.svelte";
   import { THEME_NAMES } from "./themes";
 
   type Props = {
@@ -19,6 +19,15 @@
   // "real" one.
   const appearance = $derived(config.current.appearance);
   const editor = $derived(config.current.editor);
+  const terminal = $derived(config.current.terminal);
+
+  async function onTerminalSize(event: Event) {
+    const target = event.currentTarget;
+    await commitNumber(event, terminal.font_size, (value) =>
+      config.set("terminal", "font_size", value),
+    );
+    resync({ currentTarget: target } as Event, () => config.current.terminal.font_size);
+  }
 
   const accent = $derived(config.current.theme.accent);
 
@@ -248,6 +257,36 @@
           </label>
         {/each}
       </div>
+    </div>
+
+    <h3>Terminal</h3>
+    <div class="grid">
+      <!-- The font is the editor's; these two are the terminal's own. -->
+      <label for="ap-term-size">Size</label>
+      <div class="row">
+        <input
+          id="ap-term-size"
+          type="number"
+          min="6"
+          max="72"
+          step="1"
+          value={terminal.font_size}
+          onchange={onTerminalSize}
+        />
+        <span class="unit">px</span>
+      </div>
+
+      <label for="ap-term-cursor">Cursor</label>
+      <select
+        id="ap-term-cursor"
+        value={terminal.cursor}
+        onchange={(e) =>
+          void config.set("terminal", "cursor", e.currentTarget.value as TerminalCursor)}
+      >
+        <option value="block">Block</option>
+        <option value="bar">Bar</option>
+        <option value="underline">Underline</option>
+      </select>
     </div>
 
     <h3>Files</h3>

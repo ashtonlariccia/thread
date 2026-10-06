@@ -18,6 +18,7 @@ import "@xterm/xterm/css/xterm.css";
 export type TerminalLook = {
   fontFamily: string;
   fontSize: number;
+  cursor: "block" | "bar" | "underline";
 };
 
 export type TerminalOptions = TerminalLook & {
@@ -80,6 +81,7 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
   const term = new Terminal({
     fontFamily: options.fontFamily,
     fontSize: options.fontSize,
+    cursorStyle: options.cursor,
     scrollback: options.scrollback,
     cursorBlink: false,
     // No hollow box while the editor has the keyboard: one caret at a time.
@@ -190,6 +192,7 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     restyle: (look) => {
       term.options.fontFamily = look.fontFamily;
       term.options.fontSize = look.fontSize;
+      term.options.cursorStyle = look.cursor;
       refit();
     },
     dispose: () => {
