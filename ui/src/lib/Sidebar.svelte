@@ -11,8 +11,6 @@
     collapsed: boolean;
     /** A drag is in flight, so the width must track the pointer, not glide. */
     resizing: boolean;
-    /** What to say when there is nothing to list. */
-    empty?: string;
     onselect: (item: SidebarItem) => void;
     /** A key pressed on a focused row, for the row's own shortcuts. */
     onkey: (event: KeyboardEvent, item: SidebarItem) => void;
@@ -32,7 +30,6 @@
     width,
     collapsed,
     resizing,
-    empty,
     onselect,
     onkey,
     onedit,
@@ -90,10 +87,6 @@
        shrinking into a column of icons. `inert` takes it out of the tab order
        and away from the pointer while it is not there to be seen. -->
   <div class="content" inert={collapsed}>
-    {#if items.length === 0 && empty}
-      <p class="empty">{empty}</p>
-    {/if}
-
     <!-- The space below the last row belongs to the tree too: right-clicking
          it is how something is made at the top level. A click on a row never
          reaches here; the row stops it. -->
@@ -330,14 +323,5 @@
     margin: 0 0.2rem 0 0.4rem;
     border-radius: 50%;
     background: var(--fg-dim);
-  }
-
-  .empty {
-    margin: 0;
-    padding: 0.6rem 0.8rem 0;
-    color: var(--fg-faint);
-    font-size: 0.75rem;
-    line-height: 1.4;
-    user-select: none;
   }
 </style>

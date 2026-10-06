@@ -1219,7 +1219,6 @@
       width={sidebarCollapsed ? RAIL_WIDTH : sidebarWidth}
       collapsed={sidebarCollapsed}
       {resizing}
-      empty="No folder open. File → Open Folder, or Ctrl+Shift+O."
       onselect={onTreeSelect}
       onkey={onTreeKey}
       onedit={(value) => void finishNaming(value)}
@@ -1271,10 +1270,6 @@
             oncontext={(event) => onTerminalContextMenu(event, terminal.key)}
           />
         {/each}
-
-        {#if docs.list.length === 0 && activeTerminal === null}
-          <p class="empty">Ctrl+O to open a file, Ctrl+N for a new one</p>
-        {/if}
       </div>
     </section>
   </main>
@@ -1412,8 +1407,7 @@
   }
 
   /* Whatever the tab strip leaves. The editor and the terminals fill it
-     absolutely, so it is the positioning context for them and for the
-     empty-state hint. */
+     absolutely, so it is the positioning context for them. */
   .editor-area {
     position: relative;
     flex: 1;
@@ -1432,19 +1426,6 @@
     .stage {
       transition: none;
     }
-  }
-
-  /* Over the blank editor, and out of the way of anything aimed at it. */
-  .empty {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    margin: 0;
-    color: var(--fg-faint);
-    font-size: 0.8rem;
-    user-select: none;
-    pointer-events: none;
   }
 
   /* What goes in here is built by the vim extension, not by this component,
