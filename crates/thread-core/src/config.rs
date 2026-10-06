@@ -26,7 +26,7 @@ const LEGACY_FILE: &str = "settings.json";
 /// The file written when there is none: every key, at its default, with a note
 /// on what it does. Parsing this must give exactly [`Config::default`] — a
 /// test holds the two together.
-pub const TEMPLATE: &str = r#"# Thread configuration.
+pub const TEMPLATE: &str = r##"# Thread configuration.
 #
 # Saved changes apply immediately. Any key left out takes the default shown.
 
@@ -67,6 +67,9 @@ exclude = [".*"]
 [theme]
 # Colours for syntax highlighting. Available: "catppuccin".
 syntax = "catppuccin"
+# The colour things are highlighted with: the active tab, the selected row,
+# a focused field, the buttons that go ahead. Six hex digits.
+accent = "#cba6f7"
 
 [vim]
 # Vim motions in the editor: modes, operators, registers, macros and the
@@ -90,7 +93,7 @@ scrollback = 2000
 #
 # [language.yaml]
 # tab_width = 2
-"#;
+"##;
 
 /// The material drawn behind a translucent window.
 ///
@@ -230,13 +233,30 @@ pub struct Theme {
     /// The name of the syntax-highlighting palette. The palettes themselves
     /// belong to the frontend; a name it does not know falls back to the default.
     pub syntax: String,
+    /// What the window highlights with, as `#rrggbb`.
+    pub accent: String,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
             syntax: "catppuccin".into(),
+            accent: "#cba6f7".into(),
         }
+    }
+}
+
+impl Theme {
+    /// Something that is not a colour would leave the window with no
+    /// highlight at all, which is not a look anyone chose.
+    fn sanitised(mut self) -> Self {
+        let digits = self.accent.strip_prefix('#').unwrap_or("");
+        if digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            self.accent = self.accent.to_ascii_lowercase();
+        } else {
+            self.accent = Self::default().accent;
+        }
+        self
     }
 }
 
@@ -300,6 +320,7 @@ impl Config {
     fn sanitised(mut self) -> Self {
         self.appearance = self.appearance.sanitised();
         self.editor = self.editor.sanitised();
+        self.theme = self.theme.sanitised();
         // Scrollback is memory; a slip of the hand should not cost a gigabyte.
         self.terminal.scrollback = self.terminal.scrollback.min(100_000);
         // Keyed in lower case, so `[language.Rust]` and `[language.rust]` are
@@ -601,6 +622,15 @@ mod tests {
         assert_eq!(config.editor.line_height, 3.0);
         assert_eq!(config.editor.tab_width, 1);
         assert_eq!(config.editor.font_family, Editor::default().font_family);
+    }
+
+    #[test]
+    fn an_accent_that_is_not_a_colour_falls_back_to_the_default() {
+        let accent = |text: &str| parse(text).unwrap().theme.accent;
+        assert_eq!(accent("[theme]\naccent = \"#89B4FA\""), "#89b4fa");
+        assert_eq!(accent("[theme]\naccent = \"blue\""), "#cba6f7");
+        assert_eq!(accent("[theme]\naccent = \"#fff\""), "#cba6f7");
+        assert_eq!(accent("[theme]\naccent = \"#12345g\""), "#cba6f7");
     }
 
     #[test]

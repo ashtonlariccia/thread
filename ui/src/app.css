@@ -39,7 +39,9 @@
   --fg-dim: #a3a3a3;
   --fg-faint: #5c5c5c;
 
-  --accent: #cba6f7; /* mauve */
+  /* The accent, and what is made from it. These four are the default, mauve;
+     the one in the config replaces them together (see `accent.ts`). */
+  --accent: #cba6f7;
   --accent-soft: #cba6f726; /* wash for filled backgrounds: selected rows */
   --accent-ink: #1c1c1c; /* text on an accent-filled button */
   --danger: #f38ba8;

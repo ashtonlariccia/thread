@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
 
+  import { ACCENT_PRESETS, applyAccent, isHexColor } from "./accent";
   import Dialog from "./Dialog.svelte";
   import type { ConfigStore, EditorConfig } from "./state/config.svelte";
   import { THEME_NAMES } from "./themes";
@@ -18,6 +19,21 @@
   // "real" one.
   const appearance = $derived(config.current.appearance);
   const editor = $derived(config.current.editor);
+
+  const accent = $derived(config.current.theme.accent);
+
+  function setAccent(color: string) {
+    void config.set("theme", "accent", color.toLowerCase());
+  }
+
+  /** A colour typed as hex. Anything else puts back the one in effect. */
+  function commitAccent(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const typed = input.value.trim();
+    const color = typed.startsWith("#") ? typed : `#${typed}`;
+    if (isHexColor(color)) setAccent(color);
+    else input.value = accent;
+  }
 
   /** The whole config as a file: these settings and the ones with no control here. */
   function openConfig() {
@@ -253,6 +269,47 @@
 
     <h3>Theme</h3>
     <div class="grid">
+      <label for="ap-accent">Accent</label>
+      <div class="accent">
+        <div class="row">
+          <!-- The system's picker. Dragging in it shows the colour on the
+               window as it goes, and it is written to the config once one is
+               settled on; leaving without settling puts the old one back. -->
+          <input
+            id="ap-accent"
+            class="well"
+            type="color"
+            value={accent}
+            oninput={(e) => applyAccent(e.currentTarget.value)}
+            onchange={(e) => setAccent(e.currentTarget.value)}
+            onblur={() => applyAccent(accent)}
+          />
+          <input
+            class="hex"
+            type="text"
+            aria-label="Accent colour, as hex"
+            spellcheck="false"
+            autocomplete="off"
+            maxlength="7"
+            value={accent}
+            onchange={commitAccent}
+          />
+        </div>
+        <div class="swatches">
+          {#each ACCENT_PRESETS as preset (preset.color)}
+            <button
+              class="swatch"
+              class:chosen={preset.color === accent}
+              style:background={preset.color}
+              title={preset.name}
+              aria-label={preset.name}
+              aria-pressed={preset.color === accent}
+              onclick={() => setAccent(preset.color)}
+            ></button>
+          {/each}
+        </div>
+      </div>
+
       <label for="ap-syntax">Syntax colours</label>
       <select
         id="ap-syntax"
@@ -358,6 +415,60 @@
   select:focus-visible {
     outline: none;
     border-color: var(--accent);
+  }
+
+  .accent {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    min-width: 0;
+  }
+  /* The picker's well, sized like the fields beside it. */
+  .well {
+    flex: none;
+    width: 2.2rem;
+    height: 1.75rem;
+    padding: 0;
+    background: transparent;
+    border: 1px solid var(--border-input);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .well::-webkit-color-swatch-wrapper {
+    padding: 2px;
+  }
+  .well::-webkit-color-swatch {
+    border: none;
+    border-radius: 2px;
+  }
+  input.hex {
+    width: 6rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .swatch {
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    /* The ring is drawn outside the dot, in the dialog's own colour, so the
+       one that is chosen stands clear of its neighbours. */
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+  .swatch:hover {
+    outline-color: var(--border-input);
+  }
+  .swatch.chosen,
+  .swatch:focus-visible {
+    outline-color: var(--fg);
   }
 
   .unit {

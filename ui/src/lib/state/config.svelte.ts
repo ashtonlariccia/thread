@@ -39,7 +39,8 @@ export type Config = {
   appearance: Appearance;
   editor: EditorConfig;
   files: { exclude: string[] };
-  theme: { syntax: string };
+  /** `accent` is the highlight colour, as `#rrggbb`. */
+  theme: { syntax: string; accent: string };
   vim: { enabled: boolean };
   /** `shell` is a command line; empty leaves the choice to the backend. */
   terminal: { shell: string; scrollback: number };
@@ -63,7 +64,7 @@ export const DEFAULTS: Config = {
     smooth_caret: true,
   },
   files: { exclude: [".*"] },
-  theme: { syntax: "catppuccin" },
+  theme: { syntax: "catppuccin", accent: "#cba6f7" },
   vim: { enabled: true },
   terminal: { shell: "", scrollback: 2000 },
   language: {},

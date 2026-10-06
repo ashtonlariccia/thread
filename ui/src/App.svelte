@@ -21,6 +21,7 @@
   import TitleBar from "./lib/TitleBar.svelte";
   import UnsavedDialog from "./lib/UnsavedDialog.svelte";
 
+  import { applyAccent } from "./lib/accent";
   import { item, SEP, type ContextMenuState } from "./lib/contextMenu";
   import { setEditor } from "./lib/edit";
   import { iconUrl } from "./lib/icons";
@@ -1110,6 +1111,12 @@
   // whole cascade reads it, including components this file never touches.
   $effect(() => {
     document.documentElement.style.setProperty("--bg-alpha", String(config.alpha));
+  });
+
+  // The accent, likewise: one colour in the config, and every highlight in
+  // the window follows it.
+  $effect(() => {
+    applyAccent(config.current.theme.accent);
   });
 
   // The editor's share of the config: the font, the gutter, and each open
