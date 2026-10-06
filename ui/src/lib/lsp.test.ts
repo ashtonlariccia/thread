@@ -1,7 +1,7 @@
 import { EditorState, Text } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 
-import { diagnostics, drawn, setDiagnostics } from "./diagnostics";
+import { diagnostics, drawn, lensDetail, setDiagnostics } from "./diagnostics";
 import { toCompletions, toDiagnostic, toOffset, toPosition, toUri, uriKey } from "./lsp";
 
 const doc = Text.of(["fn main() {", "    let x = 1;", "}"]);
@@ -65,7 +65,15 @@ describe("what a server finds wrong", () => {
     ]);
   });
 
-  it("writes out every one on a line, the most serious first", () => {
+  it("underlines a hint and writes nothing after its line", () => {
+    const state = EditorState.create({ doc, extensions: diagnostics });
+    const found = [toDiagnostic(doc, wire(0, 3, 7, 4, "could be shorter"))];
+    expect(drawn(state.update({ effects: setDiagnostics.of(found) }).state)).toEqual([
+      [3, 7, "cm-lens-range cm-lens-range-hint"],
+    ]);
+  });
+
+  it("writes out the most serious on a line, on one line", () => {
     const state = EditorState.create({ doc, extensions: diagnostics });
     const found = [wire(1, 8, 9, 2, "unused"), wire(1, 12, 13, 1, "mismatched types\nexpected `()`")];
     const next = state.update({ effects: setDiagnostics.of(found.map((w) => toDiagnostic(doc, w))) });
@@ -73,8 +81,12 @@ describe("what a server finds wrong", () => {
     const [line] = drawn(next.state);
     expect(line.slice(2)).toEqual([
       "cm-lens-line cm-lens-line-error",
-      "mismatched types\nexpected `()`\nunused",
+      "mismatched types ⏎ expected `()`",
     ]);
+    // And all of them, in full, for when the line is opened.
+    expect(lensDetail(found.map((w) => toDiagnostic(doc, w)))).toBe(
+      "mismatched types\nexpected `()`\nunused",
+    );
   });
 
   it("goes when the server says there is nothing wrong any more", () => {

@@ -1,19 +1,23 @@
 /**
  * What a language server has to say about a file, drawn where it applies.
  *
- * Each complaint is underlined where it is, and its line is tinted and ends
- * in a dot of the same colour, with how many complaints the line has. Point
- * at the line and the dot opens into what they say: every one of them, in
- * full, wrapped to whatever room the window has to the right of the text.
- * After the VS Code extension Error Lens, less the part where a long message
- * runs off the side of a small window.
+ * As the VS Code extension Error Lens draws it, at that extension's
+ * defaults: a line with a problem is tinted, and the problem is written out
+ * after the end of it, four characters on, in the colour of its severity.
+ * One message to a line, the most serious there, on one line however long it
+ * is: what does not fit is cut off at the edge of the editor. Hints are
+ * underlined and not written out. The colours are the extension's own.
  *
- * None of it is text in the editor. The dot and the messages are drawn by
- * the line's own stylesheet, from attributes, so there is nothing there for
- * the cursor to be beside, for a selection to take in, or for a copy to pick
- * up; and the messages are laid over the lines below rather than among them,
- * so opening them moves nothing. (Which costs the dot while they are open:
- * a line has the one thing to draw them with.)
+ * One thing is added. On the line the cursor is on, or the one being pointed
+ * at, the message opens into a box under the line with everything said about
+ * the line, in full, wrapped to the width of the editor: which is how a
+ * message too long for a small window gets read.
+ *
+ * None of it is text in the editor. Both are drawn by the line's own
+ * stylesheet, from attributes, so there is nothing there for the cursor to
+ * be beside, for a selection to take in, or for a copy to pick up; and the
+ * box is laid over the lines below rather than among them, so opening it
+ * moves nothing.
  *
  * This only draws. What the complaints are is whoever sets them's business.
  */
@@ -37,17 +41,29 @@ export type Diagnostic = {
 /** Replace everything said about a file. */
 export const setDiagnostics = StateEffect.define<Diagnostic[]>();
 
-/** What a line's complaints say, written out: the most serious first, one to a line. */
-export function lensText(all: Diagnostic[]): string {
+/** As much of a message as is written after a line (`errorLens.messageMaxChars`). */
+const LENS_CHARS = 500;
+/** What stands for a line break in a message written on one line. */
+const LINE_BREAK = "⏎";
+
+const rank = (d: Diagnostic) => SEVERITIES.indexOf(d.severity);
+
+/** A message as it is written after its line: all on one line. */
+export function lensText(message: string): string {
+  const flat = message.trim().replace(/\s*\n\s*/g, ` ${LINE_BREAK} `);
+  return flat.length > LENS_CHARS ? `${flat.slice(0, LENS_CHARS)}…` : flat;
+}
+
+/** Everything said about a line, in full: the most serious first, one to a paragraph. */
+export function lensDetail(all: Diagnostic[]): string {
   return [...all]
-    .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity))
+    .sort((a, b) => rank(a) - rank(b))
     .map((d) => (d.source ? `${d.message.trim()} (${d.source})` : d.message.trim()))
     .join("\n");
 }
 
 function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
-  type Line = { from: number; worst: Diagnostic; all: Diagnostic[] };
-  const lines = new Map<number, Line>();
+  const lines = new Map<number, Diagnostic[]>();
   const marks: { from: number; to: number; severity: Severity }[] = [];
 
   for (const diagnostic of diagnostics) {
@@ -58,26 +74,25 @@ function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
     if (to === from) to = Math.min(from + 1, line.to);
     if (to > from) marks.push({ from, to, severity: diagnostic.severity });
 
+    // A hint is a suggestion, not a problem: underlined, and left at that.
+    if (diagnostic.severity === "hint") continue;
     const known = lines.get(line.from);
-    if (!known) {
-      lines.set(line.from, { from: line.from, worst: diagnostic, all: [diagnostic] });
-    } else {
-      known.all.push(diagnostic);
-      const rank = (d: Diagnostic) => SEVERITIES.indexOf(d.severity);
-      if (rank(diagnostic) < rank(known.worst)) known.worst = diagnostic;
-    }
+    if (known) known.push(diagnostic);
+    else lines.set(line.from, [diagnostic]);
   }
 
   const ranges = [
     ...marks.map(({ from, to, severity }) =>
       Decoration.mark({ class: `cm-lens-range cm-lens-range-${severity}` }).range(from, to),
     ),
-    ...[...lines.values()].map(({ from, worst, all }) =>
-      Decoration.line({
+    ...[...lines].map(([from, all]) => {
+      // The first of the most serious, as they came.
+      const worst = all.reduce((a, b) => (rank(b) < rank(a) ? b : a));
+      return Decoration.line({
         class: `cm-lens-line cm-lens-line-${worst.severity}`,
-        attributes: { "data-lens": lensText(all), "data-lens-count": String(all.length) },
-      }).range(from),
-    ),
+        attributes: { "data-lens": lensText(worst.message), "data-lens-detail": lensDetail(all) },
+      }).range(from);
+    }),
   ];
   return ranges.length === 0 ? Decoration.none : Decoration.set(ranges, true);
 }
@@ -94,59 +109,50 @@ const field = StateField.define<DecorationSet>({
   provide: (self) => EditorView.decorations.from(self),
 });
 
-const COLOURS: Record<Severity, string> = {
-  error: "var(--danger)",
-  warning: "#f9e2af",
-  info: "#89b4fa",
-  hint: "var(--fg-dim)",
+/** Error Lens's own, for a dark theme: the message, and the wash behind its line. */
+const COLOURS: Record<Severity, { text: string; line: string }> = {
+  error: { text: "#ff6464", line: "#e454541b" },
+  warning: { text: "#fa973a", line: "#ff942f1b" },
+  info: { text: "#00b7e4", line: "#00b7e420" },
+  hint: { text: "#2faf64", line: "#17a2a220" },
 };
 
+/** The line the message opens on: the one pointed at, and the cursor's. */
+const OPEN = [".cm-lens-line:hover::after", "&.cm-focused .cm-activeLine.cm-lens-line::after"].join(", ");
+
 const look = EditorView.baseTheme({
-  // The dot: how many, in the colour of the worst of them.
+  // The message after the line. Out of the flow, though it sits where it
+  // would have in it, so that a long one makes the line no wider: what does
+  // not fit is cut off where the line ends, rather than giving the editor
+  // somewhere to scroll sideways to.
+  ".cm-lens-line": { position: "relative", overflowX: "clip" },
   ".cm-lens-line::after": {
-    content: "attr(data-lens-count)",
-    display: "inline-block",
-    boxSizing: "border-box",
-    minWidth: "1.5em",
-    height: "1.5em",
-    marginLeft: "2ch",
-    padding: "0 0.4em",
-    borderRadius: "999px",
-    color: "var(--accent-ink)",
-    fontSize: "0.7em",
-    fontWeight: "700",
-    lineHeight: "1.5em",
-    textAlign: "center",
-    verticalAlign: "middle",
+    content: "attr(data-lens)",
+    position: "absolute",
+    marginLeft: "4ch",
+    whiteSpace: "pre",
   },
-  // Pointed at, it is the messages, in a box hung under the line: taken out
-  // of the flow, so it is as tall as it needs to be and nothing moves to
-  // make room for it. It is as wide as what it says, up to the width of the
+  // Opened: everything said about the line, in a box hung under it. Taken
+  // out of the flow, so it is as tall as it needs to be and nothing moves to
+  // make room for it; and as wide as what it says, up to the width of the
   // editor it is in, which is what wraps it to a small window or a narrow
   // pane. The pointer goes through it, so the lines it lies over can still
-  // be pointed at, and it gives way to theirs.
+  // be pointed at and clicked.
   ".cm-scroller": { containerType: "inline-size" },
-  ".cm-lens-line": { position: "relative" },
-  ".cm-lens-line:hover::after": {
-    content: "attr(data-lens)",
+  [OPEN]: {
+    content: "attr(data-lens-detail)",
     position: "absolute",
     top: "100%",
     left: "2ch",
     zIndex: "5",
     width: "max-content",
     maxWidth: "calc(100cqw - 9ch)",
-    minWidth: "0",
-    height: "auto",
     margin: "0",
     padding: "1px 0.8em",
-    borderRadius: "5px",
+    borderRadius: "0.2em",
     border: "1px solid",
     backgroundColor: "var(--bg-menu)",
     boxShadow: "0 6px 18px #0008",
-    fontSize: "0.9em",
-    fontWeight: "400",
-    lineHeight: "inherit",
-    textAlign: "left",
     whiteSpace: "pre-wrap",
     overflowWrap: "anywhere",
     pointerEvents: "none",
@@ -159,13 +165,9 @@ const look = EditorView.baseTheme({
   },
   ...Object.fromEntries(
     SEVERITIES.flatMap((severity) => [
-      [`.cm-lens-line-${severity}::after`, { backgroundColor: COLOURS[severity] }],
-      [`.cm-lens-line-${severity}:hover::after`, { color: COLOURS[severity] }],
-      [`.cm-lens-range-${severity}`, { textDecorationColor: COLOURS[severity] }],
-      [
-        `.cm-lens-line-${severity}`,
-        { backgroundColor: `color-mix(in srgb, ${COLOURS[severity]} 9%, transparent)` },
-      ],
+      [`.cm-lens-line-${severity}`, { backgroundColor: COLOURS[severity].line }],
+      [`.cm-lens-line-${severity}::after`, { color: COLOURS[severity].text }],
+      [`.cm-lens-range-${severity}`, { textDecorationColor: COLOURS[severity].text }],
     ]),
   ),
 });
@@ -173,7 +175,7 @@ const look = EditorView.baseTheme({
 /** The drawing of diagnostics; nothing shows until some are set. */
 export const diagnostics: Extension = [field, look];
 
-/** For tests: what is drawn in a state, as `[from, to, class, messages written out]`. */
+/** For tests: what is drawn in a state, as `[from, to, class, message written out]`. */
 export function drawn(state: {
   field: (f: typeof field) => DecorationSet;
 }): [number, number, string, string?][] {
