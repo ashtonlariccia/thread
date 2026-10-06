@@ -170,7 +170,7 @@ export class Documents {
 
     void loadVim({
       write: () => void this.save(),
-      quit: () => void this.close(),
+      quit: (force) => void this.close(this.activeKey, { force }),
       writeQuit: () =>
         void this.save().then((saved) => {
           // A save that failed or was cancelled leaves the file open.
@@ -363,11 +363,14 @@ export class Documents {
     }
   }
 
-  /** Close a file, asking first if it has unsaved changes. */
-  async close(key: number | null = this.activeKey) {
+  /**
+   * Close a file, asking first if it has unsaved changes. `force` does not
+   * ask: it is `:q!`, which is the answer already.
+   */
+  async close(key: number | null = this.activeKey, { force = false } = {}) {
     const doc = this.find(key);
     if (!doc) return;
-    if (doc.dirty && !(await this.confirm([doc]))) return;
+    if (doc.dirty && !force && !(await this.confirm([doc]))) return;
     this.#remove(doc);
   }
 
@@ -397,6 +400,8 @@ export class Documents {
     this.list.splice(index, 1);
     this.editor.drop(doc.key);
     this.#grammars.delete(doc.key);
+    // Whatever vim was showing was about this file, or was asked from it.
+    if (this.activeKey === doc.key) this.vimLine?.replaceChildren();
     // The neighbour that slid into its place, else the one before it.
     if (this.activeKey === doc.key) this.#show((this.list[index] ?? this.list.at(-1))?.key ?? null);
   }

@@ -17,7 +17,8 @@ export type VimMode = "normal" | "insert" | "visual" | "replace";
 /** What the ex commands that reach outside the buffer should do. */
 export type VimHooks = {
   write: () => void;
-  quit: () => void;
+  /** `force` is `:q!`: close the file and lose what is unsaved, unasked. */
+  quit: (force: boolean) => void;
   writeQuit: () => void;
   /** `:bn` / `:bp`: the next or previous open file. */
   cycle: (step: 1 | -1) => void;
@@ -66,13 +67,25 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
     // reads patterns the same way, so the preview and the command agree.
     Vim.setOption("pcre", false);
 
+    // These run once the command line that asked for them has closed, not
+    // from inside it. Closing a file takes its editor state with it, and the
+    // extension still has its own line to put away in that state: done in the
+    // other order, the line was left on screen over a file that had gone.
+    const later = (act: () => void) => () => void setTimeout(act, 0);
+    /** Whether a command was given with a `!`, which arrives as its argument. */
+    const banged = (params?: { argString?: string }) =>
+      params?.argString?.trim().startsWith("!") ?? false;
+
     // Each takes its usual abbreviation: `:w` for `:write`, and so on.
-    Vim.defineEx("write", "w", () => hooks?.write());
-    Vim.defineEx("quit", "q", () => hooks?.quit());
-    Vim.defineEx("wq", "wq", () => hooks?.writeQuit());
-    Vim.defineEx("xit", "x", () => hooks?.writeQuit());
-    Vim.defineEx("bnext", "bn", () => hooks?.cycle(1));
-    Vim.defineEx("bprevious", "bp", () => hooks?.cycle(-1));
+    Vim.defineEx("write", "w", later(() => hooks?.write()));
+    Vim.defineEx("quit", "q", (_cm: unknown, params?: { argString?: string }) => {
+      const force = banged(params);
+      later(() => hooks?.quit(force))();
+    });
+    Vim.defineEx("wq", "wq", later(() => hooks?.writeQuit()));
+    Vim.defineEx("xit", "x", later(() => hooks?.writeQuit()));
+    Vim.defineEx("bnext", "bn", later(() => hooks?.cycle(1)));
+    Vim.defineEx("bprevious", "bp", later(() => hooks?.cycle(-1)));
 
     const watched = new WeakSet<object>();
     return {
