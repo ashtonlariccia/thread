@@ -116,8 +116,12 @@ const chrome = EditorView.theme(
     // for: normal, visual and replace modes. The shape follows from that
     // class alone, so changing mode is a CSS change and the transition on
     // `width` is the whole of the box-to-beam animation.
+    // A pixel wider than the character on each side, and rounded: a block
+    // exactly the cell's width crowds the letter it is on.
     ".cm-vimMode .cm-threadCaret": {
-      width: "var(--caret-cell)",
+      width: "calc(var(--caret-cell) + 2px)",
+      marginLeft: "-1px",
+      borderRadius: "3px",
       backgroundColor: "var(--caret-block)",
     },
     // No caret in an editor that is not being typed into; a faint block in
@@ -302,6 +306,8 @@ function lookExtension(look: EditorLook): Extension {
       ".cm-threadCaret": {
         transition: [
           "width 110ms cubic-bezier(0.2, 0.9, 0.3, 1)",
+          "margin-left 110ms cubic-bezier(0.2, 0.9, 0.3, 1)",
+          "border-radius 110ms ease",
           "background-color 110ms ease",
           "opacity 110ms ease",
           ...(look.smoothCaret
