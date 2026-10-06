@@ -27,7 +27,24 @@ export type TerminalOptions = TerminalLook & {
   scrollback: number;
   /** The shell has ended, by `exit` or by dying. Not called after `dispose`. */
   onexit: () => void;
+  /** Something run in the terminal asked for a file or a folder to be opened. */
+  onopen: (kind: "file" | "dir", path: string) => void;
 };
+
+/**
+ * The escape sequence the `thread` command asks with (`scripts/thread-remote.sh`):
+ * `OSC 7717 ; file|dir ; <absolute path> BEL`. A number nothing else uses.
+ */
+const OPEN_OSC = 7717;
+
+/** What such a request asks for, or null if it is not one. */
+export function openRequest(data: string): { kind: "file" | "dir"; path: string } | null {
+  const cut = data.indexOf(";");
+  const kind = data.slice(0, cut);
+  const path = data.slice(cut + 1);
+  if (cut === -1 || (kind !== "file" && kind !== "dir") || path === "") return null;
+  return { kind, path };
+}
 
 export type TerminalHandle = {
   focus: () => void;
@@ -94,6 +111,15 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
   term.loadAddon(fit);
   term.open(host);
   fit.fit();
+
+  // `thread some-file`, typed at the shell: the command has no way to
+  // reach this window but through the terminal it is run in, so it says
+  // what it wants on the screen, in a sequence only this reads.
+  term.parser.registerOscHandler(OPEN_OSC, (data) => {
+    const request = openRequest(data);
+    if (request) options.onopen(request.kind, request.path);
+    return true;
+  });
 
   let disposed = false;
   /** Set once the shell is running; what `dispose` has to end. */

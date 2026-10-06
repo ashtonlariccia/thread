@@ -1564,6 +1564,7 @@
             look={terminalLook}
             scrollback={config.current.terminal.scrollback}
             onexit={() => closeTerminal(terminal.key)}
+            onopen={(kind, path) => void (kind === "dir" ? openFolder(path) : docs.open(path))}
             oncontext={(event) => onTerminalContextMenu(event, terminal.key)}
           />
         </div>

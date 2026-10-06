@@ -21,10 +21,12 @@
     scrollback: number;
     /** The shell ended by itself. */
     onexit: () => void;
+    /** The `thread` command was run in it, on a file or a folder. */
+    onopen: (kind: "file" | "dir", path: string) => void;
     oncontext: (event: MouseEvent) => void;
   };
 
-  let { active, focused, cwd, look, scrollback, onexit, oncontext }: Props = $props();
+  let { active, focused, cwd, look, scrollback, onexit, onopen, oncontext }: Props = $props();
 
   let host: HTMLElement;
   let handle = $state.raw<TerminalHandle | null>(null);
@@ -49,7 +51,7 @@
     // window: see `terminal.ts`.
     void import("./terminal").then(({ openTerminal }) => {
       if (gone) return;
-      handle = openTerminal(host, { cwd, ...look, scrollback, onexit });
+      handle = openTerminal(host, { cwd, ...look, scrollback, onexit, onopen });
     });
 
     return () => {
