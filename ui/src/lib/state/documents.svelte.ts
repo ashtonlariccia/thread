@@ -17,7 +17,7 @@ import { detectIndent, resolveIndent, type Detected, type Indent } from "../inde
 import { languageOf } from "../languages";
 import { baseName, samePath, segmentsBelow } from "../paths";
 import { pickFiles, pickSave } from "../pick";
-import { loadSyntax } from "../syntax";
+import { loadSyntax, setCustomSyntax, syntaxRevision } from "../syntax";
 import { syntaxTheme } from "../themes";
 import { loadVim, type VimApi, type VimHooks, type VimMode } from "../vim";
 import { substitutePreview } from "../vimSubstitute";
@@ -188,6 +188,8 @@ export class Documents {
     });
     this.editor.setHighlightStyle(syntaxTheme(config.theme.syntax));
     this.#setVim(config.vim.enabled);
+    // Before the files are dressed: what language each is can depend on it.
+    setCustomSyntax(config.syntax);
     for (const doc of this.list) this.#dress(doc);
   }
 
@@ -243,15 +245,19 @@ export class Documents {
     this.editor.setIndent(doc.key, doc.indent);
 
     const language = languageOf(doc.name);
-    if (this.#grammars.get(doc.key) === language) return;
-    this.#grammars.set(doc.key, language);
+    // With what it is built from, for a language of the user's own: the same
+    // name with a different description is a different grammar.
+    const wanted = language + syntaxRevision(language);
+    if (this.#grammars.get(doc.key) === wanted) return;
+    this.#grammars.set(doc.key, wanted);
 
     const key = doc.key;
     // The grammar is fetched on first use, so the file shows as plain text
     // for the moment that takes and is coloured when it lands.
     void loadSyntax(language).then((grammar) => {
       // Closed, or renamed into another language, while it was loading.
-      if (this.#grammars.get(key) !== language) return;
+      if (this.#grammars.get(key) !== wanted) return;
+
       this.editor.setLanguage(key, grammar ?? []);
     });
   }

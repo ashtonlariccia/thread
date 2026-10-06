@@ -147,6 +147,7 @@ fn main() {
             ui_ready,
             commands::config,
             commands::set_config,
+            commands::set_syntax,
             commands::new_window,
             commands::open_config,
             commands::startup_files,

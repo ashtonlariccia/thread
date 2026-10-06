@@ -14,6 +14,10 @@
 import type { Extension } from "@codemirror/state";
 import type { StreamParser } from "@codemirror/language";
 
+import { customLanguage, type SyntaxDef } from "./customSyntax";
+import { setCustomLanguages } from "./languages";
+
+
 /** Wrap a legacy tokeniser as a language. */
 async function legacy(mode: Promise<StreamParser<unknown>>): Promise<Extension> {
   const { StreamLanguage } = await import("@codemirror/language");
@@ -80,9 +84,31 @@ const LOADERS: Record<string, () => Promise<Extension>> = {
 
 const loaded = new Map<string, Promise<Extension | null>>();
 
+/** The user's own languages, by name, as the config describes them. */
+let custom: Record<string, SyntaxDef> = {};
+
+/**
+ * Take on the user's languages (`[syntax.*]` in the config). They come ahead
+ * of the grammars above, for the extensions they claim and by name.
+ */
+export function setCustomSyntax(defs: Record<string, SyntaxDef>) {
+  custom = defs;
+  setCustomLanguages(
+    Object.fromEntries(Object.entries(defs).map(([name, def]) => [name, def.extensions])),
+  );
+}
+
+/**
+ * What a language's grammar is built from, as text, where it is one of the
+ * user's: when this changes the grammar has, and wants loading again.
+ */
+export function syntaxRevision(language: string): string {
+  return language in custom ? JSON.stringify(custom[language]) : "";
+}
+
 /** Whether a language has a grammar at all. */
 export function hasSyntax(language: string): boolean {
-  return language in LOADERS;
+  return language in custom || language in LOADERS;
 }
 
 /**
@@ -90,6 +116,10 @@ export function hasSyntax(language: string): boolean {
  * Never rejects: a file with no grammar is plain text, not a failure.
  */
 export function loadSyntax(language: string): Promise<Extension | null> {
+  // Built here and now, and not kept: it is small, and it changes whenever
+  // its description does.
+  if (language in custom) return Promise.resolve(customLanguage(custom[language]));
+
   let pending = loaded.get(language);
   if (!pending) {
     const loader = LOADERS[language];

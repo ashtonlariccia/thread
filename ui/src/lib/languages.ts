@@ -1,9 +1,9 @@
 /**
  * The language a file is written in, as the status bar names it.
  *
- * By file name only. Nothing here drives behaviour yet — there is no
- * highlighting or completion to pick — so this is a label, and a file it does
- * not recognise is plain text.
+ * By file name only: the tables below, and ahead of them whatever extensions
+ * the user's own languages claim. A file nothing recognises is plain text.
+
  */
 
 /** Whole file names, lower-case. Checked before the extension. */
@@ -109,11 +109,23 @@ const BY_EXTENSION: Record<string, string> = {
 
 export const PLAIN_TEXT = "Plain Text";
 
+/** Extensions claimed by languages of the user's own (`[syntax.*]` in the config). */
+let custom = new Map<string, string>();
+
+/** Take on the user's languages: each one's name, and the extensions it has. */
+export function setCustomLanguages(extensions: Record<string, string[]>) {
+  custom = new Map(
+    Object.entries(extensions).flatMap(([name, list]) => list.map((ext) => [ext, name])),
+  );
+}
+
 export function languageOf(fileName: string): string {
   const lower = fileName.toLowerCase();
-  const named = BY_NAME[lower];
-  if (named) return named;
-
   const dot = lower.lastIndexOf(".");
-  return (dot === -1 ? undefined : BY_EXTENSION[lower.slice(dot + 1)]) ?? PLAIN_TEXT;
+  const extension = dot === -1 ? undefined : lower.slice(dot + 1);
+  // First: someone who says `.rs` is their language means it.
+  const own = extension === undefined ? undefined : custom.get(extension);
+  if (own) return own;
+
+  return BY_NAME[lower] ?? (extension === undefined ? undefined : BY_EXTENSION[extension]) ?? PLAIN_TEXT;
 }

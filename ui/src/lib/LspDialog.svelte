@@ -8,6 +8,7 @@
    * not on this machine is listed with the command that would put it there.
    */
   import Dialog from "./Dialog.svelte";
+  import SyntaxTab from "./SyntaxTab.svelte";
   import type { ConfigStore } from "./state/config.svelte";
   import type { Lsp, ServerInfo } from "./state/lsp.svelte";
 
@@ -21,6 +22,9 @@
   };
 
   let { open, lsp, config, remote, onclose }: Props = $props();
+
+  /** Which of the two this is showing: the servers, or the user's own languages. */
+  let tab = $state<"servers" | "languages">("servers");
 
   // Each time it opens: one may have been installed since the last look.
   $effect(() => {
@@ -52,7 +56,22 @@
   }
 </script>
 
-<Dialog {open} title="Language Servers" width={580} scrolls {onclose}>
+<Dialog {open} title="Languages" width={tab === "servers" ? 580 : 940} scrolls {onclose}>
+  <div class="tabs" role="tablist">
+    <button role="tab" aria-selected={tab === "servers"} onclick={() => (tab = "servers")}>
+      Language Servers
+    </button>
+    <button role="tab" aria-selected={tab === "languages"} onclick={() => (tab = "languages")}>
+      Your Languages
+    </button>
+  </div>
+
+  {#if tab === "languages"}
+    <SyntaxTab {config} />
+    <div class="dlg-actions">
+      <button class="btn ghost" onclick={onclose}>Done</button>
+    </div>
+  {:else}
   <ul class="dlg-list">
     {#each servers as server (server.id)}
       {@const state = status(server)}
@@ -107,10 +126,39 @@
   <div class="dlg-actions">
     <button class="btn primary" onclick={onclose}>Done</button>
   </div>
+  {/if}
 </Dialog>
 
 <style>
+  /* The two halves of the dialog, as a pair of tabs under its title. */
+  .tabs {
+    flex: none;
+    display: flex;
+    gap: 1.1rem;
+    margin: -0.2rem 0 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .tabs button {
+    padding: 0.3rem 0;
+    margin-bottom: -1px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid transparent;
+    color: var(--fg-dim);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.8rem;
+  }
+  .tabs button:hover {
+    color: var(--fg);
+  }
+  .tabs button[aria-selected="true"] {
+    border-bottom-color: var(--accent);
+    color: var(--fg);
+  }
+
   .dlg-row {
+
     cursor: pointer;
   }
   .dlg-row.missing {

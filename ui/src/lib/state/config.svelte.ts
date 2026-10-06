@@ -10,6 +10,8 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import type { SyntaxDef } from "../customSyntax";
+
 export type Material = "none" | "acrylic";
 
 export type Appearance = {
@@ -51,6 +53,8 @@ export type Config = {
   lsp: { enabled: string[] };
   /** By language name, lower-case. */
   language: Record<string, LanguageOverride>;
+  /** Languages of the user's own, by the name the bottom bar shows. */
+  syntax: Record<string, SyntaxDef>;
 };
 
 /** Mirrors the Rust defaults, for the frame before the backend has answered. */
@@ -75,6 +79,7 @@ export const DEFAULTS: Config = {
   terminal: { shell: "", scrollback: 2000, font_size: 14, cursor: "block" },
   lsp: { enabled: [] },
   language: {},
+  syntax: {},
 };
 
 /** The sections whose keys are plain values, settable one at a time. */
@@ -122,7 +127,17 @@ export class ConfigStore {
     }
   }
 
+  /**
+   * Write, replace or remove a language of the user's own. `previous` is the
+   * name it had if it has been renamed, and no `syntax` removes it. Throws
+   * what the backend said if it would not have it.
+   */
+  async setSyntax(name: string, previous: string | null, syntax: SyntaxDef | null) {
+    this.current = await invoke<Config>("set_syntax", { name, previous, syntax });
+  }
+
   /** Put every setting the dialog shows back to its default. */
+
   async reset() {
     for (const section of ["appearance", "editor", "files", "theme", "vim"] as const) {
       const defaults = DEFAULTS[section] as Record<string, unknown>;

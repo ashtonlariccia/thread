@@ -841,6 +841,22 @@ pub fn set_config(
     Ok(config)
 }
 
+/// Write, replace or remove a language of the user's own (`[syntax.<name>]`)
+/// and apply it. `previous` is the name it had before, if it was renamed;
+/// no `syntax` removes it.
+#[tauri::command]
+pub fn set_syntax(
+    app: AppHandle,
+    name: String,
+    previous: Option<String>,
+    syntax: Option<config::Syntax>,
+) -> Result<Config, String> {
+    let config = config::set_syntax(&name, previous.as_deref(), syntax.as_ref())
+        .map_err(|e| e.to_string())?;
+    apply_config(&app, &config);
+    Ok(config)
+}
+
 // --- session ----------------------------------------------------------------
 
 /// What was open when Thread was last closed.

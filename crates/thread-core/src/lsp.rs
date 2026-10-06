@@ -24,6 +24,8 @@ use crate::{Error, Result};
 /// No console window for a server that is a console program.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
 /// A server Thread knows how to run.
 pub struct Spec {
     /// What `[lsp] enabled` lists it by.
@@ -37,37 +39,13 @@ pub struct Spec {
     pub languages: &'static [(&'static str, &'static str)],
     /// A command that installs it, to show beside one that is not installed.
     pub install: &'static str,
-    /// A command that succeeds only if the server is really there, for one
-    /// whose program can be on `PATH` without it. `None`: being found is enough.
-    pub probe: Option<&'static [&'static str]>,
+    /// Folders to look in besides `PATH`: where its installer puts it without
+    /// adding that to `PATH`.
+    pub folders: &'static [&'static str],
 }
 
+/// Few, for now: the languages being worked in. Another is an entry here.
 pub const CATALOG: &[Spec] = &[
-    Spec {
-        id: "rust-analyzer",
-        name: "rust-analyzer",
-        command: "rust-analyzer",
-        args: &[],
-        languages: &[("Rust", "rust")],
-        install: "rustup component add rust-analyzer",
-        // rustup puts a `rust-analyzer` on PATH whether or not the component
-        // is installed; the one that is not there only says so when run.
-        probe: Some(&["rustup", "which", "rust-analyzer"]),
-    },
-    Spec {
-        id: "typescript",
-        name: "TypeScript Language Server",
-        command: "typescript-language-server",
-        args: &["--stdio"],
-        languages: &[
-            ("TypeScript", "typescript"),
-            ("TypeScript JSX", "typescriptreact"),
-            ("JavaScript", "javascript"),
-            ("JavaScript JSX", "javascriptreact"),
-        ],
-        install: "npm install -g typescript-language-server typescript",
-        probe: None,
-    },
     Spec {
         id: "pyright",
         name: "Pyright",
@@ -75,7 +53,7 @@ pub const CATALOG: &[Spec] = &[
         args: &["--stdio"],
         languages: &[("Python", "python")],
         install: "npm install -g pyright",
-        probe: None,
+        folders: &[],
     },
     Spec {
         id: "clangd",
@@ -84,115 +62,17 @@ pub const CATALOG: &[Spec] = &[
         args: &[],
         languages: &[("C", "c"), ("C++", "cpp")],
         install: "winget install LLVM.LLVM",
-        probe: None,
+        // The LLVM installer leaves PATH alone unless asked.
+        folders: &["C:/Program Files/LLVM/bin"],
     },
     Spec {
-        id: "gopls",
-        name: "gopls",
-        command: "gopls",
+        id: "nil",
+        name: "nil",
+        command: "nil",
         args: &[],
-        languages: &[("Go", "go")],
-        install: "go install golang.org/x/tools/gopls@latest",
-        probe: None,
-    },
-    Spec {
-        id: "svelte",
-        name: "Svelte Language Server",
-        command: "svelteserver",
-        args: &["--stdio"],
-        languages: &[("Svelte", "svelte")],
-        install: "npm install -g svelte-language-server",
-        probe: None,
-    },
-    Spec {
-        id: "html",
-        name: "HTML Language Server",
-        command: "vscode-html-language-server",
-        args: &["--stdio"],
-        languages: &[("HTML", "html")],
-        install: "npm install -g vscode-langservers-extracted",
-        probe: None,
-    },
-    Spec {
-        id: "css",
-        name: "CSS Language Server",
-        command: "vscode-css-language-server",
-        args: &["--stdio"],
-        languages: &[("CSS", "css"), ("SCSS", "scss"), ("Less", "less")],
-        install: "npm install -g vscode-langservers-extracted",
-        probe: None,
-    },
-    Spec {
-        id: "json",
-        name: "JSON Language Server",
-        command: "vscode-json-language-server",
-        args: &["--stdio"],
-        languages: &[("JSON", "json"), ("JSON with Comments", "jsonc")],
-        install: "npm install -g vscode-langservers-extracted",
-        probe: None,
-    },
-    Spec {
-        id: "lua",
-        name: "Lua Language Server",
-        command: "lua-language-server",
-        args: &[],
-        languages: &[("Lua", "lua")],
-        install: "winget install LuaLS.lua-language-server",
-        probe: None,
-    },
-    Spec {
-        id: "bash",
-        name: "Bash Language Server",
-        command: "bash-language-server",
-        args: &["start"],
-        languages: &[("Shell Script", "shellscript")],
-        install: "npm install -g bash-language-server",
-        probe: None,
-    },
-    Spec {
-        id: "yaml",
-        name: "YAML Language Server",
-        command: "yaml-language-server",
-        args: &["--stdio"],
-        languages: &[("YAML", "yaml")],
-        install: "npm install -g yaml-language-server",
-        probe: None,
-    },
-    Spec {
-        id: "taplo",
-        name: "Taplo",
-        command: "taplo",
-        args: &["lsp", "stdio"],
-        languages: &[("TOML", "toml")],
-        install: "cargo install taplo-cli --locked --features lsp",
-        probe: None,
-    },
-    Spec {
-        id: "marksman",
-        name: "Marksman",
-        command: "marksman",
-        args: &["server"],
-        languages: &[("Markdown", "markdown")],
-        install: "winget install Artempyanykh.Marksman",
-        probe: None,
-    },
-    Spec {
-        id: "intelephense",
-        name: "Intelephense",
-        command: "intelephense",
-        args: &["--stdio"],
-        languages: &[("PHP", "php")],
-        install: "npm install -g intelephense",
-        probe: None,
-    },
-    Spec {
-        id: "zls",
-        name: "ZLS",
-        command: "zls",
-        args: &[],
-        languages: &[("Zig", "zig")],
-        install: "winget install zigtools.zls",
-        probe: None,
+        languages: &[("Nix", "nix")],
+        install: "cargo install --git https://github.com/oxalica/nil nil",
+        folders: &[],
     },
 ];
 
@@ -230,31 +110,22 @@ pub fn catalog() -> Vec<Info> {
                 .map(|&(name, id)| Language { name, id })
                 .collect(),
             install: spec.install,
-            installed: installed(spec),
+            installed: find(spec).is_some(),
         })
         .collect()
 }
 
-/// Whether a server is there to be run.
-fn installed(spec: &Spec) -> bool {
-    if locate(spec.command).is_none() {
-        return false;
-    }
-    let Some([program, args @ ..]) = spec.probe else {
-        return true;
-    };
-    // A probe that cannot itself be run settles nothing: found is found.
-    let Some(program) = locate(program) else {
-        return true;
-    };
-    Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map_or(true, |status| status.success())
+/// Where a server's program is: on `PATH`, or in one of the folders its
+/// installer is known to use.
+fn find(spec: &Spec) -> Option<PathBuf> {
+    locate(spec.command).or_else(|| {
+        let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| DEFAULT_PATHEXT.into());
+        locate_in(
+            spec.command,
+            spec.folders.iter().map(PathBuf::from),
+            &extensions,
+        )
+    })
 }
 
 /// Where a program is, the way the shell would find it: in each folder of
@@ -265,7 +136,7 @@ fn installed(spec: &Spec) -> bool {
 /// system; what runs here is the `.cmd` beside it.
 pub fn locate(command: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| DEFAULT_PATHEXT.into());
     locate_in(command, std::env::split_paths(&path), &extensions)
 }
 
@@ -308,15 +179,13 @@ impl Server {
             .iter()
             .find(|spec| spec.id == id)
             .ok_or_else(|| Error::Other(anyhow::anyhow!("there is no language server \"{id}\"")))?;
-        let program = locate(spec.command)
-            .filter(|_| installed(spec))
-            .ok_or_else(|| {
-                Error::Other(anyhow::anyhow!(
-                    "{} is not installed. To install it: {}",
-                    spec.name,
-                    spec.install
-                ))
-            })?;
+        let program = find(spec).ok_or_else(|| {
+            Error::Other(anyhow::anyhow!(
+                "{} is not installed. To install it: {}",
+                spec.name,
+                spec.install
+            ))
+        })?;
 
         let mut command = Command::new(&program);
         command

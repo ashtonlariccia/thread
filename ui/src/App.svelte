@@ -1323,8 +1323,13 @@
     const current = config.current;
     // Only the config is a dependency: `configure` walks the open files, and
     // must not re-run just because one was opened or closed.
-    untrack(() => docs.configure(current));
+    untrack(() => {
+      docs.configure(current);
+      configured++;
+    });
   });
+  /** Counts the configs taken on, for what reads from them by way of a plain function. */
+  let configured = $state(0);
 
   // The language servers that are switched on. Which are installed is looked
   // up once the window is up, and again each time the dialog is opened.
@@ -1629,7 +1634,10 @@
         <span data-drop="3">{indentLabel(docs.active.indent)}</span>
         <span data-drop="2">{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
         <span data-drop="1">{docs.active.bom ? "UTF-8 with BOM" : "UTF-8"}</span>
-        <span data-drop="4">{languageOf(docs.active.name)}</span>
+        <!-- What a file is can change with the config, which names the
+             user's own languages; `languageOf` itself is not watched. -->
+        <span data-drop="4">{(void configured, languageOf(docs.active.name))}</span>
+
       {/if}
     {/snippet}
   </PinBar>

@@ -106,6 +106,24 @@ enabled = []
 #
 # [language.yaml]
 # tab_width = 2
+
+# Languages of your own: highlighting for file extensions Thread has no
+# grammar for. Each is a table named for the language, and is what
+# Edit -> LSPs -> Your Languages writes. Every key but `extensions` is optional.
+#
+# [syntax.Mylang]
+# extensions = ["my", "myl"]
+# line_comment = "#"
+# block_comment = ["/*", "*/"]
+# strings = ['"', "'"]
+# keywords = ["if", "else", "while", "return"]
+# types = ["int", "string"]
+# constants = ["true", "false", "nil"]
+# functions = ["print", "len"]
+# # Anything the lists cannot say, as regular expressions tried at the start
+# # of each token. `as` is one of: keyword, type, constant, function, builtin,
+# # operator, string, comment, number, property.
+# patterns = [{ match = '@[a-z]+', as = "builtin" }]
 "##;
 
 /// The material drawn behind a translucent window.
@@ -347,6 +365,71 @@ pub struct Lsp {
     pub enabled: Vec<String>,
 }
 
+/// A language defined in the config: how files with its extensions are
+/// highlighted. The frontend builds the tokeniser; this is only what it is
+/// built from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Syntax {
+    /// Without the dot, lower-case.
+    pub extensions: Vec<String>,
+    /// What starts a comment that runs to the end of the line; empty for none.
+    pub line_comment: String,
+    /// What opens and what closes a comment that can span lines: two, or none.
+    pub block_comment: Vec<String>,
+    /// The delimiters a string starts and ends with.
+    pub strings: Vec<String>,
+    pub keywords: Vec<String>,
+    pub types: Vec<String>,
+    pub constants: Vec<String>,
+    pub functions: Vec<String>,
+    pub patterns: Vec<SyntaxPattern>,
+}
+
+/// A regular expression, and what to colour its matches as.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SyntaxPattern {
+    #[serde(rename = "match")]
+    pub pattern: String,
+    #[serde(rename = "as")]
+    pub category: String,
+}
+
+impl Syntax {
+    fn sanitised(mut self) -> Self {
+        let words = |list: Vec<String>| {
+            let mut seen = Vec::new();
+            for word in list {
+                let word = word.trim().to_owned();
+                if !word.is_empty() && !seen.contains(&word) {
+                    seen.push(word);
+                }
+            }
+            seen
+        };
+        self.extensions = words(
+            self.extensions
+                .into_iter()
+                .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+                .collect(),
+        );
+        self.line_comment = self.line_comment.trim().to_owned();
+        // Half a pair opens a comment nothing can close.
+        self.block_comment = words(self.block_comment);
+        if self.block_comment.len() != 2 {
+            self.block_comment.clear();
+        }
+        self.strings = words(self.strings);
+        self.keywords = words(self.keywords);
+        self.types = words(self.types);
+        self.constants = words(self.constants);
+        self.functions = words(self.functions);
+        self.patterns.retain(|p| !p.pattern.is_empty());
+        self
+    }
+}
+
 /// What one language does differently from `[editor]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -370,6 +453,8 @@ pub struct Config {
     pub lsp: Lsp,
     /// By language name, lower-case.
     pub language: BTreeMap<String, LanguageOverride>,
+    /// Languages of the user's own, by the name the bottom bar shows.
+    pub syntax: BTreeMap<String, Syntax>,
 }
 
 impl Config {
@@ -387,6 +472,12 @@ impl Config {
                 over.tab_width = over.tab_width.map(|w| w.clamp(1, 16));
                 (name.to_lowercase(), over)
             })
+            .collect();
+        self.syntax = self
+            .syntax
+            .into_iter()
+            .map(|(name, syntax)| (name.trim().to_owned(), syntax.sanitised()))
+            .filter(|(name, _)| !name.is_empty())
             .collect();
         self
     }
@@ -448,6 +539,96 @@ pub fn set(section: &str, key: &str, value: &serde_json::Value) -> Result<Config
     let (text, config) = patched(strip_bom(&text), section, key, value)?;
     std::fs::write(&path, text)?;
     Ok(config)
+}
+
+/// Write, replace or remove a language of the user's own, leaving the rest of
+/// the file as it is. `previous` is the name it had, if it has been renamed;
+/// `syntax` of `None` removes it. Returns the config as it now stands.
+pub fn set_syntax(name: &str, previous: Option<&str>, syntax: Option<&Syntax>) -> Result<Config> {
+    let path = ensure_file()?;
+    let text = std::fs::read_to_string(&path)?;
+    let (text, config) = with_syntax(strip_bom(&text), name, previous, syntax)?;
+    std::fs::write(&path, text)?;
+    Ok(config)
+}
+
+fn with_syntax(
+    text: &str,
+    name: &str,
+    previous: Option<&str>,
+    syntax: Option<&Syntax>,
+) -> Result<(String, Config)> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Other(anyhow::anyhow!("a language needs a name")));
+    }
+
+    let mut doc = text.parse::<DocumentMut>().unwrap_or_else(|_| template());
+    let mut made = syntax.map(|syntax| syntax_table(&syntax.clone().sanitised()));
+    // What the file ends with -- in a new one, the notes on the tables that
+    // can be added -- stays above a table added below it, rather than being
+    // left to read as though it were about the table above.
+    if let Some(made) = &mut made {
+        if let Some(trailing) = doc.trailing().as_str().filter(|t| !t.trim().is_empty()) {
+            made.decor_mut()
+                .set_prefix(format!("{}\n", trailing.trim_end()));
+            doc.set_trailing("");
+        }
+    }
+    let languages = table(&mut doc, "syntax");
+    // Only its languages are written, as `[syntax.Name]`; a bare `[syntax]`
+    // above them would be a heading with nothing under it.
+    languages.set_implicit(true);
+    if let Some(previous) = previous {
+        languages.remove(previous);
+    }
+    languages.remove(name);
+    if let Some(made) = made {
+        languages.insert(name, Item::Table(made));
+    }
+
+    let text = doc.to_string();
+    let config = parse(&text)?;
+    Ok((text, config))
+}
+
+/// A language as a TOML table. What it does not set is left out, so the file
+/// says what the language has rather than everything it could have.
+fn syntax_table(syntax: &Syntax) -> toml_edit::Table {
+    let list = |words: &[String]| {
+        let mut array = toml_edit::Array::new();
+        array.extend(words.iter().map(String::as_str));
+        toml_edit::value(array)
+    };
+
+    let mut table = toml_edit::Table::new();
+    table["extensions"] = list(&syntax.extensions);
+    if !syntax.line_comment.is_empty() {
+        table["line_comment"] = toml_edit::value(syntax.line_comment.as_str());
+    }
+    for (key, words) in [
+        ("block_comment", &syntax.block_comment),
+        ("strings", &syntax.strings),
+        ("keywords", &syntax.keywords),
+        ("types", &syntax.types),
+        ("constants", &syntax.constants),
+        ("functions", &syntax.functions),
+    ] {
+        if !words.is_empty() {
+            table[key] = list(words);
+        }
+    }
+    if !syntax.patterns.is_empty() {
+        let mut patterns = toml_edit::Array::new();
+        for pattern in &syntax.patterns {
+            let mut entry = toml_edit::InlineTable::new();
+            entry.insert("match", pattern.pattern.as_str().into());
+            entry.insert("as", pattern.category.as_str().into());
+            patterns.push(entry);
+        }
+        table["patterns"] = toml_edit::value(patterns);
+    }
+    table
 }
 
 /// `text` with one setting changed, and the config that results.
@@ -844,6 +1025,57 @@ mod tests {
             patched("appearance = 3\n", "appearance", "scale", &json(125.into())).unwrap();
         assert_eq!(config.appearance.scale, 125);
         assert_eq!(parse(&after).unwrap().appearance.scale, 125);
+    }
+
+    fn mylang() -> Syntax {
+        Syntax {
+            extensions: vec![".MY".into(), "myl".into()],
+            line_comment: "#".into(),
+            block_comment: vec!["/*".into(), "*/".into()],
+            strings: vec!["\"".into()],
+            keywords: vec!["if".into(), "else".into(), "if".into()],
+            patterns: vec![SyntaxPattern {
+                pattern: r"@[a-z]+\b".into(),
+                category: "builtin".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_language_is_written_into_the_file_and_read_back() {
+        let (text, config) = with_syntax(TEMPLATE, "Mylang", None, Some(&mylang())).unwrap();
+        assert!(text.contains("[syntax.Mylang]"), "got {text}");
+        assert!(text.contains("# Thread configuration."), "comments kept");
+
+        let stored = &config.syntax["Mylang"];
+        // Tidied on the way in: no dots, lower case, nothing twice.
+        assert_eq!(stored.extensions, ["my", "myl"]);
+        assert_eq!(stored.keywords, ["if", "else"]);
+        assert_eq!(stored.patterns[0].pattern, r"@[a-z]+\b");
+        assert_eq!(parse(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn a_language_can_be_renamed_and_removed() {
+        let (text, _) = with_syntax(TEMPLATE, "Mylang", None, Some(&mylang())).unwrap();
+        let (text, config) = with_syntax(&text, "Other", Some("Mylang"), Some(&mylang())).unwrap();
+        assert_eq!(config.syntax.keys().collect::<Vec<_>>(), ["Other"]);
+
+        let (text, config) = with_syntax(&text, "Other", None, None).unwrap();
+        assert!(config.syntax.is_empty());
+        // Nothing left of it but the example in the template's comments.
+        assert!(!text.contains("\n[syntax"), "got {text}");
+        assert!(with_syntax(&text, "  ", None, Some(&mylang())).is_err());
+    }
+
+    #[test]
+    fn half_a_block_comment_is_none() {
+        let syntax = Syntax {
+            block_comment: vec!["/*".into()],
+            ..Default::default()
+        };
+        assert!(syntax.sanitised().block_comment.is_empty());
     }
 
     #[test]
