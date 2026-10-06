@@ -719,7 +719,7 @@ export class EditorHost {
     const slot = this.panes.get(pane);
     if (slot?.current === key) {
       this.stash(pane);
-      slot.current = null;
+      this.empty(slot);
     }
     states.set(SPARE, states.get(pane)!);
     states.delete(pane);
@@ -728,9 +728,20 @@ export class EditorHost {
     this.scrolls.delete(`${pane}:${key}`);
   }
 
+  /**
+   * Take the file out of a view that is showing it. Done here, at once,
+   * rather than left for the pane to ask for: a pane with nothing else to
+   * show asks for nothing, and would go on showing the file, still editable.
+   */
+  private empty(slot: { view: EditorView; current: number | null }) {
+    slot.current = null;
+    slot.view.setState(this.blank);
+  }
+
   /** Stop tracking a file, in every pane. */
+
   drop(key: number) {
-    for (const slot of this.panes.values()) if (slot.current === key) slot.current = null;
+    for (const slot of this.panes.values()) if (slot.current === key) this.empty(slot);
     for (const pane of this.states.get(key)?.keys() ?? []) this.scrolls.delete(`${pane}:${key}`);
     this.states.delete(key);
     this.saved.delete(key);
