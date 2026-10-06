@@ -167,7 +167,13 @@ const look = EditorView.baseTheme({
   },
   ...Object.fromEntries(
     SEVERITIES.flatMap((severity) => [
-      [`.cm-lens-line-${severity}`, { backgroundColor: COLOURS[severity].line }],
+      // Said twice, the second time for the cursor's line: that one has a
+      // highlight of its own, which would otherwise take the wash's place
+      // just as the message is written out on it.
+      [
+        `.cm-lens-line-${severity}, .cm-activeLine.cm-lens-line-${severity}`,
+        { backgroundColor: COLOURS[severity].line },
+      ],
       [`.cm-lens-line-${severity}::after`, { color: COLOURS[severity].text }],
       [`.cm-lens-range-${severity}`, { textDecorationColor: COLOURS[severity].text }],
     ]),
