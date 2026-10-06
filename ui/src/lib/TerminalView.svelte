@@ -8,7 +8,7 @@
    */
   import { onMount } from "svelte";
 
-  import type { TerminalHandle, TerminalLook } from "./terminal";
+  import type { OpenKind, TerminalHandle, TerminalLook } from "./terminal";
 
   type Props = {
     /** Whether this is the tab being shown. The shell runs either way. */
@@ -22,7 +22,7 @@
     /** The shell ended by itself. */
     onexit: () => void;
     /** The `thread` command was run in it, on a file or a folder. */
-    onopen: (kind: "file" | "dir", path: string) => void;
+    onopen: (kind: OpenKind, path: string) => void;
     oncontext: (event: MouseEvent) => void;
   };
 

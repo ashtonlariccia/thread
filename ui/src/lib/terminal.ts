@@ -27,22 +27,29 @@ export type TerminalOptions = TerminalLook & {
   scrollback: number;
   /** The shell has ended, by `exit` or by dying. Not called after `dispose`. */
   onexit: () => void;
-  /** Something run in the terminal asked for a file or a folder to be opened. */
-  onopen: (kind: "file" | "dir", path: string) => void;
+  /** Something run in the terminal asked for a file or a folder to be opened, or closed. */
+  onopen: (kind: OpenKind, path: string) => void;
 };
 
 /**
+ * What the `thread` command can ask for: a file opened in a tab, a folder
+ * opened in the tree, or whichever of those a path is, closed.
+ */
+export type OpenKind = "file" | "dir" | "close";
+
+/**
  * The escape sequence the `thread` command asks with (`scripts/thread-remote.sh`):
- * `OSC 7717 ; file|dir ; <absolute path> BEL`. A number nothing else uses.
+ * `OSC 7717 ; file|dir|close ; <absolute path> BEL`. A number nothing else uses.
  */
 const OPEN_OSC = 7717;
 
 /** What such a request asks for, or null if it is not one. */
-export function openRequest(data: string): { kind: "file" | "dir"; path: string } | null {
+export function openRequest(data: string): { kind: OpenKind; path: string } | null {
   const cut = data.indexOf(";");
   const kind = data.slice(0, cut);
   const path = data.slice(cut + 1);
-  if (cut === -1 || (kind !== "file" && kind !== "dir") || path === "") return null;
+  if (cut === -1 || path === "") return null;
+  if (kind !== "file" && kind !== "dir" && kind !== "close") return null;
   return { kind, path };
 }
 

@@ -30,6 +30,7 @@
   import { languageOf } from "./lib/languages";
   import { RAIL_WIDTH } from "./lib/layout";
   import type { Direction, Divider, Rect, SavedNode, SplitDir } from "./lib/panes";
+  import type { OpenKind } from "./lib/terminal";
   import { ConfigStore, type Config } from "./lib/state/config.svelte";
   import { Documents } from "./lib/state/documents.svelte";
   import { Layout } from "./lib/state/layout.svelte";
@@ -420,6 +421,23 @@
     delete terminalViews[key];
     // Its pane shows the neighbour that slides into its place.
     layout.drop(key);
+  }
+
+  /**
+   * The `thread` command, run in a terminal: open a file in a tab or a
+   * folder in the tree, or with `-c` close whichever of the two a path is.
+   */
+  function fromTerminal(kind: OpenKind, path: string) {
+    if (kind === "dir") void openFolder(path);
+    else if (kind === "file") void docs.open(path);
+    else {
+      const root = tree.roots.find((each) => samePath(each.path, path));
+      const doc = docs.list.find((each) => each.path !== null && samePath(each.path, path));
+      // A folder goes with the files open from inside it, as it does from
+      // the menu; either way anything unsaved is asked about first.
+      if (root) void closeFolders([root.path]);
+      else if (doc) void docs.close(doc.key);
+    }
   }
 
   function inTerminal(target: EventTarget | null): boolean {
@@ -1564,7 +1582,7 @@
             look={terminalLook}
             scrollback={config.current.terminal.scrollback}
             onexit={() => closeTerminal(terminal.key)}
-            onopen={(kind, path) => void (kind === "dir" ? openFolder(path) : docs.open(path))}
+            onopen={fromTerminal}
             oncontext={(event) => onTerminalContextMenu(event, terminal.key)}
           />
         </div>

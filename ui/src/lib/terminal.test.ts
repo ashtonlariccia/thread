@@ -12,6 +12,7 @@ describe("the thread command's request", () => {
   it("says what to open and where", () => {
     expect(openRequest("file;/home/me/a.c")).toEqual({ kind: "file", path: "/home/me/a.c" });
     expect(openRequest("dir;/srv/my app")).toEqual({ kind: "dir", path: "/srv/my app" });
+    expect(openRequest("close;/srv/my app")).toEqual({ kind: "close", path: "/srv/my app" });
   });
 
   it("keeps a semicolon that is part of the path", () => {
