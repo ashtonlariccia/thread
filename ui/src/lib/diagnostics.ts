@@ -1,15 +1,19 @@
 /**
  * What a language server has to say about a file, drawn where it applies.
  *
- * Each complaint is underlined where it is, and written out at the end of
- * the line it starts on, with the line tinted to match: the reading of a
- * problem without hovering over it or opening a panel, after the VS Code
- * extension Error Lens. One message to a line, the most serious there, cut
- * short if it is long; all of it is in the line's tooltip.
+ * Each complaint is underlined where it is, and its line is tinted and ends
+ * in a dot of the same colour, with how many complaints the line has. Point
+ * at the line and the dot opens into what they say: every one of them, in
+ * full, wrapped to whatever room the window has to the right of the text.
+ * After the VS Code extension Error Lens, less the part where a long message
+ * runs off the side of a small window.
  *
- * The message is not text in the editor. It is drawn by the line's own
- * stylesheet, from an attribute, so there is nothing there for the cursor to
- * be beside, for a selection to take in, or for a copy to pick up.
+ * None of it is text in the editor. The dot and the messages are drawn by
+ * the line's own stylesheet, from attributes, so there is nothing there for
+ * the cursor to be beside, for a selection to take in, or for a copy to pick
+ * up; and the messages are laid over the lines below rather than among them,
+ * so opening them moves nothing. (Which costs the dot while they are open:
+ * a line has the one thing to draw them with.)
  *
  * This only draws. What the complaints are is whoever sets them's business.
  */
@@ -33,14 +37,12 @@ export type Diagnostic = {
 /** Replace everything said about a file. */
 export const setDiagnostics = StateEffect.define<Diagnostic[]>();
 
-/** As much of a message as is written at the end of a line. */
-const LENS_CHARS = 72;
-
-/** A message as it is written out: its first line, and not too much of that. */
-export function lensText(message: string, others: number): string {
-  const first = message.split("\n")[0].trim();
-  const cut = first.length > LENS_CHARS ? `${first.slice(0, LENS_CHARS).trimEnd()}…` : first;
-  return others > 0 ? `${cut}  (+${others})` : cut;
+/** What a line's complaints say, written out: the most serious first, one to a line. */
+export function lensText(all: Diagnostic[]): string {
+  return [...all]
+    .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity))
+    .map((d) => (d.source ? `${d.message.trim()} (${d.source})` : d.message.trim()))
+    .join("\n");
 }
 
 function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
@@ -73,11 +75,7 @@ function build(doc: Text, diagnostics: Diagnostic[]): DecorationSet {
     ...[...lines.values()].map(({ from, worst, all }) =>
       Decoration.line({
         class: `cm-lens-line cm-lens-line-${worst.severity}`,
-        attributes: {
-          "data-lens": lensText(worst.message, all.length - 1),
-          // Everything said about the line, and all of each.
-          title: all.map((d) => (d.source ? `${d.message} — ${d.source}` : d.message)).join("\n\n"),
-        },
+        attributes: { "data-lens": lensText(all), "data-lens-count": String(all.length) },
       }).range(from),
     ),
   ];
@@ -104,12 +102,54 @@ const COLOURS: Record<Severity, string> = {
 };
 
 const look = EditorView.baseTheme({
+  // The dot: how many, in the colour of the worst of them.
   ".cm-lens-line::after": {
+    content: "attr(data-lens-count)",
+    display: "inline-block",
+    boxSizing: "border-box",
+    minWidth: "1.5em",
+    height: "1.5em",
+    marginLeft: "2ch",
+    padding: "0 0.4em",
+    borderRadius: "999px",
+    color: "var(--accent-ink)",
+    fontSize: "0.7em",
+    fontWeight: "700",
+    lineHeight: "1.5em",
+    textAlign: "center",
+    verticalAlign: "middle",
+  },
+  // Pointed at, it is the messages, in a box hung under the line: taken out
+  // of the flow, so it is as tall as it needs to be and nothing moves to
+  // make room for it. It is as wide as what it says, up to the width of the
+  // editor it is in, which is what wraps it to a small window or a narrow
+  // pane. The pointer goes through it, so the lines it lies over can still
+  // be pointed at, and it gives way to theirs.
+  ".cm-scroller": { containerType: "inline-size" },
+  ".cm-lens-line": { position: "relative" },
+  ".cm-lens-line:hover::after": {
     content: "attr(data-lens)",
-    marginLeft: "3ch",
-    fontStyle: "italic",
-    opacity: "0.85",
-    whiteSpace: "pre",
+    position: "absolute",
+    top: "100%",
+    left: "2ch",
+    zIndex: "5",
+    width: "max-content",
+    maxWidth: "calc(100cqw - 9ch)",
+    minWidth: "0",
+    height: "auto",
+    margin: "0",
+    padding: "1px 0.8em",
+    borderRadius: "5px",
+    border: "1px solid",
+    backgroundColor: "var(--bg-menu)",
+    boxShadow: "0 6px 18px #0008",
+    fontSize: "0.9em",
+    fontWeight: "400",
+    lineHeight: "inherit",
+    textAlign: "left",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+    pointerEvents: "none",
   },
   ".cm-lens-range": {
     textDecorationLine: "underline",
@@ -119,7 +159,8 @@ const look = EditorView.baseTheme({
   },
   ...Object.fromEntries(
     SEVERITIES.flatMap((severity) => [
-      [`.cm-lens-line-${severity}::after`, { color: COLOURS[severity] }],
+      [`.cm-lens-line-${severity}::after`, { backgroundColor: COLOURS[severity] }],
+      [`.cm-lens-line-${severity}:hover::after`, { color: COLOURS[severity] }],
       [`.cm-lens-range-${severity}`, { textDecorationColor: COLOURS[severity] }],
       [
         `.cm-lens-line-${severity}`,
@@ -132,7 +173,7 @@ const look = EditorView.baseTheme({
 /** The drawing of diagnostics; nothing shows until some are set. */
 export const diagnostics: Extension = [field, look];
 
-/** For tests: what is drawn in a state, as `[from, to, class, message written out]`. */
+/** For tests: what is drawn in a state, as `[from, to, class, messages written out]`. */
 export function drawn(state: {
   field: (f: typeof field) => DecorationSet;
 }): [number, number, string, string?][] {
