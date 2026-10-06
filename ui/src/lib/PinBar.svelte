@@ -10,15 +10,13 @@
     onunpin: (pin: Pin) => void;
     /** Drop a pin at a new position. `index` counts the reordered strip. */
     onmove: (pin: Pin, index: number) => void;
-    /** Status for the right of the bar. */
+    /** Status for the right-hand end of the bar. */
     info?: Snippet;
-    /** What leads the bar, on its left. */
+    /** What leads the bar, from its left-hand end. */
     start?: Snippet;
-    /** What the box in the middle of the bar holds. */
-    middle?: Snippet;
   };
 
-  let { pins, onopen, onunpin, onmove, info, start, middle }: Props = $props();
+  let { pins, onopen, onunpin, onmove, info, start }: Props = $props();
 
   /**
    * Keep a group of status items to the room it has.
@@ -26,7 +24,7 @@
    * As the window narrows, a group's side of the bar does too, and items that
    * no longer fit are taken out whole, one at a time, in the order their
    * `data-drop` says — lowest first. An item without one is never taken out.
-   * Nothing is ever shown cut in half, and what is left stays centred.
+   * Nothing is ever shown cut in half.
    *
    * Measured rather than done with breakpoints: how wide the items are
    * depends on what they say, and a host or a branch can be any length.
@@ -254,8 +252,7 @@
 <svelte:window onkeydown={onWindowKey} onclick={() => (menu = null)} />
 
 <footer class="pinbar">
-  <!-- Three columns: a box of fixed width dead centre, and to either side of
-       it whatever room is left, with a group centred in each. -->
+  <!-- Two halves: one group from the left edge, the other up to the right. -->
   <div class="side">
     {#if start}
       <div class="start" use:collapsing>{@render start()}</div>
@@ -292,8 +289,6 @@
     {/if}
   </div>
 
-  <div class="middle">{@render middle?.()}</div>
-
   <div class="side">
     {#if info}
       <div class="info" use:collapsing>{@render info()}</div>
@@ -325,9 +320,9 @@
     --pinbar-height: 24px;
 
     display: grid;
-    /* The middle is the width vim's command line has always opened at; the
-       sides share what is left equally, which is what keeps it centred. */
-    grid-template-columns: minmax(0, 1fr) min(320px, 40%) minmax(0, 1fr);
+    /* Half each. A group that has more to say than its half holds gives
+       items up (see `collapsing`) rather than running into the other. */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: stretch;
     height: var(--pinbar-height);
     flex: none;
@@ -345,24 +340,32 @@
     min-width: 0;
   }
 
-  /* Each group is centred in the room its side of the middle box has: where
-     the window is working on the left, and the file's particulars on the
-     right. Set alike, so they read as one strip of status. */
+  /* Each group starts from its own end of the bar: where the window is
+     working on the left, and the file's particulars on the right. Set alike,
+     so they read as one strip of status. */
   .start,
   .info {
     display: flex;
     align-items: center;
-    justify-content: center;
     /* Wide enough that each item is plainly its own, with no rule between. */
     gap: 1.6rem;
     flex: 1;
     min-width: 0;
-    padding: 0 0.8rem;
     overflow: hidden;
     color: var(--fg-dim);
     font-size: 0.71rem;
     white-space: nowrap;
   }
+  .start {
+    justify-content: flex-start;
+    /* The first item starts on the same vertical line as "File" above it. */
+    padding: 0 0.8rem 0 var(--bar-text-inset);
+  }
+  .info {
+    justify-content: flex-end;
+    padding: 0 var(--bar-text-inset) 0 0.8rem;
+  }
+
   /* Whole or not at all: an item keeps its width, and one there is no room
      for is taken out by `collapsing` rather than squeezed. The items belong
      to whoever supplied the snippet, hence `:global`. */
@@ -373,15 +376,6 @@
   .start > :global([data-collapsed]),
   .info > :global([data-collapsed]) {
     display: none;
-  }
-
-  /* The box in the middle. It is the height of a chip and draws nothing of
-     its own: whatever is put in it decides whether it can be seen. */
-  .middle {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    font-size: 0.71rem;
   }
 
   .strip {

@@ -1287,6 +1287,11 @@
              scroll position and its measurements. -->
         <div class="pane" class:hidden={activeTerminal !== null}>
           <Editor host={docs.editor} />
+          <!-- Vim's `:` line, `/` search and messages are put here by
+               `vim.ts`: a strip over the foot of the text, centred, and not
+               there at all while it is empty. Always present, so there is
+               somewhere to put them the moment vim asks. -->
+          <div class="vim-line" data-vim-line bind:this={docs.vimLine}></div>
         </div>
 
         <!-- Each for as long as its tab is open: with the last one goes
@@ -1348,12 +1353,6 @@
       {#if gitBranch}
         <span class="git" title="Git branch" data-drop="4">{gitBranch}</span>
       {/if}
-    {/snippet}
-    {#snippet middle()}
-      <!-- Vim's `:` line, `/` search and messages are put here by `vim.ts`.
-           The box is always present, so there is somewhere to put them the
-           moment vim asks, and cannot be seen until there is something in it. -->
-      <div class="vim-line" data-vim-line bind:this={docs.vimLine}></div>
     {/snippet}
     {#snippet info()}
       <!-- What rarely changes goes first as the window narrows; where the
@@ -1473,33 +1472,40 @@
     }
   }
 
-  /* Vim's command line, in the box in the middle of the bottom bar. It fills
-     the box, and is nothing but its contents: no surface until there is a
-     command in it, and then only a faint one, enough to say where the typing
-     is going. What goes in it is built by the vim extension, not by this
+  /* Vim's command line: a strip over the foot of the text, centred under it
+     and the width it has always opened at. Quiet, since it sits on top of
+     what is being edited: a veil of the window's own dark with the text
+     behind it blurred, a hairline, and no shadow. Not there at all while it
+     is empty. What goes in it is built by the vim extension, not by this
      component, so it is reached with `:global`. */
   .vim-line {
-    flex: 1;
-    min-width: 0;
+    position: absolute;
+    left: 50%;
+    bottom: 10px;
+    z-index: 20;
+    transform: translateX(-50%);
     display: flex;
     align-items: center;
-    height: calc(var(--pinbar-height) - 2 * var(--chip-inset));
-    padding: 0 0.55rem;
-    border-radius: var(--chip-radius);
+    width: min(320px, 80%);
+    padding: 0.3rem 0.65rem;
+    background: rgb(34 34 34 / 0.72);
+    backdrop-filter: blur(10px);
+    border: 1px solid #ffffff12;
+    border-radius: 6px;
     color: var(--fg);
-    transition: background 90ms ease;
+    font-size: 0.78rem;
   }
-  .vim-line:not(:empty) {
-    background: var(--hover);
+  .vim-line:empty {
+    display: none;
   }
-  /* The extension's panel fills the box, so the field in it has the width. */
+  /* The extension's panel fills the strip, so the field in it has the width. */
   .vim-line :global(> *) {
     flex: 1;
     min-width: 0;
     display: flex;
     align-items: center;
   }
-  /* Everything the extension puts in here takes the bar's own font and
+  /* Everything the extension puts in here takes the window's own font and
      colour, over the monospace and the hard red it asks for inline. */
   .vim-line :global(*) {
     color: inherit !important;
@@ -1520,7 +1526,7 @@
     white-space: nowrap;
   }
 
-  /* The left of the bottom bar. Every item is the bar's own text, with
+  /* The left end of the bottom bar. Every item is the bar's own text, with
      nothing drawn round it; the colour is what tells one from the next. */
   .place {
     color: #94e2d5;

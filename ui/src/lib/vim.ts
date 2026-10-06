@@ -27,8 +27,8 @@ export type VimApi = {
   extension: Extension;
   /**
    * Follow whatever is in `view` now: report its mode, and show its command
-   * line and messages in `line()`, a box in the bottom bar, rather than in a
-   * panel under the text. Call
+   * line and messages in `line()`, a strip the window draws over the foot of
+   * the text, rather than in a panel under it. Call
    * again whenever the view is given a different file or its extensions
    * change: the object the events come from is the view's, and may have been
    * replaced.
@@ -47,6 +47,9 @@ function modeOf(change: ModeChange): VimMode {
   if (change.mode === "insert" || change.mode === "replace") return change.mode;
   return change.mode === "visual" ? "visual" : "normal";
 }
+
+/** How long a message from vim stays up if no key is pressed. */
+const MESSAGE_MS = 4000;
 
 let loading: Promise<VimApi> | null = null;
 // The ex commands are defined once, globally, by the extension; they reach
@@ -91,8 +94,24 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
             const host = line();
             if (!host) return;
             const dialog = cm.state.dialog as HTMLElement | null | undefined;
-            if (dialog) host.replaceChildren(dialog);
-            else host.replaceChildren();
+            if (!dialog) {
+              host.replaceChildren();
+              return;
+            }
+            host.replaceChildren(dialog);
+
+            // A prompt goes when it is answered. A message has nothing to
+            // answer: the extension leaves it up until the next prompt, which
+            // was harmless in a panel of its own and is not over the text. So
+            // it goes at the next key, or by itself after a moment.
+            if (dialog.querySelector("input")) return;
+            const dismiss = () => {
+              clearTimeout(timer);
+              view.contentDOM.removeEventListener("keydown", dismiss);
+              if (dialog.parentElement === host) host.replaceChildren();
+            };
+            const timer = setTimeout(dismiss, MESSAGE_MS);
+            view.contentDOM.addEventListener("keydown", dismiss);
           });
         }
         // And where it stands right now, which no event is going to announce.
