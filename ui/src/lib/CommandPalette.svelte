@@ -22,10 +22,14 @@
   type Props = {
     open: boolean;
     commands: Command[];
+    /** How solid it is, in percent: `[palette] background_opacity`. */
+    opacity: number;
+    /** Whether what is behind it is frosted: `[palette] material`. */
+    acrylic: boolean;
     onclose: () => void;
   };
 
-  let { open, commands, onclose }: Props = $props();
+  let { open, commands, opacity, acrylic, onclose }: Props = $props();
 
   let query = $state("");
   let picked = $state(0);
@@ -91,7 +95,13 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="scrim" onmousedown={onclose}>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="palette" onmousedown={(e) => e.stopPropagation()} onkeydown={onKeydown}>
+    <div
+      class="palette"
+      class:acrylic
+      style:--palette-alpha={opacity / 100}
+      onmousedown={(e) => e.stopPropagation()}
+      onkeydown={onKeydown}
+    >
       <input
         type="text"
         bind:this={input}
@@ -140,28 +150,38 @@
     z-index: 1900;
   }
 
-  /* Under the title bar and in the middle, where the eye already is when a
-     key has just been pressed. */
+  /* In the middle of the window. Hung from a fixed point a little above
+     the centre rather than centred on its own height, so the field stays
+     where it is while the list under it grows and shrinks with what is
+     typed. */
   .palette {
     position: absolute;
-    top: 40px;
+    top: max(40px, calc(50% - 13rem));
     left: 50%;
     transform: translateX(-50%);
     width: min(560px, calc(100vw - 3rem));
     display: flex;
     flex-direction: column;
-    background: var(--bg-menu);
+    /* The menus' own colour, as solid as the config says. */
+    background: rgb(42 42 42 / var(--palette-alpha, 1));
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: 0 18px 48px #000c;
     overflow: hidden;
   }
+  /* Frosted: what is behind is blurred to a wash of its colours, which is
+     what keeps the list readable over a screen of code at a low opacity. */
+  .palette.acrylic {
+    backdrop-filter: blur(22px) saturate(1.25);
+  }
 
   input {
     margin: 0.5rem 0.5rem 0.35rem;
     padding: 0.4rem 0.55rem;
-    background: var(--bg-input);
-    border: 1px solid var(--border-input);
+    /* A wash rather than the fields' usual solid: it is part of a panel
+       that is meant to be seen through. */
+    background: #ffffff12;
+    border: 1px solid #ffffff1f;
     border-radius: 5px;
     color: var(--fg);
     font-family: inherit;

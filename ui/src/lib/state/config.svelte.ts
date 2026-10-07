@@ -42,6 +42,8 @@ export type LanguageOverride = { tab_width?: number; insert_spaces?: boolean };
 
 export type Config = {
   appearance: Appearance;
+  /** The command palette: how solid it is, in percent, and whether it frosts what is behind. */
+  palette: { background_opacity: number; material: Material };
   editor: EditorConfig;
   files: { exclude: string[] };
   /** `accent` is the highlight colour, as `#rrggbb`. */
@@ -60,6 +62,7 @@ export type Config = {
 /** Mirrors the Rust defaults, for the frame before the backend has answered. */
 export const DEFAULTS: Config = {
   appearance: { background_opacity: 100, material: "none", scale: 100 },
+  palette: { background_opacity: 35, material: "acrylic" },
   editor: {
     font_family: "'Operator Mono', 'Geist Mono', Consolas, monospace",
     font_size: 14,
@@ -83,7 +86,7 @@ export const DEFAULTS: Config = {
 };
 
 /** The sections whose keys are plain values, settable one at a time. */
-type Settable = "appearance" | "editor" | "files" | "theme" | "vim" | "terminal" | "lsp";
+type Settable = "appearance" | "palette" | "editor" | "files" | "theme" | "vim" | "terminal" | "lsp";
 
 
 export class ConfigStore {
@@ -139,7 +142,7 @@ export class ConfigStore {
   /** Put every setting the dialog shows back to its default. */
 
   async reset() {
-    for (const section of ["appearance", "editor", "files", "theme", "vim"] as const) {
+    for (const section of ["appearance", "palette", "editor", "files", "theme", "vim"] as const) {
       const defaults = DEFAULTS[section] as Record<string, unknown>;
       const current = this.current[section] as Record<string, unknown>;
       for (const key of Object.keys(defaults)) {

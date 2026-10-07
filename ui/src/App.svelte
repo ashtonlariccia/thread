@@ -1464,6 +1464,7 @@
         run: () => void closeFolders(tree.roots.map((root) => root.path)),
       },
       { title: "File: New Window", run: () => void newWindow() },
+      { title: "File: Reload Window", run: () => void refreshPage() },
       { title: "File: Close Window", run: closeWindow },
       { title: "File: Exit", run: () => void quit() },
 
@@ -1817,6 +1818,8 @@
   <CommandPalette
     open={paletteOpen}
     {commands}
+    opacity={config.current.palette.background_opacity}
+    acrylic={config.current.palette.material === "acrylic"}
     onclose={() => {
       paletteOpen = false;
       grabFocus();

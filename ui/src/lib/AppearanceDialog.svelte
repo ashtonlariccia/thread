@@ -165,6 +165,32 @@
         Acrylic — frost whatever is behind the window
       </label>
 
+      <label for="ap-palette">Palette</label>
+      <div class="row">
+        <input
+          id="ap-palette"
+          type="range"
+          min="10"
+          max="100"
+          step="1"
+          value={config.current.palette.background_opacity}
+          oninput={(e) =>
+            void config.set("palette", "background_opacity", Number(e.currentTarget.value))}
+        />
+        <span class="unit pct">{config.current.palette.background_opacity}%</span>
+      </div>
+
+      <span class="label-ish"></span>
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={config.current.palette.material === "acrylic"}
+          onchange={(e) =>
+            void config.set("palette", "material", e.currentTarget.checked ? "acrylic" : "none")}
+        />
+        Acrylic — frost what is behind the command palette
+      </label>
+
       <label for="ap-scale">Scale</label>
       <div class="row">
         <input

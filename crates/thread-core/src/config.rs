@@ -38,6 +38,12 @@ material = "none"
 # Zooms the whole interface and sizes the window to match, in percent: 50 to 200.
 scale = 100
 
+[palette]
+# The command palette (Ctrl+Shift+P). How solid it is, in percent: 10 to 100.
+background_opacity = 35
+# What shows through it: "acrylic" frosts what is behind, "none" leaves it sharp.
+material = "acrylic"
+
 [editor]
 # A CSS font list: the first one installed is used.
 font_family = "'Operator Mono', 'Geist Mono', Consolas, monospace"
@@ -177,6 +183,35 @@ impl Appearance {
     /// The scale as a multiplier, as the webview and the window want it.
     pub fn scale_factor(&self) -> f64 {
         f64::from(self.scale) / 100.0
+    }
+}
+
+/// What the command palette looks like.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Palette {
+    /// Percent. 100 is opaque.
+    pub background_opacity: u8,
+    /// Whether what is behind it is frosted. The page's doing, not the
+    /// window's: it is the editor that is behind a palette, not the desktop.
+    pub material: Material,
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            background_opacity: 35,
+            material: Material::Acrylic,
+        }
+    }
+}
+
+impl Palette {
+    fn sanitised(mut self) -> Self {
+        // Lower than the window's floor: there is always the editor behind
+        // it to read it against, and never nothing.
+        self.background_opacity = self.background_opacity.clamp(10, 100);
+        self
     }
 }
 
@@ -445,6 +480,7 @@ pub struct LanguageOverride {
 #[serde(default)]
 pub struct Config {
     pub appearance: Appearance,
+    pub palette: Palette,
     pub editor: Editor,
     pub files: Files,
     pub theme: Theme,
@@ -460,6 +496,7 @@ pub struct Config {
 impl Config {
     fn sanitised(mut self) -> Self {
         self.appearance = self.appearance.sanitised();
+        self.palette = self.palette.sanitised();
         self.editor = self.editor.sanitised();
         self.theme = self.theme.sanitised();
         self.terminal = self.terminal.sanitised();

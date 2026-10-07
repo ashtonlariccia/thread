@@ -19,6 +19,8 @@ function open() {
     target,
     props: {
       open: true,
+      opacity: 35,
+      acrylic: true,
       commands: [
         command("File: New File", { keys: "Ctrl+N" }),
         command("File: Save", { disabled: true }),
