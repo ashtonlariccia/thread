@@ -17,6 +17,8 @@
    * list to type into. Ctrl+Shift+P opens it; what is typed narrows it,
    * loosely (`nt` finds New Terminal); Enter runs the one picked out.
    */
+  import { cubicOut } from "svelte/easing";
+
   import { rank } from "./fuzzy";
 
   type Props = {
@@ -76,6 +78,22 @@
     event.stopPropagation();
   }
 
+  /**
+   * How it comes and goes: faded, and risen a few pixels into place. On the
+   * panel itself and not on what is round it, because the panel is what
+   * frosts what is behind, and that only fades with it if it is the thing
+   * fading. Not at all for someone who has asked for less motion.
+   */
+  function appear(_node: Element, { duration }: { duration: number }) {
+    const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    return {
+      duration: still ? 0 : duration,
+      easing: cubicOut,
+      // The sideways half is what centres it, and has to stay.
+      css: (t: number) => `opacity: ${t}; transform: translate(-50%, ${(t - 1) * 6}px)`,
+    };
+  }
+
   /** A title in pieces, the letters that were matched set apart from the rest. */
   function pieces(title: string, at: number[]): { text: string; hit: boolean }[] {
     const hits = new Set(at);
@@ -99,6 +117,8 @@
       class="palette"
       class:acrylic
       style:--palette-alpha={opacity / 100}
+      in:appear={{ duration: 130 }}
+      out:appear={{ duration: 100 }}
       onmousedown={(e) => e.stopPropagation()}
       onkeydown={onKeydown}
     >
