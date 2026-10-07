@@ -922,6 +922,8 @@ impl Terminals {
 
 /// Start a terminal for this window, in `cwd`. Output arrives on `on_output`
 /// as raw bytes; `on_exit` hears once, when the shell has ended.
+// One argument for each thing the page sends, which is how a command takes them.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn terminal_open(
     app: AppHandle,
@@ -929,6 +931,7 @@ pub async fn terminal_open(
     on_output: Channel<InvokeResponseBody>,
     on_exit: Channel<()>,
     cwd: Option<String>,
+    shell: Option<String>,
     cols: u16,
     rows: u16,
 ) -> Result<u64, String> {
@@ -962,7 +965,8 @@ pub async fn terminal_open(
         ),
         None => {
             let options = terminal::Options {
-                shell: stored_config().terminal.shell,
+                // The one asked for, where one was: otherwise the config's.
+                shell: shell.unwrap_or_else(|| stored_config().terminal.shell),
                 cwd: cwd.map(Into::into),
                 cols,
                 rows,
@@ -976,6 +980,39 @@ pub async fn terminal_open(
         open.insert(id, (label, spawned));
     }
     Ok(id)
+}
+
+/// The shells installed on this machine, to open a terminal with. A window
+/// on a remote has the remote's own login shell and nothing to choose from.
+#[tauri::command]
+pub async fn terminal_shells(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<Vec<terminal::Shell>, String> {
+    Ok(match remotes.of(&window) {
+        Some(_) => Vec::new(),
+        // Off the main thread: it runs `wsl.exe` to ask what there is.
+        None => terminal::shells(),
+    })
+}
+
+/// Open a web address in the browser. For links clicked in a terminal, so
+/// only what is plainly a web address: this is not a way to run things.
+#[tauri::command]
+pub fn open_external(url: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    if !web || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!("{url} is not a web address"));
+    }
+    std::process::Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("could not open {url}: {e}"))
 }
 
 // Not `async`, unlike the rest: these run in the order they were sent, which

@@ -79,6 +79,105 @@ pub fn default_shell() -> String {
         .unwrap_or_else(|| system.join("cmd.exe").display().to_string())
 }
 
+/// A shell there is to run: what to call it, and the command line that runs it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Shell {
+    pub name: String,
+    pub command: String,
+}
+
+/// The shells installed on this machine, for choosing between: both
+/// PowerShells, the command prompt, Git's bash, and each WSL distribution.
+pub fn shells() -> Vec<Shell> {
+    let dir = |var: &str, fallback: &str| {
+        std::env::var_os(var)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(fallback))
+    };
+    let system = dir("SystemRoot", r"C:\Windows").join("System32");
+    let programs = dir("ProgramFiles", r"C:\Program Files");
+    let quoted = |path: &Path, rest: &str| format!("\"{}\"{rest}", path.display());
+
+    let pwsh = std::iter::once(programs.join(r"PowerShell\7\pwsh.exe"))
+        .chain(crate::lsp::locate("pwsh"))
+        .find(|candidate| candidate.is_file());
+    let candidates = [
+        ("PowerShell", pwsh, " -NoLogo"),
+        (
+            "Windows PowerShell",
+            Some(system.join(r"WindowsPowerShell\v1.0\powershell.exe")),
+            " -NoLogo",
+        ),
+        ("Command Prompt", Some(system.join("cmd.exe")), ""),
+        (
+            "Git Bash",
+            Some(programs.join(r"Git\bin\bash.exe")),
+            " --login -i",
+        ),
+    ];
+
+    let mut found: Vec<Shell> = candidates
+        .into_iter()
+        .filter_map(|(name, path, rest)| {
+            let path = path.filter(|path| path.is_file())?;
+            Some(Shell {
+                name: name.into(),
+                command: quoted(&path, rest),
+            })
+        })
+        .collect();
+
+    let wsl = system.join("wsl.exe");
+    if wsl.is_file() {
+        found.extend(distributions(&wsl).into_iter().map(|distro| Shell {
+            command: quoted(&wsl, &format!(" -d {distro}")),
+            name: format!("WSL: {distro}"),
+        }));
+    }
+    found
+}
+
+/// The WSL distributions installed, as `wsl.exe` lists them.
+fn distributions(wsl: &Path) -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    /// No console window for the moment it takes to ask.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let Ok(output) = std::process::Command::new(wsl)
+        .args(["--list", "--quiet"])
+        .stdin(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    distribution_names(&output.stdout)
+}
+
+/// The names in what `wsl.exe --list --quiet` prints, which is UTF-16: one
+/// to a line. Names with anything in them a command line would trip on are
+/// left out rather than quoted and hoped for.
+fn distribution_names(listing: &[u8]) -> Vec<String> {
+    let units: Vec<u16> = listing
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
+        .lines()
+        .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\0'))
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
 /// A shell on this machine, behind a pseudoconsole.
 pub struct LocalTerminal {
     console: Arc<Console>,
@@ -530,6 +629,30 @@ mod tests {
     #[test]
     fn a_folder_that_has_gone_falls_back_to_one_that_exists() {
         assert!(start_dir(Some(Path::new(r"Z:\no\such\folder"))).is_dir());
+    }
+
+    #[test]
+    fn distributions_are_read_out_of_utf16_and_odd_names_left_out() {
+        let listing: Vec<u8> = "Void\r\nmain\r\n\r\nodd name\r\nUbuntu-24.04\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            distribution_names(&listing),
+            ["Void", "main", "Ubuntu-24.04"]
+        );
+    }
+
+    #[test]
+    fn the_shells_there_are_to_choose_from_are_all_installed() {
+        let found = shells();
+        // Every Windows has these two.
+        assert!(found.iter().any(|shell| shell.name == "Command Prompt"));
+        assert!(found.iter().any(|shell| shell.name == "Windows PowerShell"));
+        for shell in &found {
+            let program = shell.command.split('"').nth(1).expect("a quoted path");
+            assert!(Path::new(program).is_file(), "{} is not there", shell.name);
+        }
     }
 
     #[test]

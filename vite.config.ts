@@ -5,6 +5,10 @@ export default defineConfig({
   root: "ui",
   plugins: [svelte()],
 
+  // Under test, Svelte's own choice of build is the server's, which cannot
+  // mount a component. The tests that mount one give themselves a DOM.
+  resolve: process.env.VITEST ? { conditions: ["browser"] } : undefined,
+
   // Tauri owns the terminal output; don't let Vite wipe it.
   clearScreen: false,
 

@@ -346,6 +346,17 @@ export class Documents {
   }
 
   /**
+   * Open a file and put the cursor at a line of it, and a column if one is
+   * given: where a compiler said to look. A file that is not there is
+   * passed over quietly, the path having come from text that only looked
+   * like one.
+   */
+  async openAt(path: string, line?: number, col?: number) {
+    const key = await this.open(path, { quiet: true });
+    if (key !== null && line !== undefined) this.editor.goto(this.panes.focused, key, line, col);
+  }
+
+  /**
    * Write a file where it already lives; a file that lives nowhere yet is
    * asked where to go. Returns whether it was saved.
    */

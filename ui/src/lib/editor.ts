@@ -971,6 +971,39 @@ export class EditorHost {
     this.events.onchange(key);
   }
 
+  /**
+   * Put the cursor at a line and column of a file, both counted from one,
+   * in the pane that has it or is about to be shown it, and have that place
+   * in the middle of the pane when it is. A place the file does not have is
+   * the nearest one it does.
+   */
+  goto(pane: number, key: number, line: number, col = 1) {
+    const states = this.states.get(key);
+    if (!states) return;
+    const place = (state: EditorState) => {
+      const at = state.doc.line(Math.min(Math.max(1, line), state.doc.lines));
+      return at.from + Math.min(Math.max(0, col - 1), at.length);
+    };
+
+    const slot = this.panes.get(pane);
+    if (slot?.current === key) {
+      const at = place(slot.view.state);
+      slot.view.dispatch({
+        selection: { anchor: at },
+        effects: EditorView.scrollIntoView(at, { y: "center" }),
+      });
+      return;
+    }
+    // Not on screen there yet: its own state of the file, or the spare
+    // one it will take up, is told where to be when it is.
+    const id = states.has(pane) ? pane : states.has(SPARE) ? SPARE : null;
+    if (id === null) return;
+    const state = states.get(id)!;
+    const at = place(state);
+    states.set(id, state.update({ selection: { anchor: at } }).state);
+    this.scrolls.set(`${id}:${key}`, EditorView.scrollIntoView(at, { y: "center" }));
+  }
+
   /** The view the keyboard is in, if it is in one. */
   private focusedView(): EditorView | null {
     for (const slot of this.panes.values()) if (slot.view.hasFocus) return slot.view;

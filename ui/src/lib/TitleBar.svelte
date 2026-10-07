@@ -25,6 +25,12 @@
     ontogglesidebar: () => void;
     /** Terminal -> New Terminal: a shell in a tab of its own. */
     onnewterminal: () => void;
+    /** The shells there are to open one with, by name; none on a remote. */
+    shells: string[];
+    /** Terminal -> one of those shells, by its place in the list. */
+    onnewterminalin: (index: number) => void;
+    /** Edit -> Command Palette. */
+    onpalette: () => void;
     /** Whether the window is on this machine, or on a remote. */
     remoteStatus: RemoteStatus;
     /** The saved connections, for Remote -> Connect Known. */
@@ -61,6 +67,9 @@
     sidebarCollapsed,
     ontogglesidebar,
     onnewterminal,
+    shells,
+    onnewterminalin,
+    onpalette,
     remoteStatus,
     known,
     onconnect,
@@ -266,6 +275,13 @@
           </button>
           <button class="menu-item" role="menuitem" onclick={() => run(onlsp)}>LSPs…</button>
 
+          <div class="sep"></div>
+
+          <button class="menu-item" role="menuitem" onclick={() => run(onpalette)}>
+            <span>Command Palette…</span>
+            <span class="hint">Ctrl+Shift+P</span>
+          </button>
+
         </div>
       {/if}
     </div>
@@ -287,6 +303,16 @@
             <span>New Terminal</span>
             <span class="hint">Ctrl+Shift+`</span>
           </button>
+
+          <!-- One in a shell other than the usual: whichever are installed. -->
+          {#if shells.length > 0}
+            <div class="sep"></div>
+            {#each shells as shell, index (shell)}
+              <button class="menu-item" role="menuitem" onclick={() => run(() => onnewterminalin(index))}>
+                New {shell}
+              </button>
+            {/each}
+          {/if}
         </div>
       {/if}
     </div>

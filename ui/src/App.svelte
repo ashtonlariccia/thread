@@ -7,6 +7,7 @@
 
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
   import ChangedDialog from "./lib/ChangedDialog.svelte";
+  import CommandPalette, { type Command } from "./lib/CommandPalette.svelte";
   import ConfirmDialog, { type Confirmation } from "./lib/ConfirmDialog.svelte";
   import ConnectDialog from "./lib/ConnectDialog.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
@@ -30,6 +31,7 @@
   import { languageOf } from "./lib/languages";
   import { RAIL_WIDTH } from "./lib/layout";
   import type { Direction, Divider, Rect, SavedNode, SplitDir } from "./lib/panes";
+  import { resolveLink, type Link } from "./lib/links";
   import type { OpenKind } from "./lib/terminal";
   import { ConfigStore, type Config } from "./lib/state/config.svelte";
   import { Documents } from "./lib/state/documents.svelte";
@@ -71,6 +73,7 @@
 
   let appearanceOpen = $state(false);
   let lspOpen = $state(false);
+  let paletteOpen = $state(false);
 
   // --- sidebar ----------------------------------------------------------------
   //
@@ -320,7 +323,14 @@
     name: string;
     /** Where the shell was started, fixed for as long as it lives. */
     cwd: string | null;
+    /** The command line of the shell it runs; null for the one the config names. */
+    shell: string | null;
   };
+
+  /** A shell there is to open a terminal with, as the backend lists them. */
+  type Shell = { name: string; command: string };
+  /** The shells installed where the window is working; none on a remote. */
+  let shells = $state.raw<Shell[]>([]);
 
   let terminals = $state<TerminalTab[]>([]);
   /** Each open terminal's view, by key, for the menus to act on. */
@@ -377,23 +387,48 @@
     return holding ?? roots[0] ?? (file ? dirName(file) : null);
   }
 
-  /** Start a terminal, as a tab that is not yet in any pane. */
-  function makeTerminal(): number {
+  /**
+   * Start a terminal, as a tab that is not yet in any pane. In the shell
+   * given, and named for it; with none, the config's.
+   */
+  function makeTerminal(shell?: Shell): number {
     // Numbered from the top again once the last one has gone.
     if (terminals.length === 0) nextTerminalNumber = 1;
     const number = nextTerminalNumber++;
     const key = nextTerminalKey--;
     terminals.push({
       key,
-      name: number === 1 ? "Terminal" : `Terminal ${number}`,
+      name: shell?.name ?? (number === 1 ? "Terminal" : `Terminal ${number}`),
       cwd: terminalDir(),
+      shell: shell?.command ?? null,
     });
     return key;
   }
 
   /** Terminal → New Terminal: in the pane the keyboard is in. */
-  function newTerminal() {
-    layout.open(makeTerminal());
+  function newTerminal(shell?: Shell) {
+    layout.open(makeTerminal(shell));
+  }
+
+  /**
+   * A path or a web address in a terminal's output was Ctrl+clicked. A
+   * path is opened, at the line it names if it names one; an address goes
+   * to the browser.
+   */
+  function followLink(link: Link, cwd: string | null) {
+    if ("url" in link) {
+      invoke("open_external", { url: link.url }).catch((e) =>
+        message(String(e), { title: "Thread", kind: "error" }),
+      );
+    } else void docs.openAt(resolveLink(link.path, cwd), link.line, link.col);
+  }
+
+  /** Put the keyboard back in whatever the focused pane is showing. */
+  function grabFocus() {
+    const active = layout.current.active;
+    if (active === null) return;
+    if (isTerminal(active)) terminalViews[active]?.focus();
+    else docs.editor.focus(layout.focused);
   }
 
   /** Ctrl+`: to the terminal and back, opening one if there is none. */
@@ -1144,6 +1179,7 @@
       docs.busy ||
       appearanceOpen ||
       lspOpen ||
+      paletteOpen ||
       question !== null ||
       connectOpen ||
       browse !== null ||
@@ -1191,6 +1227,14 @@
     }
 
     const key = event.key.toLowerCase();
+    // Ctrl+Shift+P is the command palette, from anywhere: no shell has a
+    // use for it.
+    if (key === "p" && event.shiftKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!blocked && !event.repeat) paletteOpen = true;
+      return;
+    }
     // Typed into a terminal, the rest belong to the shell: Ctrl+W there
     // deletes a word, and must not close the tab. Ctrl+Tab is the exception,
     // being the way out to the other tabs.
@@ -1372,12 +1416,101 @@
     untrack(() => lsp.sync());
   });
 
-  // Which servers there are is a fact about a machine: asked when the
-  // window comes up, and again each time it lands on another one.
+  // Which servers there are, and which shells, are facts about a machine:
+  // asked when the window comes up, and again each time it lands on
+  // another one.
   $effect(() => {
     if (remote.status === "local" || remote.status === "connected") {
       untrack(() => void lsp.refresh());
+      void invoke<Shell[]>("terminal_shells").then(
+        (found) => (shells = found),
+        () => (shells = []),
+      );
     }
+  });
+
+  // --- the command palette ---------------------------------------------------------
+  //
+  // Everything the menus and the keys do, and the settings that are a
+  // switch, as one list. Made each time it is looked at, so what is not
+  // possible just now is listed as such.
+
+  /** A switch in `[editor]`, as the palette words turning it on and off. */
+  const SWITCHES = [
+    ["word_wrap", "Word Wrap"],
+    ["line_numbers", "Line Numbers"],
+    ["relative_line_numbers", "Relative Line Numbers"],
+    ["auto_close", "Bracket Closing"],
+    ["smooth_caret", "Smooth Caret"],
+    ["detect_indentation", "Indentation Detection"],
+  ] as const;
+
+  const commands = $derived.by((): Command[] => {
+    const panes = layout.leaves.length;
+    const on = (is: boolean) => (is ? "Off" : "On");
+    const connected = remote.status === "connected" || remote.status === "lost";
+    return [
+      { title: "File: New File", keys: "Ctrl+N", run: () => docs.newFile() },
+      { title: "File: Open File…", keys: "Ctrl+O", run: () => void docs.openDialog() },
+      { title: "File: Open Folder…", keys: "Ctrl+Shift+O", run: () => void openFolder() },
+      { title: "File: Save", keys: "Ctrl+S", disabled: !showingFile, run: () => void docs.save() },
+      { title: "File: Save As…", keys: "Ctrl+Shift+S", disabled: !showingFile, run: () => void docs.saveAs() },
+      { title: "File: Save All", disabled: docs.dirty.length === 0, run: () => void docs.saveAll() },
+      { title: "File: Close Tab", keys: "Ctrl+W", disabled: layout.current.active === null, run: () => closeTab() },
+      { title: "File: Close All Files", disabled: docs.list.length === 0, run: () => void docs.closeAll() },
+      {
+        title: tree.roots.length > 1 ? "File: Close All Folders" : "File: Close Folder",
+        disabled: tree.roots.length === 0,
+        run: () => void closeFolders(tree.roots.map((root) => root.path)),
+      },
+      { title: "File: New Window", run: () => void newWindow() },
+      { title: "File: Close Window", run: closeWindow },
+      { title: "File: Exit", run: () => void quit() },
+
+      { title: "View: Toggle Sidebar", run: () => (sidebarCollapsed = !sidebarCollapsed) },
+      { title: "View: Split Right", disabled: layout.current.active === null, run: () => splitPane("row") },
+      { title: "View: Split Down", disabled: layout.current.active === null, run: () => splitPane("column") },
+      { title: "View: Close Pane", disabled: panes < 2, run: () => closePane(layout.focused) },
+      { title: "View: Close Other Panes", disabled: panes < 2, run: onlyPane },
+      { title: "View: Focus Next Pane", keys: "F6", disabled: panes < 2, run: () => layout.focusNext(1) },
+
+      { title: "Terminal: New Terminal", keys: "Ctrl+Shift+`", run: () => newTerminal() },
+      { title: "Terminal: Toggle Terminal", keys: "Ctrl+`", run: toggleTerminal },
+      ...shells.map((shell) => ({
+        title: `Terminal: New ${shell.name}`,
+        run: () => newTerminal(shell),
+      })),
+      {
+        title: "Terminal: Find in Terminal",
+        keys: "Ctrl+Shift+F",
+        disabled: activeTerminal === null,
+        run: () => activeTerminal !== null && terminalViews[activeTerminal]?.find(),
+      },
+
+      { title: "Remote: Connect…", disabled: remote.status !== "local", run: openConnect },
+      ...remote.known.map((known) => ({
+        title: `Remote: Connect to ${connectionLabel(known)}`,
+        disabled: remote.status !== "local",
+        run: () => void connectKnown(known.id),
+      })),
+      { title: "Remote: Disconnect", disabled: !connected, run: () => void disconnect() },
+      { title: "Remote: Reconnect", disabled: remote.status !== "lost", run: () => void reconnect() },
+
+      { title: "Settings: Appearance…", run: () => (appearanceOpen = true) },
+      { title: "Settings: Languages and Language Servers…", run: () => (lspOpen = true) },
+      {
+        title: "Settings: Open Config File",
+        run: () => void invoke("open_config").catch((e) => console.error("open_config failed", e)),
+      },
+      {
+        title: `Settings: Turn Vim Motions ${on(config.current.vim.enabled)}`,
+        run: () => void config.set("vim", "enabled", !config.current.vim.enabled),
+      },
+      ...SWITCHES.map(([key, name]) => ({
+        title: `Settings: Turn ${name} ${on(config.current.editor[key])}`,
+        run: () => void config.set("editor", key, !config.current.editor[key]),
+      })),
+    ];
   });
 
   /** A new config has arrived, from this window's dialog, another's, or the file. */
@@ -1502,7 +1635,10 @@
     onclosefile={() => closeTab()}
     {sidebarCollapsed}
     ontogglesidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
-    onnewterminal={newTerminal}
+    onnewterminal={() => newTerminal()}
+    shells={shells.map((shell) => shell.name)}
+    onnewterminalin={(index) => newTerminal(shells[index])}
+    onpalette={() => (paletteOpen = true)}
     remoteStatus={remote.status}
     known={remote.known}
     onconnect={openConnect}
@@ -1587,10 +1723,12 @@
             active={front}
             focused={front && layout.focused === leaf?.id}
             cwd={terminal.cwd}
+            shell={terminal.shell}
             look={terminalLook}
             scrollback={config.current.terminal.scrollback}
             onexit={() => closeTerminal(terminal.key)}
             onopen={fromTerminal}
+            onlink={(link) => followLink(link, terminal.cwd)}
             oncontext={(event) => onTerminalContextMenu(event, terminal.key)}
           />
         </div>
@@ -1675,6 +1813,15 @@
       {/if}
     {/snippet}
   </PinBar>
+
+  <CommandPalette
+    open={paletteOpen}
+    {commands}
+    onclose={() => {
+      paletteOpen = false;
+      grabFocus();
+    }}
+  />
 
   <AppearanceDialog
     open={appearanceOpen}

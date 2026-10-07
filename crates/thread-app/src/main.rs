@@ -178,6 +178,8 @@ fn main() {
             commands::terminal_write,
             commands::terminal_resize,
             commands::terminal_close,
+            commands::terminal_shells,
+            commands::open_external,
             commands::lsp_catalog,
             commands::lsp_start,
             commands::lsp_send,
