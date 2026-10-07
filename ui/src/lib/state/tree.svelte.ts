@@ -133,6 +133,14 @@ export class Tree {
     else await this.expand(path);
   }
 
+  /** Fold a folder away, and what is unfolded inside it with it. An opened folder stays. */
+  fold(path: string) {
+    for (const open of Object.keys(this.#open)) {
+      const inside = samePath(open, path) || segmentsBelow(path, open) !== null;
+      if (inside && !this.#isRoot(open)) this.#open[open] = false;
+    }
+  }
+
   /** Unfold a folder, listing it afresh: it was not being watched while folded. */
   async expand(path: string) {
     this.#open[path] = true;

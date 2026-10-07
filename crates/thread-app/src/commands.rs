@@ -246,6 +246,31 @@ pub async fn read_dir(
     .map_err(|e| e.to_string())
 }
 
+/// Where each path really is, with any links in it followed, in order;
+/// `None` for one that is not there. For telling whether two spellings are
+/// the one place.
+#[tauri::command]
+pub async fn real_paths(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    paths: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
+    let mut real = Vec::with_capacity(paths.len());
+    match remotes.of(&window) {
+        Some(link) => {
+            for path in &paths {
+                real.push(link.remote.resolve(path).await.ok());
+            }
+        }
+        None => real.extend(paths.iter().map(|path| {
+            std::fs::canonicalize(path)
+                .ok()
+                .map(|found| found.display().to_string())
+        })),
+    }
+    Ok(real)
+}
+
 /// When each folder's contents last changed, in order; `None` where it is gone.
 ///
 /// Polled for the folders the tree has unfolded, the same way `file_stamps` is

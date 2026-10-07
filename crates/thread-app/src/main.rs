@@ -156,6 +156,7 @@ fn main() {
             commands::file_stamps,
             commands::read_dir,
             commands::dir_stamps,
+            commands::real_paths,
             commands::create_file,
             commands::create_dir,
             commands::rename_path,

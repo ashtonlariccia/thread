@@ -465,13 +465,47 @@
   function fromTerminal(kind: OpenKind, path: string) {
     if (kind === "dir") void openFolder(path);
     else if (kind === "file") void docs.open(path);
-    else {
-      const root = tree.roots.find((each) => samePath(each.path, path));
-      const doc = docs.list.find((each) => each.path !== null && samePath(each.path, path));
-      // A folder goes with the files open from inside it, as it does from
-      // the menu; either way anything unsaved is asked about first.
-      if (root) void closeFolders([root.path]);
-      else if (doc) void docs.close(doc.key);
+    else void closeFromTerminal(path);
+  }
+
+  /**
+   * `thread -c`: close whatever a path is. An open folder, with the files
+   * open from inside it, as from the menu; a file's tab; or a folder inside
+   * an open one, which is its files' tabs closed and the folder folded away.
+   * Anything unsaved is asked about first, whichever it is.
+   */
+  async function closeFromTerminal(path: string) {
+    const roots = tree.roots.map((root) => root.path);
+    const files = docs.list.flatMap((doc) => (doc.path === null ? [] : [doc.path]));
+    let root = roots.find((each) => samePath(each, path));
+    let file = files.find((each) => samePath(each, path));
+
+    if (root === undefined && file === undefined) {
+      // Not open under that spelling. The command gives a path with its
+      // links followed, and a folder reached through one is open under the
+      // other name: ask where each really is, and compare those.
+      const open = [...roots, ...files];
+      const real = await invoke<(string | null)[]>("real_paths", { paths: [path, ...open] }).catch(
+        () => [] as (string | null)[],
+      );
+      const wanted = real[0] ?? null;
+      const at = wanted === null ? -1 : real.slice(1).findIndex((each) => each !== null && samePath(each, wanted));
+      if (at !== -1 && at < roots.length) root = open[at];
+      else if (at !== -1) file = open[at];
+    }
+
+    if (root !== undefined) {
+      await closeFolders([root]);
+      return;
+    }
+    const doc = file === undefined ? undefined : docs.list.find((each) => each.path === file);
+    if (doc) {
+      await docs.close(doc.key);
+      return;
+    }
+    const under = (each: string) => segmentsBelow(path, each) !== null;
+    if (roots.some((each) => segmentsBelow(each, path) !== null) && (await docs.closeWhere(under))) {
+      tree.fold(path);
     }
   }
 
