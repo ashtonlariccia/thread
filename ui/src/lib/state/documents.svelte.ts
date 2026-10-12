@@ -222,6 +222,7 @@ export class Documents {
       quitAll: (force) => this.vimHooks?.quitAll(force),
       writeAll: () => this.vimHooks?.writeAll(),
       writeQuitAll: () => this.vimHooks?.writeQuitAll(),
+      terminal: () => this.vimHooks?.terminal(),
       undo: (view) => void this.editor.travelIn(view, "undo"),
       redo: (view) => void this.editor.travelIn(view, "redo"),
     })

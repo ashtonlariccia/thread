@@ -45,6 +45,8 @@ export type VimHooks = {
   writeAll: () => void;
   /** `:wqa` and `:xa`: save every file, and close them all if they all saved. */
   writeQuitAll: () => void;
+  /** `:term`: a terminal, in a new tab of the pane it was typed in. */
+  terminal: () => void;
   /**
    * `u` and Ctrl+R, in the editor they were pressed in. The history is the
    * file's and not that editor's, so the extension's own way of undoing,
@@ -120,6 +122,11 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
     Vim.defineEx("xit", "x", later(() => hooks?.writeQuit()));
     Vim.defineEx("bnext", "bn", later(() => hooks?.cycle(1)));
     Vim.defineEx("bprevious", "bp", later(() => hooks?.cycle(-1)));
+    // `gt` and `gT`, which are vim's own keys for the same.
+    Vim.defineAction("threadTabNext", later(() => hooks?.cycle(1)));
+    Vim.defineAction("threadTabPrevious", later(() => hooks?.cycle(-1)));
+    Vim.mapCommand("gt", "action", "threadTabNext", {}, { context: "normal" });
+    Vim.mapCommand("gT", "action", "threadTabPrevious", {}, { context: "normal" });
 
     // Windows, which here are panes. `:sp` is a split with one pane above
     // the other, and `:vsp` one with them side by side.
@@ -147,6 +154,8 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
     Vim.defineEx("wall", "wa", later(() => hooks?.writeAll()));
     Vim.defineEx("wqall", "wqa", later(() => hooks?.writeQuitAll()));
     Vim.defineEx("xall", "xa", later(() => hooks?.writeQuitAll()));
+
+    Vim.defineEx("terminal", "ter", later(() => hooks?.terminal()));
 
     const watched = new WeakSet<object>();
     return {

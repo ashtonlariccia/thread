@@ -1182,6 +1182,7 @@
       void docs.saveAll().then((saved) => {
         if (saved) void docs.closeAll();
       }),
+    terminal: () => newTerminal(),
   };
 
   // --- the stage ------------------------------------------------------------------
@@ -1255,8 +1256,9 @@
     void appWindow.close();
   }
 
-  // There is one hotkey, Ctrl+Shift+P for the command list: everything else
-  // is done from that, the menus and vim's own command line. The webview has a browser's worth of
+  // There are two hotkeys, Ctrl+Shift+P for the command list and Ctrl+Tab
+  // to step through a pane's tabs: everything else is done from the list,
+  // the menus and vim's own command line. The webview has a browser's worth of
   // its own (Ctrl+P prints, F5 reloads, Ctrl+F searches the page), and those
   // are stopped here. What is left alone is typing: the clipboard, undo,
   // moving by word, and whatever the editor or a shell makes of a key.
@@ -1283,8 +1285,10 @@
   // are asked first, vim and a shell having uses of their own for Ctrl, and
   // are caught on the way back up with whatever they made nothing of.
   function onKeydownCapture(event: KeyboardEvent) {
-    // From anywhere, a terminal included: no shell has a use for it.
-    if (event.ctrlKey && event.shiftKey && !event.altKey && event.key.toLowerCase() === "p") {
+    // From anywhere, a terminal included: no shell has a use for either.
+    const key = event.key.toLowerCase();
+    const palette = key === "p" && event.shiftKey;
+    if (event.ctrlKey && !event.altKey && (palette || key === "tab")) {
       event.preventDefault();
       event.stopPropagation();
       // Not over a dialog: the window behind one is not taking commands.
@@ -1296,7 +1300,11 @@
         connectOpen ||
         browse !== null ||
         remote.status === "connecting";
-      if (!blocked && !event.repeat) paletteOpen = true;
+      if (blocked) return;
+      // Held down, Ctrl+Tab runs along the strip; the list opens the once.
+      if (!palette) {
+        if (!paletteOpen) cycleTabs(event.shiftKey ? -1 : 1);
+      } else if (!event.repeat) paletteOpen = true;
       return;
     }
     const typedInto =
@@ -1857,36 +1865,36 @@
         </svg>
         <span class="who">{where.user}{where.user && where.host ? "@" : ""}{where.host}</span>
       </span>
-      {#if git}
-        <span class="git" title="Git branch" data-drop="6">{git.branch}</span>
-        {#if git.conflicts > 0}
-          <span class="fault" title="Files left in conflict by a merge" data-drop="5">
-            {git.conflicts} conflicted
-          </span>
-        {/if}
-        {#if git.unstaged > 0}
-          <span title="Files with changes that are not staged" data-drop="4">
-            {git.unstaged} unstaged
-          </span>
-        {/if}
-        {#if git.staged > 0}
-          <span title="Files with changes staged for the next commit" data-drop="3">
-            {git.staged} staged
-          </span>
-        {/if}
-        {#if git.untracked > 0}
-          <span title="Files git has not been told of" data-drop="1">
-            {git.untracked} untracked
-          </span>
-        {/if}
-        {#if git.ahead > 0 || git.behind > 0}
-          <span title="Commits not yet pushed, and commits not yet pulled" data-drop="2">
-            ↑{git.ahead} ↓{git.behind}
-          </span>
-        {:else if git.counted && !git.upstream}
-          <span title="This branch has not been pushed anywhere" data-drop="2">unpublished</span>
-        {/if}
+      <!-- Always all of it, at nought where there is nothing to count or
+           no repository to count in, so the bar keeps its shape. -->
+      <span class="git" title="Git branch" data-drop="6">
+        {git?.branch ?? "no git"}
+      </span>
+      {#if git && git.conflicts > 0}
+        <span class="fault" title="Files left in conflict by a merge" data-drop="5">
+          {git.conflicts} conflicted
+        </span>
       {/if}
+      <span title="Files with changes that are not staged" data-drop="4">
+        {git?.unstaged ?? 0} unstaged
+      </span>
+      <span
+        title="Files with changes staged for the next commit"
+        data-drop="3"
+      >
+        {git?.staged ?? 0} staged
+      </span>
+      <span title="Files git has not been told of" data-drop="1">
+        {git?.untracked ?? 0} untracked
+      </span>
+      <span
+        title={git?.counted && !git.upstream
+          ? "This branch has not been pushed anywhere"
+          : "Commits not yet pushed, and commits not yet pulled"}
+        data-drop="2"
+      >
+        ↑{git?.ahead ?? 0} ↓{git?.behind ?? 0}
+      </span>
     {/snippet}
   </PinBar>
 
@@ -2059,8 +2067,9 @@
   }
 
   /* The left end of the bottom bar. Where the window is working is a
-     capsule: tinted on this machine, filled on a remote, and in the colour
-     of a fault once the connection has dropped. The rest is the bar's own
+     capsule: tinted on this machine and while a remote is being joined,
+     filled on a remote, and in the colour of a fault once the connection
+     has dropped. Nothing in the bar is faded: it is small enough as it is. The rest is the bar's own
      text, in the accent like the rest of it. */
   .where {
     display: inline-flex;
@@ -2075,9 +2084,6 @@
   .where[data-status="connected"] {
     background: var(--accent);
     color: var(--accent-ink);
-  }
-  .where[data-status="connecting"] {
-    opacity: 0.6;
   }
   .where[data-status="lost"] {
     background: var(--danger);

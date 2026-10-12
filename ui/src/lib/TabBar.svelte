@@ -52,7 +52,7 @@
 
   let strip = $state<HTMLElement | undefined>();
 
-  // Keep the active tab on screen: `:bn`, or a file opened from the tree,
+  // Keep the active tab on screen: Ctrl+Tab, or a file opened from the tree,
   // can land on one that is scrolled out of the strip.
   $effect(() => {
     if (activeKey === null) return;
