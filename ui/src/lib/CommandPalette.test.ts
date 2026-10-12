@@ -22,7 +22,7 @@ function open() {
       opacity: 35,
       acrylic: true,
       commands: [
-        command("File: New File", { keys: "Ctrl+N" }),
+        command("File: New File"),
         command("File: Save", { disabled: true }),
         command("Terminal: New Terminal"),
         command("View: Split Right"),
@@ -52,7 +52,6 @@ describe("the command palette", () => {
     const palette = open();
     expect(palette.rows()).toHaveLength(4);
     expect(palette.picked()).toBe("File: New File");
-    expect(palette.target.querySelector(".keys")?.textContent).toBe("Ctrl+N");
     palette.done();
   });
 

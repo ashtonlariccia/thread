@@ -35,7 +35,7 @@ export class Pins {
     }
   }
 
-  /** Dragged (or Ctrl+Arrowed) to a new position on the strip. */
+  /** Dragged to a new position on the strip. */
   async move(pin: Pin, index: number) {
     // Optimistic: the strip has already shown the drop, and waiting for the
     // round trip would snap it back for a frame first.

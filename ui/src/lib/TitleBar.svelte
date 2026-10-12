@@ -29,11 +29,11 @@
     shells: string[];
     /** Terminal -> one of those shells, by its place in the list. */
     onnewterminalin: (index: number) => void;
-    /** Edit -> Command Palette. */
+    /** Edit -> Commands. */
     onpalette: () => void;
     /** Whether the window is on this machine, or on a remote. */
     remoteStatus: RemoteStatus;
-    /** The saved connections, for Remote -> Connect Known. */
+    /** The saved connections, for Remote -> Hosts. */
     known: SavedConnection[];
     /** Remote -> Connect: ask who to connect to. */
     onconnect: () => void;
@@ -87,7 +87,7 @@
   type MenuName = "file" | "edit" | "terminal" | "remote";
 
   let openMenu = $state<MenuName | null>(null);
-  /** Whether the list under Remote -> Connect Known is out. */
+  /** Whether the list under Remote -> Hosts is out. */
   let knownOpen = $state(false);
   // One connection at a time: a window on a remote leaves it before joining another.
   const canConnect = $derived(remoteStatus === "local");
@@ -180,22 +180,18 @@
         <div class="menu" role="menu">
           <button class="menu-item" role="menuitem" onclick={() => run(onnew)}>
             <span>New File</span>
-            <span class="hint">Ctrl+N</span>
           </button>
           <button class="menu-item" role="menuitem" onclick={() => run(onopen)}>
             <span>Open File…</span>
-            <span class="hint">Ctrl+O</span>
           </button>
           <button class="menu-item" role="menuitem" onclick={() => run(onopenfolder)}>
             <span>Open Folder…</span>
-            <span class="hint">Ctrl+Shift+O</span>
           </button>
 
           <div class="sep"></div>
 
           <button class="menu-item" role="menuitem" disabled={!hasFile} onclick={() => run(onsave)}>
             <span>Save</span>
-            <span class="hint">Ctrl+S</span>
           </button>
           <button
             class="menu-item"
@@ -204,7 +200,6 @@
             onclick={() => run(onsaveas)}
           >
             <span>Save As…</span>
-            <span class="hint">Ctrl+Shift+S</span>
           </button>
           <button
             class="menu-item"
@@ -213,7 +208,6 @@
             onclick={() => run(onclosefile)}
           >
             <span>Close File</span>
-            <span class="hint">Ctrl+W</span>
           </button>
           <button
             class="menu-item"
@@ -278,7 +272,7 @@
           <div class="sep"></div>
 
           <button class="menu-item" role="menuitem" onclick={() => run(onpalette)}>
-            <span>Command Palette…</span>
+            <span>Commands…</span>
             <span class="hint">Ctrl+Shift+P</span>
           </button>
 
@@ -301,7 +295,6 @@
         <div class="menu" role="menu">
           <button class="menu-item" role="menuitem" onclick={() => run(onnewterminal)}>
             <span>New Terminal</span>
-            <span class="hint">Ctrl+Shift+`</span>
           </button>
 
           <!-- One in a shell other than the usual: whichever are installed. -->
@@ -356,7 +349,7 @@
               disabled={!canConnect || known.length === 0}
               onclick={() => (knownOpen = !knownOpen)}
             >
-              <span>Connect Known</span>
+              <span>Hosts</span>
               <span class="hint">▸</span>
             </button>
 

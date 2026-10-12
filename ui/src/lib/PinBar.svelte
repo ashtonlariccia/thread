@@ -216,22 +216,6 @@
     return drag.gap;
   });
 
-  function onKeydown(event: KeyboardEvent, pin: Pin, index: number) {
-    if (event.key === "Delete") {
-      event.preventDefault();
-      unpin(pin);
-      return;
-    }
-
-    // Reordering without a mouse. Ctrl, because bare arrows belong to moving
-    // between chips.
-    if (event.ctrlKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-      event.preventDefault();
-      const to = index + (event.key === "ArrowLeft" ? -1 : 1);
-      if (to >= 0 && to < pins.length) onmove(pin, to);
-    }
-  }
-
   function onWindowKey(event: KeyboardEvent) {
     if (event.key === "Escape") menu = null;
   }
@@ -275,7 +259,6 @@
               onclick={() => onClick(entry)}
               onauxclick={(e) => onAuxClick(e, entry)}
               oncontextmenu={(e) => openMenu(e, entry)}
-              onkeydown={(e) => onKeydown(e, entry, index)}
               onpointerdown={(e) => onPointerDown(e, index)}
               onpointermove={onPointerMove}
               onpointerup={onPointerUp}

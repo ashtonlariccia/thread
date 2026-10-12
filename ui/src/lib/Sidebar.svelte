@@ -12,8 +12,6 @@
     /** A drag is in flight, so the width must track the pointer, not glide. */
     resizing: boolean;
     onselect: (item: SidebarItem) => void;
-    /** A key pressed on a focused row, for the row's own shortcuts. */
-    onkey: (event: KeyboardEvent, item: SidebarItem) => void;
     /** The name box was settled: with what was typed, or null if abandoned. */
     onedit: (value: string | null) => void;
     /**
@@ -31,7 +29,6 @@
     collapsed,
     resizing,
     onselect,
-    onkey,
     onedit,
     oncontext,
   }: Props = $props();
@@ -73,8 +70,8 @@
   }
 
   function onNameKey(event: KeyboardEvent) {
-    // The box sits inside a row, and the row has shortcuts of its own: Space
-    // must type a space here, not fold the folder.
+    // The box sits inside a row, and the row answers to keys of its own:
+    // Space must type a space here, not fold the folder.
     event.stopPropagation();
     const input = event.currentTarget as HTMLInputElement;
     if (event.key === "Enter") settle(input.value.trim() || null);
@@ -82,7 +79,7 @@
   }
 </script>
 
-<aside style="width: {width}px" class:collapsed class:resizing>
+<aside style="width: {width}px" class:collapsed class:resizing data-sidebar>
   <!-- Collapsed, the sidebar is an empty rail: the tree fades out rather than
        shrinking into a column of icons. `inert` takes it out of the tab order
        and away from the pointer while it is not there to be seen. -->
@@ -113,7 +110,6 @@
             onclick={() => !naming && onselect(item)}
             onkeydown={(e) => {
               if (e.key === "Enter" || e.key === " ") onselect(item);
-              else onkey(e, item);
             }}
             oncontextmenu={(e) => {
               // Stopped, not merely defaulted: the window-level handler in App

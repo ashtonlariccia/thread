@@ -1,11 +1,11 @@
 <script lang="ts">
   /**
-   * Edit → LSPs: the language servers Thread knows how to run, which of them
-   * are installed, and which are switched on.
+   * Edit → LSPs: the language servers found on the machine the window is
+   * working on (this one, or its remote), and which are switched on.
    *
    * Switching one on writes it into `[lsp] enabled` in the config, the same
-   * as adding it there by hand. Thread installs nothing: a server that is
-   * not on this machine is listed with the command that would put it there.
+   * as adding it there by hand. Thread installs nothing, and lists nothing
+   * the machine does not have.
    */
   import Dialog from "./Dialog.svelte";
   import SyntaxTab from "./SyntaxTab.svelte";
@@ -31,11 +31,8 @@
     if (open) void lsp.refresh();
   });
 
-  // The installed ones first, each lot in the order of the catalog.
-  const servers = $derived([
-    ...lsp.catalog.filter((server) => server.installed),
-    ...lsp.catalog.filter((server) => !server.installed),
-  ]);
+  // Only what the machine has, in the order of the catalog.
+  const servers = $derived(lsp.catalog.filter((server) => server.installed));
 
   function toggle(server: ServerInfo, on: boolean) {
     const rest = lsp.enabled.filter((id) => id !== server.id);
@@ -44,7 +41,6 @@
 
   /** What a server is doing, in a word, and whether that word is bad news. */
   function status(server: ServerInfo): { text: string; bad?: boolean } | null {
-    if (!server.installed) return { text: "Not installed" };
     if (!lsp.enabled.includes(server.id)) return null;
     const state = lsp.states[server.id];
     if (state === "running") return { text: "Running" };
@@ -76,21 +72,16 @@
       {@const state = status(server)}
       {@const on = lsp.enabled.includes(server.id)}
       <li>
-        <label class="dlg-row" class:missing={!server.installed}>
+        <label class="dlg-row">
           <input
             type="checkbox"
             checked={on}
-            disabled={!server.installed && !on}
             onchange={(e) => toggle(server, e.currentTarget.checked)}
           />
           <span class="dlg-detail">
             <span class="dlg-label">{server.name}</span>
             <span class="dlg-meta">{server.languages.map((l) => l.name).join(", ")}</span>
-            {#if !server.installed}
-              <!-- To be selected and copied, which a label would swallow. -->
-              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-              <code class="install" onclick={(e) => e.preventDefault()}>{server.install}</code>
-            {:else if on && lsp.errors[server.id]}
+            {#if on && lsp.errors[server.id]}
               <span class="dlg-meta why">{lsp.errors[server.id]}</span>
             {/if}
           </span>
@@ -110,17 +101,16 @@
           {/if}
         </label>
       </li>
+    {:else}
+      <li class="dlg-empty">No language servers were found on {host ?? "this machine"}.</li>
     {/each}
   </ul>
 
   <p class="dlg-note">
-    A server that is switched on starts with the first file in one of its languages, and gives
-    completion as you type and its errors at the end of the line they are on. Thread runs the
-    ones it finds on the PATH and installs none itself.
-    {#if host}
-      This window is on {host}, so these are the servers installed there, and that is
-      where they run.
-    {/if}
+    These are the language servers found on the PATH of {host ?? "this machine"}, which is
+    where they run. One that is switched on starts with the first file in one of its languages,
+    and gives completion as you type and its errors at the end of the line they are on. Thread
+    installs none itself.
   </p>
 
   <div class="dlg-actions">
@@ -161,29 +151,10 @@
 
     cursor: pointer;
   }
-  .dlg-row.missing {
-    cursor: default;
-  }
-  .dlg-row.missing .dlg-label {
-    color: var(--fg-dim);
-  }
 
   input[type="checkbox"] {
     flex: none;
     accent-color: var(--accent);
-  }
-
-  .install {
-    align-self: flex-start;
-    margin-top: 0.15rem;
-    padding: 0.05rem 0.35rem;
-    background: var(--bg-input);
-    border-radius: 3px;
-    color: var(--fg-dim);
-    font-family: Consolas, monospace;
-    font-size: 0.7rem;
-    cursor: text;
-    user-select: text;
   }
 
   .why {

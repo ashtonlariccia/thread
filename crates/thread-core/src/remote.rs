@@ -628,6 +628,25 @@ impl Remote {
         !matches!(self.sftp.symlink_metadata(path).await, Err(e) if missing(&e))
     }
 
+    /// The state of the repository `dir` is in, as [`crate::git::status`]
+    /// finds it here: `git`'s own count where the remote has `git`, and the
+    /// branch alone where it has not.
+    pub async fn git_status(&self, dir: &str) -> Option<crate::git::Status> {
+        let script = format!(
+            "cd {} 2>/dev/null && {} 2>/dev/null",
+            quoted(dir),
+            crate::git::STATUS
+        );
+        if let Ok(printed) = self.output(Self::login(&script)).await {
+            if let Some(status) = crate::git::parse_status(&printed) {
+                return Some(status);
+            }
+        }
+        self.git_branch(dir)
+            .await
+            .map(crate::git::Status::of_branch)
+    }
+
     /// The branch `dir` is on, as [`crate::git::branch`] finds it here: its
     /// own repository's, or the nearest one above it.
     pub async fn git_branch(&self, dir: &str) -> Option<String> {
@@ -801,7 +820,7 @@ impl Remote {
 
         crate::lsp::CATALOG
             .iter()
-            .map(|spec| crate::lsp::Info::of(spec, found.contains(&spec.command), true))
+            .map(|spec| crate::lsp::Info::of(spec, found.contains(&spec.command)))
             .collect()
     }
 

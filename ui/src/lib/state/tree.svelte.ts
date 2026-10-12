@@ -43,9 +43,17 @@ export class Tree {
   #stamps = new Map<string, number | null>();
   #polling = false;
 
+  /** Whether a folder's files are listed above its folders: `[files] files_first`. */
+  filesFirst = $state(false);
+
   /** Every row the tree shows: each root, and whatever is unfolded under it. */
   get rows(): TreeRow[] {
     const rows: TreeRow[] = [];
+    // A listing comes with its folders first, each lot by name.
+    const ordered = (children: Entry[]) =>
+      this.filesFirst
+        ? [...children.filter((child) => !child.dir), ...children.filter((child) => child.dir)]
+        : children;
     for (const root of this.roots) {
       const walk = (entry: Entry, depth: number) => {
         const open = entry.dir && this.#open[entry.path] === true;
@@ -56,7 +64,7 @@ export class Tree {
           open,
           root: depth === 0,
         });
-        if (open) for (const child of this.#children[entry.path] ?? []) walk(child, depth + 1);
+        if (open) for (const child of ordered(this.#children[entry.path] ?? [])) walk(child, depth + 1);
       };
       walk(root, 0);
     }

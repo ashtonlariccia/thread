@@ -39,8 +39,6 @@ export type ServerInfo = {
   command: string;
   /** `name` is what the bottom bar calls the language, `id` what the protocol does. */
   languages: { name: string; id: string }[];
-  /** A command that installs it. */
-  install: string;
   installed: boolean;
 };
 

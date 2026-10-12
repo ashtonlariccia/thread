@@ -19,6 +19,8 @@ export type SyntaxDef = {
   /** What opens and what closes one: two, or none. */
   block_comment: string[];
   strings: string[];
+  /** What opens and what closes code inside a string: two, or none. */
+  interpolation: string[];
   keywords: string[];
   types: string[];
   constants: string[];
@@ -33,6 +35,7 @@ export const EMPTY_SYNTAX: SyntaxDef = {
   line_comment: "",
   block_comment: [],
   strings: [],
+  interpolation: [],
   keywords: [],
   types: [],
   constants: [],
@@ -71,6 +74,17 @@ type State = {
   comment: boolean;
   /** Inside a string that an earlier line opened: what will close it. */
   string: string | null;
+  /**
+   * The part of a pattern's match that is to be coloured, further along
+   * this line: the columns it runs between, and what it is coloured as.
+   */
+  capture: { from: number; to: number; token: string } | null;
+  /**
+   * Inside code inside a string: what will close the string once the code
+   * has ended, and how many of the code's openers are still to be closed.
+   */
+  embed: string | null;
+  depth: number;
 };
 
 const NUMBER = /^(?:0[xX][\da-fA-F_]+|0[bB][01_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)/;
@@ -88,20 +102,37 @@ export function customParser(def: SyntaxDef): StreamParser<State> {
   // Longest first: `"""` has to be tried before `"`.
   const strings = [...def.strings].filter(Boolean).sort((a, b) => b.length - a.length);
   const [open, close] = def.block_comment.length === 2 ? def.block_comment : [null, null];
+  const [codeOpen, codeClose] =
+    def.interpolation?.length === 2 && def.interpolation.every(Boolean)
+      ? def.interpolation
+      : [null, null];
 
   const patterns = def.patterns.flatMap((pattern) => {
     const token = TOKENS[pattern.as as keyof typeof TOKENS];
     if (!token || patternError(pattern.match) !== null) return [];
-    // Tried where a token starts, so it has to match from there.
-    return [{ regex: new RegExp(`^(?:${pattern.match})`), token }];
+    // Tried where a token starts, so it has to match from there. With `d`,
+    // for where in the match a group of it was.
+    return [{ regex: new RegExp(`^(?:${pattern.match})`, "d"), token }];
   });
 
   /** Read to the end of a string, or of the line if it does not end on it. */
   function string(stream: StringStream, state: State, quote: string) {
+    // Not from a string that is itself inside a string's code: one level.
+    const embeds = codeOpen !== null && state.embed === null;
     while (!stream.eol()) {
       if (stream.match(quote)) {
         state.string = null;
         return TOKENS.string;
+      }
+      if (embeds && stream.match(codeOpen!, false)) {
+        // What there is of the string so far goes out first, as string.
+        state.string = quote;
+        if (stream.pos > stream.start) return TOKENS.string;
+        stream.match(codeOpen!);
+        state.string = null;
+        state.embed = quote;
+        state.depth = 1;
+        return "bracket";
       }
       // A backslash takes whatever follows it, a quote included.
       if (stream.next() === "\\") stream.next();
@@ -124,46 +155,98 @@ export function customParser(def: SyntaxDef): StreamParser<State> {
     return TOKENS.comment;
   }
 
+  /** One token, by everything but a group still to come. */
+  function read(stream: StringStream, state: State): string | null {
+    if (state.comment) return comment(stream, state);
+    if (state.string !== null) return string(stream, state, state.string);
+    if (stream.eatSpace()) return null;
+
+    // In a string's code, which ends where its opener is closed, and the
+    // string carries on from there.
+    if (state.embed !== null) {
+      if (stream.match(codeClose!)) {
+        if (--state.depth === 0) {
+          state.string = state.embed;
+          state.embed = null;
+        }
+        return "bracket";
+      }
+      if (stream.match(codeOpen!)) {
+        state.depth++;
+        return "bracket";
+      }
+    }
+
+    if (def.line_comment && stream.match(def.line_comment)) {
+      stream.skipToEnd();
+      return TOKENS.comment;
+    }
+    if (open !== null && stream.match(open)) return comment(stream, state);
+    for (const quote of strings) {
+      if (stream.match(quote)) return string(stream, state, quote);
+    }
+
+    for (const { regex, token } of patterns) {
+      const found = stream.match(regex, false) as RegExpMatchArray | null;
+      // One that matches nothing would never move on.
+      if (!found || found[0].length === 0) continue;
+      // A pattern with a group in it colours the group and not the rest:
+      // `ds\s+(\w+)` is the name after a `ds`, and the `ds` is whatever
+      // it would have been anyway.
+      const group = found.indices?.slice(1).find((at) => at && at[1] > at[0]);
+      if (!group) {
+        stream.pos += found[0].length;
+        return token;
+      }
+      if (group[0] === 0) {
+        stream.pos += group[1];
+        return token;
+      }
+      // Further along: what is before it is read as usual, up to it.
+      state.capture = { from: stream.pos + group[0], to: stream.pos + group[1], token };
+      break;
+    }
+
+    if (stream.match(NUMBER)) return TOKENS.number;
+    const word = stream.match(WORD) as RegExpMatchArray | null;
+    if (word) {
+      const known = words.get(word[0]);
+      if (known) return known;
+      // A name with a bracket after it is being called.
+      return stream.peek() === "(" ? TOKENS.function : "variableName";
+    }
+    if (stream.match(OPERATOR)) return TOKENS.operator;
+
+    const char = stream.next();
+    if (char && "()[]{}".includes(char)) return "bracket";
+    if (char && ",.;".includes(char)) return "punctuation";
+    return null;
+  }
+
   return {
-    startState: () => ({ comment: false, string: null }),
+    startState: () => ({ comment: false, string: null, capture: null, embed: null, depth: 0 }),
 
     token(stream, state) {
-      if (state.comment) return comment(stream, state);
-      if (state.string !== null) return string(stream, state, state.string);
-      if (stream.eatSpace()) return null;
-
-      if (def.line_comment && stream.match(def.line_comment)) {
-        stream.skipToEnd();
-        return TOKENS.comment;
+      // Only ever on the line it was found on.
+      if (stream.sol()) {
+        state.capture = null;
+        // As with the string it is in: only a long delimiter's runs on.
+        if (state.embed !== null && state.embed.length < 2) state.embed = null;
       }
-      if (open !== null && stream.match(open)) return comment(stream, state);
-      for (const quote of strings) {
-        if (stream.match(quote)) return string(stream, state, quote);
-      }
-
-      for (const { regex, token } of patterns) {
-        const found = stream.match(regex, false) as RegExpMatchArray | null;
-        // One that matches nothing would never move on.
-        if (found && found[0].length > 0) {
-          stream.pos += found[0].length;
-          return token;
+      const capture = state.capture;
+      if (capture && stream.pos >= capture.from) {
+        state.capture = null;
+        if (stream.pos === capture.from) {
+          stream.pos = capture.to;
+          return capture.token;
         }
       }
 
-      if (stream.match(NUMBER)) return TOKENS.number;
-      const word = stream.match(WORD) as RegExpMatchArray | null;
-      if (word) {
-        const known = words.get(word[0]);
-        if (known) return known;
-        // A name with a bracket after it is being called.
-        return stream.peek() === "(" ? TOKENS.function : "variableName";
-      }
-      if (stream.match(OPERATOR)) return TOKENS.operator;
-
-      const char = stream.next();
-      if (char && "()[]{}".includes(char)) return "bracket";
-      if (char && ",.;".includes(char)) return "punctuation";
-      return null;
+      const token = read(stream, state);
+      // Nothing before a group runs on into it.
+      const ahead = state.capture;
+      if (ahead && stream.pos > ahead.from) stream.pos = ahead.from;
+      return token;
     },
 
     languageData: {

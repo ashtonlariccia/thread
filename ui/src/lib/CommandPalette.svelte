@@ -1,10 +1,8 @@
 <script module lang="ts">
   /** Something the window can be told to do, as the palette lists it. */
   export type Command = {
-    /** As it is listed, its group first: "Terminal: New Terminal". */
+    /** As it is listed, and what it is known by. */
     title: string;
-    /** The keys that do the same, if there are any. */
-    keys?: string;
     /** Listed, but not to be run just now. */
     disabled?: boolean;
     run: () => void;
@@ -13,9 +11,10 @@
 
 <script lang="ts">
   /**
-   * The command palette: everything the menus and the keys can do, in one
-   * list to type into. Ctrl+Shift+P opens it; what is typed narrows it,
-   * loosely (`nt` finds New Terminal); Enter runs the one picked out.
+   * Commands: a few things to do by name, in one list to type into, in
+   * the order it is given them. Ctrl+Shift+P opens it; what is typed
+   * narrows it, loosely (`nt` finds New Terminal); Enter runs the one
+   * picked out.
    */
   import { cubicOut } from "svelte/easing";
 
@@ -151,9 +150,6 @@
                 {#if piece.hit}<b>{piece.text}</b>{:else}{piece.text}{/if}
               {/each}
             </span>
-            {#if item.keys}
-              <span class="keys">{item.keys}</span>
-            {/if}
           </div>
         {:else}
           <p class="none">No command matches that.</p>
@@ -252,12 +248,6 @@
   }
   .row.disabled .title b {
     color: inherit;
-  }
-
-  .keys {
-    flex: none;
-    color: var(--fg-dim);
-    font-size: 0.72rem;
   }
 
   .none {

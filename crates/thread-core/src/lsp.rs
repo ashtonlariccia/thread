@@ -1,9 +1,10 @@
 //! Language servers: the programs that know a language well enough to
 //! complete it and to say what is wrong with it.
 //!
-//! Thread ships none of them. It knows a list of the common ones, looks for
-//! each on `PATH`, and runs the ones that are both installed and switched on
-//! (`[lsp] enabled` in the config). What is here is the part that has to be
+//! Thread ships none of them. It knows how the common ones are run, looks
+//! for each on the `PATH` of the machine the window is working on, offers
+//! the ones it finds there, and runs those that are switched on (`[lsp]
+//! enabled` in the config). What is here is the part that has to be
 //! native: finding a server, running it, and carrying whole messages to and
 //! from it. What the messages say is the frontend's business.
 //!
@@ -39,16 +40,14 @@ pub struct Spec {
     /// The languages it serves: the name the bottom bar gives a file, and
     /// the id the protocol knows that language by.
     pub languages: &'static [(&'static str, &'static str)],
-    /// A command that installs it here, to show beside one that is not installed.
-    pub install: &'static str,
-    /// The same for a remote, which is some kind of Unix.
-    pub remote_install: &'static str,
     /// Folders to look in besides `PATH`: where its installer puts it without
     /// adding that to `PATH`.
     pub folders: &'static [&'static str],
 }
 
-/// Few, for now: the languages being worked in. Another is an entry here.
+/// The servers Thread knows how to run, by the names nvim-lspconfig gives
+/// them. Which of them a machine has is found by looking; another is an
+/// entry here. Where two serve a language, the one listed first is used.
 pub const CATALOG: &[Spec] = &[
     Spec {
         id: "pyright",
@@ -56,8 +55,22 @@ pub const CATALOG: &[Spec] = &[
         command: "pyright-langserver",
         args: &["--stdio"],
         languages: &[("Python", "python")],
-        install: "npm install -g pyright",
-        remote_install: "npm install -g pyright",
+        folders: &[],
+    },
+    Spec {
+        id: "basedpyright",
+        name: "basedpyright",
+        command: "basedpyright-langserver",
+        args: &["--stdio"],
+        languages: &[("Python", "python")],
+        folders: &[],
+    },
+    Spec {
+        id: "ruff",
+        name: "Ruff",
+        command: "ruff",
+        args: &["server"],
+        languages: &[("Python", "python")],
         folders: &[],
     },
     Spec {
@@ -66,10 +79,24 @@ pub const CATALOG: &[Spec] = &[
         command: "clangd",
         args: &[],
         languages: &[("C", "c"), ("C++", "cpp")],
-        install: "winget install LLVM.LLVM",
-        remote_install: "install clangd with the system's package manager",
         // The LLVM installer leaves PATH alone unless asked.
         folders: &["C:/Program Files/LLVM/bin"],
+    },
+    Spec {
+        id: "lua_ls",
+        name: "lua-language-server",
+        command: "lua-language-server",
+        args: &[],
+        languages: &[("Lua", "lua")],
+        folders: &[],
+    },
+    Spec {
+        id: "nixd",
+        name: "nixd",
+        command: "nixd",
+        args: &[],
+        languages: &[("Nix", "nix")],
+        folders: &[],
     },
     Spec {
         id: "nil",
@@ -77,8 +104,118 @@ pub const CATALOG: &[Spec] = &[
         command: "nil",
         args: &[],
         languages: &[("Nix", "nix")],
-        install: "cargo install --git https://github.com/oxalica/nil nil",
-        remote_install: "nix profile install nixpkgs#nil",
+        folders: &[],
+    },
+    Spec {
+        id: "html",
+        name: "HTML",
+        command: "vscode-html-language-server",
+        args: &["--stdio"],
+        languages: &[("HTML", "html")],
+        folders: &[],
+    },
+    Spec {
+        id: "cssls",
+        name: "CSS",
+        command: "vscode-css-language-server",
+        args: &["--stdio"],
+        languages: &[("CSS", "css"), ("SCSS", "scss"), ("Less", "less")],
+        folders: &[],
+    },
+    Spec {
+        id: "jsonls",
+        name: "JSON",
+        command: "vscode-json-language-server",
+        args: &["--stdio"],
+        languages: &[("JSON", "json"), ("JSON with Comments", "jsonc")],
+        folders: &[],
+    },
+    Spec {
+        id: "rust_analyzer",
+        name: "rust-analyzer",
+        command: "rust-analyzer",
+        args: &[],
+        languages: &[("Rust", "rust")],
+        folders: &[],
+    },
+    Spec {
+        id: "gopls",
+        name: "gopls",
+        command: "gopls",
+        args: &[],
+        languages: &[("Go", "go")],
+        folders: &[],
+    },
+    Spec {
+        id: "ts_ls",
+        name: "TypeScript",
+        command: "typescript-language-server",
+        args: &["--stdio"],
+        languages: &[("TypeScript", "typescript"), ("TypeScript JSX", "typescriptreact"), ("JavaScript", "javascript"), ("JavaScript JSX", "javascriptreact")],
+        folders: &[],
+    },
+    Spec {
+        id: "svelte",
+        name: "Svelte",
+        command: "svelteserver",
+        args: &["--stdio"],
+        languages: &[("Svelte", "svelte")],
+        folders: &[],
+    },
+    Spec {
+        id: "bashls",
+        name: "Bash",
+        command: "bash-language-server",
+        args: &["start"],
+        languages: &[("Shell Script", "shellscript")],
+        folders: &[],
+    },
+    Spec {
+        id: "yamlls",
+        name: "YAML",
+        command: "yaml-language-server",
+        args: &["--stdio"],
+        languages: &[("YAML", "yaml")],
+        folders: &[],
+    },
+    Spec {
+        id: "taplo",
+        name: "Taplo",
+        command: "taplo",
+        args: &["lsp", "stdio"],
+        languages: &[("TOML", "toml")],
+        folders: &[],
+    },
+    Spec {
+        id: "marksman",
+        name: "Marksman",
+        command: "marksman",
+        args: &["server"],
+        languages: &[("Markdown", "markdown")],
+        folders: &[],
+    },
+    Spec {
+        id: "zls",
+        name: "zls",
+        command: "zls",
+        args: &[],
+        languages: &[("Zig", "zig")],
+        folders: &[],
+    },
+    Spec {
+        id: "texlab",
+        name: "TexLab",
+        command: "texlab",
+        args: &[],
+        languages: &[("LaTeX", "latex")],
+        folders: &[],
+    },
+    Spec {
+        id: "hls",
+        name: "Haskell",
+        command: "haskell-language-server-wrapper",
+        args: &["--lsp"],
+        languages: &[("Haskell", "haskell")],
         folders: &[],
     },
 ];
@@ -99,14 +236,12 @@ pub struct Info {
     pub name: &'static str,
     pub command: &'static str,
     pub languages: Vec<Language>,
-    pub install: &'static str,
     pub installed: bool,
 }
 
 impl Info {
-    /// A server as the frontend is told of it. `remote` picks whose way of
-    /// installing it is given.
-    pub fn of(spec: &Spec, installed: bool, remote: bool) -> Self {
+    /// A server as the frontend is told of it.
+    pub fn of(spec: &Spec, installed: bool) -> Self {
         Self {
             id: spec.id,
             name: spec.name,
@@ -116,11 +251,6 @@ impl Info {
                 .iter()
                 .map(|&(name, id)| Language { name, id })
                 .collect(),
-            install: if remote {
-                spec.remote_install
-            } else {
-                spec.install
-            },
             installed,
         }
     }
@@ -131,7 +261,7 @@ impl Info {
 pub fn catalog() -> Vec<Info> {
     CATALOG
         .iter()
-        .map(|spec| Info::of(spec, find(spec).is_some(), false))
+        .map(|spec| Info::of(spec, find(spec).is_some()))
         .collect()
 }
 
@@ -269,9 +399,8 @@ impl Server {
         let spec = spec(id)?;
         let program = find(spec).ok_or_else(|| {
             Error::Other(anyhow::anyhow!(
-                "{} is not installed. To install it: {}",
-                spec.name,
-                spec.install
+                "{} is not installed on this machine",
+                spec.name
             ))
         })?;
 

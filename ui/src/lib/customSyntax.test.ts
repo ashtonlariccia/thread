@@ -78,6 +78,72 @@ describe("a language described in the config", () => {
     ]);
   });
 
+  it("colours only the group of a pattern that has one", () => {
+    const grouped = {
+      ...def,
+      keywords: ["ds"],
+      patterns: [{ match: "ds\\s+(\\w+)", as: "type" }, { match: "(@)[a-z]+", as: "operator" }],
+    };
+    expect(tokens(grouped, ["ds point {}", "ds", "dsx y @at"])).toEqual([
+      [
+        ["ds", "keyword"],
+        ["point", "typeName"],
+        ["{", "bracket"],
+        ["}", "bracket"],
+      ],
+      [["ds", "keyword"]],
+      [
+        ["dsx", "variableName"],
+        ["y", "variableName"],
+        ["@", "operator"],
+        ["at", "variableName"],
+      ],
+    ]);
+  });
+
+  it("stops what is before a group where the group starts", () => {
+    const tight = { ...def, patterns: [{ match: "a(b)", as: "type" }] };
+    expect(tokens(tight, ["ab c"])[0]).toEqual([
+      ["a", "variableName"],
+      ["b", "typeName"],
+      ["c", "variableName"],
+    ]);
+  });
+
+  it("reads what a string interpolates as code, and the rest as string", () => {
+    const embedding = { ...def, interpolation: ["{", "}"] };
+    expect(tokens(embedding, ['"a {if x} b" let', '"\\{x} {', "let"])).toEqual([
+      [
+        ['"a ', "string"],
+        ["{", "bracket"],
+        ["if", "keyword"],
+        ["x", "variableName"],
+        ["}", "bracket"],
+        [' b"', "string"],
+        ["let", "keyword"],
+      ],
+      [
+        ['"\\{x} ', "string"],
+        ["{", "bracket"],
+      ],
+      [["let", "keyword"]],
+    ]);
+  });
+
+  it("closes a string's code where its own opener is closed", () => {
+    const embedding = { ...def, interpolation: ["{", "}"] };
+    expect(tokens(embedding, ['"{ {a} "b" }c"'])[0]).toEqual([
+      ['"', "string"],
+      ["{", "bracket"],
+      ["{", "bracket"],
+      ["a", "variableName"],
+      ["}", "bracket"],
+      ['"b"', "string"],
+      ["}", "bracket"],
+      ['c"', "string"],
+    ]);
+  });
+
   it("ignores a pattern that is not a pattern, or matches nothing", () => {
     const broken = { ...def, patterns: [{ match: "(", as: "keyword" }, { match: "x*", as: "keyword" }] };
     expect(patternError("(")).not.toBeNull();

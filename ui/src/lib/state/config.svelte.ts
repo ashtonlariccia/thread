@@ -45,7 +45,7 @@ export type Config = {
   /** The command palette: how solid it is, in percent, and whether it frosts what is behind. */
   palette: { background_opacity: number; material: Material };
   editor: EditorConfig;
-  files: { exclude: string[] };
+  files: { exclude: string[]; files_first: boolean };
   /** `accent` is the highlight colour, as `#rrggbb`. */
   theme: { syntax: string; accent: string };
   vim: { enabled: boolean };
@@ -76,7 +76,7 @@ export const DEFAULTS: Config = {
     smooth_caret: true,
     auto_close: true,
   },
-  files: { exclude: [".*"] },
+  files: { exclude: [".*"], files_first: false },
   theme: { syntax: "catppuccin", accent: "#cba6f7" },
   vim: { enabled: true },
   terminal: { shell: "", scrollback: 2000, font_size: 14, cursor: "block" },

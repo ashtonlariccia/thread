@@ -38,6 +38,9 @@
     open: string;
     close: string;
     strings: string;
+    /** What opens and what closes code inside a string. */
+    codeOpen: string;
+    codeClose: string;
     keywords: string;
     types: string;
     constants: string;
@@ -71,6 +74,8 @@
       open: def.block_comment[0] ?? "",
       close: def.block_comment[1] ?? "",
       strings: def.strings.join(" "),
+      codeOpen: def.interpolation?.[0] ?? "",
+      codeClose: def.interpolation?.[1] ?? "",
       keywords: def.keywords.join(" "),
       types: def.types.join(" "),
       constants: def.constants.join(" "),
@@ -82,11 +87,14 @@
   function toDef(from: Draft): SyntaxDef {
     const open = from.open.trim();
     const close = from.close.trim();
+    const codeOpen = from.codeOpen.trim();
+    const codeClose = from.codeClose.trim();
     return {
       extensions: [...new Set(words(from.extensions).map((e) => e.replace(/^\.+/, "").toLowerCase()))],
       line_comment: from.line.trim(),
       block_comment: open && close ? [open, close] : [],
       strings: [...new Set(words(from.strings))],
+      interpolation: codeOpen && codeClose ? [codeOpen, codeClose] : [],
       keywords: [...new Set(words(from.keywords))],
       types: [...new Set(words(from.types))],
       constants: [...new Set(words(from.constants))],
@@ -317,6 +325,17 @@
         </label>
       </div>
 
+      <div class="pair">
+        <label>
+          <span class="cap">Code in a string opens</span>
+          <input type="text" class="mono" bind:value={draft.codeOpen} placeholder={"{"} spellcheck="false" />
+        </label>
+        <label>
+          <span class="cap">Code in a string closes</span>
+          <input type="text" class="mono" bind:value={draft.codeClose} placeholder={"}"} spellcheck="false" />
+        </label>
+      </div>
+
       {#each LISTS as list (list.key)}
         <label>
           <span class="cap">
@@ -338,7 +357,8 @@
         <span class="cap">Patterns</span>
         <p class="note">
           Regular expressions for what the lists cannot say, tried where each token starts and
-          ahead of the lists.
+          ahead of the lists. With a group in one, only the group is coloured: <code>ds\s+(\w+)</code>
+          is the name after a <code>ds</code>.
         </p>
         {#each draft.patterns as pattern, index (index)}
           {@const bad = pattern.match === "" ? null : patternError(pattern.match)}

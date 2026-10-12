@@ -25,10 +25,8 @@
 
   import { applyAccent } from "./lib/accent";
   import { item, SEP, type ContextMenuState } from "./lib/contextMenu";
-  import { setEditor } from "./lib/edit";
+  import { runEdit, setEditor, type EditCommand } from "./lib/edit";
   import { iconUrl } from "./lib/icons";
-  import { indentLabel } from "./lib/indent";
-  import { languageOf } from "./lib/languages";
   import { RAIL_WIDTH } from "./lib/layout";
   import type { Direction, Divider, Rect, SavedNode, SplitDir } from "./lib/panes";
   import { resolveLink, type Link } from "./lib/links";
@@ -68,8 +66,11 @@
 
   const appWindow = getCurrentWindow();
 
-  /** How often open files and unfolded folders are compared with the disk. */
-  const DISK_POLL_MS = 1000;
+  /**
+   * How often open files and unfolded folders are compared with the disk:
+   * each a `stat`, so often enough that the tree keeps up with a terminal.
+   */
+  const DISK_POLL_MS = 250;
 
   let appearanceOpen = $state(false);
   let lspOpen = $state(false);
@@ -91,8 +92,18 @@
     new Set(docs.dirty.flatMap((doc) => (doc.path === null ? [] : [pathKey(doc.path)]))),
   );
 
-  /** The row last clicked or right-clicked. */
+  /**
+   * The row last clicked or right-clicked, for as long as the tree is what
+   * is being worked in: the mark goes when anything else is.
+   */
   let selectedKey = $state<string | null>(null);
+
+  /** A press or the focus has landed somewhere: outside the tree, it lets go of its row. */
+  function onElsewhere(event: Event) {
+    if (selectedKey === null || naming !== null || !(event.target instanceof Element)) return;
+    // The menu a row opened is still about that row.
+    if (event.target.closest("[data-sidebar], .ctx") === null) selectedKey = null;
+  }
 
   /**
    * A name being typed into the tree. `row` is the row being renamed, or for
@@ -149,7 +160,7 @@
   });
 
   // Whatever file is being edited is shown in the tree, unfolding down to it
-  // if need be -- so opening one from a dialog or Ctrl+Tab still says where in
+  // if need be -- so opening one from a dialog or a tab still says where in
   // the project it lives. Only when the *file* changes: folding its folder
   // away afterwards is the user's business.
   $effect(() => {
@@ -288,17 +299,6 @@
     }
   }
 
-  /** The shortcuts a focused tree row answers to. */
-  function onTreeKey(event: KeyboardEvent, row: SidebarItem) {
-    if (event.key === "F2") {
-      event.preventDefault();
-      startRename(row);
-    } else if (event.key === "Delete") {
-      event.preventDefault();
-      void deleteRow(row);
-    }
-  }
-
   /**
    * File → Open Folder. Adds to whatever folders are already open: nothing is
    * swapped out, and a folder stays until it is closed.
@@ -321,7 +321,11 @@
   type TerminalTab = {
     key: number;
     name: string;
-    /** Where the shell was started, fixed for as long as it lives. */
+    /**
+     * Where the shell was last sent: null for the home folder it starts in,
+     * and after that wherever Jump Terminal Here has taken it. What is typed
+     * at the shell itself is not followed.
+     */
     cwd: string | null;
     /** The command line of the shell it runs; null for the one the config names. */
     shell: string | null;
@@ -347,7 +351,7 @@
     const active = layout.current.active;
     return active !== null && isTerminal(active) ? active : null;
   });
-  /** The one last shown, for Ctrl+` to come back to. */
+  /** The one last shown, for Toggle Terminal to come back to. */
   let lastTerminal: number | null = null;
   $effect(() => {
     if (activeTerminal !== null) lastTerminal = activeTerminal;
@@ -371,12 +375,12 @@
   });
 
   /**
-   * Where a new shell starts: the open folder, or with none open, the folder
-   * of the file being edited. With several folders open it is the one that
-   * file is in, and the first of them if it is in none. Null leaves it to the
-   * backend, which uses the home folder.
+   * The folder the window is working in: the open folder, or with none open,
+   * the folder of the file being edited. With several folders open it is the one that
+   * file is in, and the first of them if it is in none. Not where a shell
+   * starts: that is always the home folder.
    */
-  function terminalDir(): string | null {
+  function workingDir(): string | null {
     const file = (docs.active ?? docs.find(lastFile))?.path ?? null;
     const roots = tree.roots.map((root) => root.path);
     // The deepest: with a project and one of its subfolders both open, the
@@ -399,7 +403,8 @@
     terminals.push({
       key,
       name: shell?.name ?? (number === 1 ? "Terminal" : `Terminal ${number}`),
-      cwd: terminalDir(),
+      // Always the home folder, which is what the backend makes of none.
+      cwd: null,
       shell: shell?.command ?? null,
     });
     return key;
@@ -423,6 +428,27 @@
     } else void docs.openAt(resolveLink(link.path, cwd), link.line, link.col);
   }
 
+  /**
+   * `cd` to a folder, as the shell a terminal runs would have it typed.
+   * On a remote that is a Unix shell; here it goes by the shell's name.
+   */
+  function cdLine(dir: string, shell: string | null): string {
+    const running = (shell ?? config.current.terminal.shell).toLowerCase();
+    if (!remote.remote && /\bcmd(\.exe)?\b/.test(running)) return `cd /d "${dir}"`;
+    const posix = remote.remote || /\b(bash|zsh|fish|sh|wsl)(\.exe)?\b/.test(running);
+    return `cd '${dir.replaceAll("'", posix ? "'\\''" : "''")}'`;
+  }
+
+  /** Jump Terminal Here: send the terminal in front to a folder of the tree. */
+  function jumpTerminal(key: number, dir: string) {
+    const terminal = terminals.find((t) => t.key === key);
+    const view = terminalViews[key];
+    if (!terminal || !view) return;
+    view.send(`${cdLine(dir, terminal.shell)}\r`);
+    terminal.cwd = dir;
+    view.focus();
+  }
+
   /** Put the keyboard back in whatever the focused pane is showing. */
   function grabFocus() {
     const active = layout.current.active;
@@ -431,7 +457,7 @@
     else docs.editor.focus(layout.focused);
   }
 
-  /** Ctrl+`: to the terminal and back, opening one if there is none. */
+  /** Toggle Terminal: to the terminal and back, opening one if there is none. */
   function toggleTerminal() {
     const leaf = layout.current;
     if (activeTerminal !== null) {
@@ -507,10 +533,6 @@
     if (roots.some((each) => segmentsBelow(each, path) !== null) && (await docs.closeWhere(under))) {
       tree.fold(path);
     }
-  }
-
-  function inTerminal(target: EventTarget | null): boolean {
-    return target instanceof Element && target.closest("[data-terminal]") !== null;
   }
 
   // --- remote -------------------------------------------------------------------
@@ -601,7 +623,7 @@
   function browseRemote(mode: BrowseRequest["mode"], suggested = ""): Promise<string | null> {
     // A file that already lives somewhere is saved from there; anything else
     // starts where the last choice was made, or in the folder that is open.
-    const start = suggested.includes("/") ? dirName(suggested) : (lastBrowsed ?? terminalDir());
+    const start = suggested.includes("/") ? dirName(suggested) : (lastBrowsed ?? workingDir());
     return new Promise((resolve) => {
       browse = {
         mode,
@@ -735,7 +757,7 @@
       title: "Save this connection?",
       message: `Keep ${info.label}, so Thread can connect to it again without asking.`,
       note:
-        "A saved connection is listed under Remote → Connect Known, and Thread reopens it, " +
+        "A saved connection is listed under Remote → Hosts, and Thread reopens it, " +
         "with what you had open on it, the next time it starts. What you signed in with is " +
         "stored encrypted for your Windows account. Not saved, it ends when this window closes.",
       confirm: "Save",
@@ -757,7 +779,7 @@
     return saved ? connectionLabel(saved) : "the remote";
   };
 
-  /** Remote → Connect Known. */
+  /** Remote → Hosts. */
   async function connectKnown(id: string) {
     if (!(await docs.confirm())) return;
 
@@ -844,20 +866,39 @@
     return identity;
   });
 
-  /** The folder the window is working in, which is whose branch is shown. */
-  const workDir = $derived(terminalDir());
-  let gitBranch = $state<string | null>(null);
+  /** A repository's state, as the backend reads it. For reading only. */
+  type GitStatus = {
+    branch: string;
+    /** False when only the branch is known: there was no `git` to count with. */
+    counted: boolean;
+    staged: number;
+    unstaged: number;
+    untracked: number;
+    conflicts: number;
+    upstream: boolean;
+    ahead: number;
+    behind: number;
+  };
 
-  /** Read the branch again. It moves when something is checked out elsewhere. */
+  /** The folder the window is working in, which is whose repository is shown. */
+  const workDir = $derived(workingDir());
+  let git = $state.raw<GitStatus | null>(null);
+  let gitAsking = false;
+
+  /** Read it again. It moves with every save, and with what is done in a terminal. */
   async function refreshGit() {
     const dir = workDir;
     if (dir === null || remote.status === "connecting" || remote.status === "lost") {
-      if (dir === null) gitBranch = null;
+      if (dir === null) git = null;
       return;
     }
-    const branch = await invoke<string | null>("git_branch", { dir }).catch(() => null);
-    // Still the folder that was asked about.
-    if (dir === workDir) gitBranch = branch;
+    // One at a time: a slow answer is waited for, not asked for again.
+    if (gitAsking) return;
+    gitAsking = true;
+    const status = await invoke<GitStatus | null>("git_status", { dir }).catch(() => null);
+    gitAsking = false;
+    // Still the folder that was asked about, and only if something moved.
+    if (dir === workDir && JSON.stringify(status) !== JSON.stringify(git)) git = status;
   }
 
   // At once when the folder changes, or the machine it is on; then on a timer.
@@ -1042,6 +1083,23 @@
     layout.split(dir, [isTerminal(key) ? makeTerminal() : key], pane);
   }
 
+  /**
+   * The buttons at the end of a strip: the tab in front moves to a new pane
+   * beside this one or below it. With only the one tab there is nothing to
+   * leave behind, and it is split as `:sp` would.
+   */
+  function splitOff(dir: SplitDir, pane: number) {
+    const leaf = layout.leaf(pane);
+    const key = leaf?.active ?? null;
+    if (!leaf || key === null) return;
+    if (leaf.tabs.length < 2) {
+      splitPane(dir, pane, key);
+      return;
+    }
+    const to = layout.split(dir, [], pane);
+    moveTab(key, pane, to, -1);
+  }
+
   /** `:sp file` and `:vsp file`. */
   async function splitOn(dir: SplitDir, file: string | null) {
     const pane = layout.focused;
@@ -1075,7 +1133,7 @@
    */
   function resolvePath(file: string): string {
     if (/^([a-zA-Z]:[\\/]|[\\/])/.test(file)) return file;
-    const base = terminalDir();
+    const base = workingDir();
     if (base === null) return file;
     const sep = base.includes("\\") ? "\\" : "/";
     return base.replace(/[\\/]$/, "") + sep + file;
@@ -1197,103 +1255,57 @@
     void appWindow.close();
   }
 
-  // Ctrl+C/X/V/Z/A are the editor's and the text fields' own; these are the
-  // ones the File menu advertises, plus Ctrl+Tab. `preventDefault` matters as
-  // much as the handler: the webview has its own ideas about most of them.
-  //
-  // Handled on the way *down* to the editor and stopped there, so they mean
-  // the same thing whatever the editor would have made of them. Vim has uses
-  // of its own for Ctrl+O, Ctrl+W and Ctrl+N; a key that both closed the file
-  // and started a vim window command would be worse than either.
-  const SHORTCUTS = new Set(["n", "o", "s", "w", "tab"]);
+  // There is one hotkey, Ctrl+Shift+P for the command list: everything else
+  // is done from that, the menus and vim's own command line. The webview has a browser's worth of
+  // its own (Ctrl+P prints, F5 reloads, Ctrl+F searches the page), and those
+  // are stopped here. What is left alone is typing: the clipboard, undo,
+  // moving by word, and whatever the editor or a shell makes of a key.
+  const TYPING = new Set([
+    "a", "c", "v", "x", "y", "z",
+    "arrowleft", "arrowright", "arrowup", "arrowdown",
+    "backspace", "delete", "home", "end", "insert",
+    "control", "shift", "alt", "meta",
+  ]);
+  const HISTORY = new Set(["arrowleft", "arrowright", "home"]);
 
-  function onKeydown(event: KeyboardEvent) {
-    // A dialog is up; the window behind it is not taking commands.
-    const blocked =
-      docs.busy ||
-      appearanceOpen ||
-      lspOpen ||
-      paletteOpen ||
-      question !== null ||
-      connectOpen ||
-      browse !== null ||
-      remote.status === "connecting";
-
-    // F6 steps from pane to pane, and Shift+F6 back: the one way between
-    // them that works from a terminal, whose keys are otherwise the shell's.
-    if (event.key === "F6" && !event.ctrlKey && !event.altKey && !event.metaKey) {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!blocked && layout.leaves.length > 1) layout.focusNext(event.shiftKey ? -1 : 1);
-      return;
-    }
-    if (!event.ctrlKey || event.altKey || event.metaKey) return;
-
-    // Ctrl+H/J/K/L go to the pane that way, as most vim setups have them,
-    // while there is more than one pane and vim is not being typed into.
-    // (Vim's own Ctrl+W is this window's Close, and stays that.)
-    const towards = WINCMD[event.key.toLowerCase()];
-    if (
-      towards &&
-      !event.shiftKey &&
-      layout.leaves.length > 1 &&
-      docs.vimMode !== null &&
-      docs.vimMode !== "insert" &&
-      docs.vimMode !== "replace" &&
-      event.target instanceof Element &&
-      event.target.closest(".cm-content") !== null
-    ) {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!blocked) layout.focusTowards(towards);
-      return;
-    }
-
-    // Ctrl+` goes to the terminal and back, and with Shift opens another;
-    // from anywhere, a terminal included.
-    if (event.code === "Backquote") {
-      event.preventDefault();
-      event.stopPropagation();
-      if (blocked || event.repeat) return;
-      if (event.shiftKey) newTerminal();
-      else toggleTerminal();
-      return;
-    }
-
+  /** Whether a key is one the webview would act on as a browser. */
+  function isBrowserKey(event: KeyboardEvent): boolean {
     const key = event.key.toLowerCase();
-    // Ctrl+Shift+P is the command palette, from anywhere: no shell has a
-    // use for it.
-    if (key === "p" && event.shiftKey) {
+    // Alt+F4 is the system's, and stays the way to close a window.
+    if (/^f\d+$/.test(key)) return !(key === "f4" && event.altKey);
+    // AltGr, which is how half the world types `@` and `{`.
+    if (event.ctrlKey && event.altKey) return false;
+    if (event.altKey) return HISTORY.has(key);
+    return (event.ctrlKey || event.metaKey) && !TYPING.has(key);
+  }
+
+  // On the way down, for everything but the editor, vim's line and a terminal: those
+  // are asked first, vim and a shell having uses of their own for Ctrl, and
+  // are caught on the way back up with whatever they made nothing of.
+  function onKeydownCapture(event: KeyboardEvent) {
+    // From anywhere, a terminal included: no shell has a use for it.
+    if (event.ctrlKey && event.shiftKey && !event.altKey && event.key.toLowerCase() === "p") {
       event.preventDefault();
       event.stopPropagation();
+      // Not over a dialog: the window behind one is not taking commands.
+      const blocked =
+        docs.busy ||
+        appearanceOpen ||
+        lspOpen ||
+        question !== null ||
+        connectOpen ||
+        browse !== null ||
+        remote.status === "connecting";
       if (!blocked && !event.repeat) paletteOpen = true;
       return;
     }
-    // Typed into a terminal, the rest belong to the shell: Ctrl+W there
-    // deletes a word, and must not close the tab. Ctrl+Tab is the exception,
-    // being the way out to the other tabs.
-    if (inTerminal(event.target) && key !== "tab") return;
-    if (!SHORTCUTS.has(key)) return;
-    event.preventDefault();
-    event.stopPropagation();
+    const typedInto =
+      event.target instanceof Element && event.target.closest(".cm-editor, [data-vim-line], [data-terminal]") !== null;
+    if (!typedInto && isBrowserKey(event)) event.preventDefault();
+  }
 
-    if (blocked) return;
-
-    if (key === "tab") {
-      cycleTabs(event.shiftKey ? -1 : 1);
-      return;
-    }
-    // Holding the others down should not open a stack of dialogs or files.
-    if (event.repeat) return;
-
-    if (key === "n") docs.newFile();
-    else if (key === "o" && event.shiftKey) void openFolder();
-    else if (key === "o") void docs.openDialog();
-    else if (key === "w") closeTab();
-    // A terminal is what is on screen, and there is nothing of it to save.
-    else if (!showingFile) return;
-    else if (event.shiftKey) void docs.saveAs();
-    else void docs.save();
+  function onKeydown(event: KeyboardEvent) {
+    if (isBrowserKey(event)) event.preventDefault();
   }
 
   // --- right-click menu -------------------------------------------------------
@@ -1331,6 +1343,37 @@
   }
 
   /**
+   * The editor. On text it is the clipboard's menu; on the space past the
+   * end of the file, which is nothing in particular, it is the window's.
+   */
+  function onEditorContextMenu(event: MouseEvent, pane: number) {
+    const onText = event.target instanceof Element && event.target.closest(".cm-line") !== null;
+    const edit = (command: EditCommand) => () => {
+      // The menu took the focus to be clicked, and these act on what has it.
+      docs.editor.focus(pane);
+      void runEdit(command);
+    };
+    ctx = {
+      x: event.clientX,
+      y: event.clientY,
+      items: onText
+        ? [
+            item("Cut", edit("cut")),
+            item("Copy", edit("copy")),
+            item("Paste", edit("paste")),
+            SEP,
+            item("Select All", edit("selectAll")),
+          ]
+        : [
+            item("Paste", edit("paste")),
+            item("Select All", edit("selectAll")),
+            SEP,
+            item("Refresh Page", refreshPage),
+          ],
+    };
+  }
+
+  /**
    * A row in the file tree, or the empty space below the rows (`row` null).
    * This menu is the only way to create, rename or delete from the tree.
    */
@@ -1350,18 +1393,20 @@
     const own = !row
       ? []
       : row.root
-        ? [item("Close Folder", () => void closeFolders([row.path])), SEP]
-        : [
-            item("Rename", () => startRename(row)),
-            item("Delete", () => void deleteRow(row), true),
-            SEP,
-          ];
+        ? [item("Close Folder", () => void closeFolders([row.path]))]
+        : [item("Rename", () => startRename(row)), item("Delete", () => void deleteRow(row), true)];
+    // Only with a terminal in front: it is the one that is sent there.
+    const terminal = activeTerminal;
+    const jump =
+      row?.folder && terminal !== null
+        ? [item("Jump Terminal Here", () => jumpTerminal(terminal, row.path)), SEP]
+        : [];
+    // Reloading is for the empty space below the rows, not for a row.
+    const items = [...jump, ...create, ...own, ...(row ? [] : [item("Refresh Page", refreshPage)])];
+    // No line under the last entry.
+    if (items.at(-1) === SEP) items.pop();
 
-    ctx = {
-      x: event.clientX,
-      y: event.clientY,
-      items: [...create, ...own, item("Refresh Page", refreshPage)],
-    };
+    ctx = { x: event.clientX, y: event.clientY, items };
   }
 
   /** A terminal. The way to copy out of it, and one of the ways to end it. */
@@ -1404,8 +1449,6 @@
         SEP,
         item("Split Right", () => splitPane("row", pane, key)),
         item("Split Down", () => splitPane("column", pane, key)),
-        SEP,
-        item("Refresh Page", refreshPage),
       ],
     };
   }
@@ -1444,6 +1487,11 @@
     untrack(() => lsp.configure(enabled));
   });
 
+  // Which way round the tree lists a folder is the config's to say.
+  $effect(() => {
+    tree.filesFirst = config.current.files.files_first;
+  });
+
   // A folder opened or closed can change which project a file belongs to.
   $effect(() => {
     void tree.roots.length;
@@ -1463,89 +1511,58 @@
     }
   });
 
-  // --- the command palette ---------------------------------------------------------
+  // --- the command list ------------------------------------------------------------
   //
-  // Everything the menus and the keys do, and the settings that are a
-  // switch, as one list. Made each time it is looked at, so what is not
-  // possible just now is listed as such.
+  // A few things to do by name, the one last done first. Made each time it
+  // is looked at, so what is not possible just now is listed as such.
 
-  /** A switch in `[editor]`, as the palette words turning it on and off. */
-  const SWITCHES = [
-    ["word_wrap", "Word Wrap"],
-    ["line_numbers", "Line Numbers"],
-    ["relative_line_numbers", "Relative Line Numbers"],
-    ["auto_close", "Bracket Closing"],
-    ["smooth_caret", "Smooth Caret"],
-    ["detect_indentation", "Indentation Detection"],
-  ] as const;
+  const RECENT_KEY = "thread.commands.recent";
+
+  /** The commands that have been run, by title, the latest first. */
+  let recent = $state<string[]>(readRecent());
+
+  function readRecent(): string[] {
+    try {
+      const kept: unknown = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+      return Array.isArray(kept) ? kept.filter((each) => typeof each === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function ranCommand(title: string) {
+    recent = [title, ...recent.filter((each) => each !== title)];
+    try {
+      localStorage.setItem(RECENT_KEY, JSON.stringify(recent));
+    } catch {
+      /* nowhere to keep it; the order lasts as long as the window does */
+    }
+  }
 
   const commands = $derived.by((): Command[] => {
-    const panes = layout.leaves.length;
-    const on = (is: boolean) => (is ? "Off" : "On");
-    const connected = remote.status === "connected" || remote.status === "lost";
-    return [
-      { title: "File: New File", keys: "Ctrl+N", run: () => docs.newFile() },
-      { title: "File: Open File…", keys: "Ctrl+O", run: () => void docs.openDialog() },
-      { title: "File: Open Folder…", keys: "Ctrl+Shift+O", run: () => void openFolder() },
-      { title: "File: Save", keys: "Ctrl+S", disabled: !showingFile, run: () => void docs.save() },
-      { title: "File: Save As…", keys: "Ctrl+Shift+S", disabled: !showingFile, run: () => void docs.saveAs() },
-      { title: "File: Save All", disabled: docs.dirty.length === 0, run: () => void docs.saveAll() },
-      { title: "File: Close Tab", keys: "Ctrl+W", disabled: layout.current.active === null, run: () => closeTab() },
-      { title: "File: Close All Files", disabled: docs.list.length === 0, run: () => void docs.closeAll() },
-      {
-        title: tree.roots.length > 1 ? "File: Close All Folders" : "File: Close Folder",
-        disabled: tree.roots.length === 0,
-        run: () => void closeFolders(tree.roots.map((root) => root.path)),
-      },
-      { title: "File: New Window", run: () => void newWindow() },
-      { title: "File: Reload Window", run: () => void refreshPage() },
-      { title: "File: Close Window", run: closeWindow },
-      { title: "File: Exit", run: () => void quit() },
-
-      { title: "View: Toggle Sidebar", run: () => (sidebarCollapsed = !sidebarCollapsed) },
-      { title: "View: Split Right", disabled: layout.current.active === null, run: () => splitPane("row") },
-      { title: "View: Split Down", disabled: layout.current.active === null, run: () => splitPane("column") },
-      { title: "View: Close Pane", disabled: panes < 2, run: () => closePane(layout.focused) },
-      { title: "View: Close Other Panes", disabled: panes < 2, run: onlyPane },
-      { title: "View: Focus Next Pane", keys: "F6", disabled: panes < 2, run: () => layout.focusNext(1) },
-
-      { title: "Terminal: New Terminal", keys: "Ctrl+Shift+`", run: () => newTerminal() },
-      { title: "Terminal: Toggle Terminal", keys: "Ctrl+`", run: toggleTerminal },
-      ...shells.map((shell) => ({
-        title: `Terminal: New ${shell.name}`,
-        run: () => newTerminal(shell),
-      })),
-      {
-        title: "Terminal: Find in Terminal",
-        keys: "Ctrl+Shift+F",
-        disabled: activeTerminal === null,
-        run: () => activeTerminal !== null && terminalViews[activeTerminal]?.find(),
-      },
-
-      { title: "Remote: Connect…", disabled: remote.status !== "local", run: openConnect },
-      ...remote.known.map((known) => ({
-        title: `Remote: Connect to ${connectionLabel(known)}`,
-        disabled: remote.status !== "local",
-        run: () => void connectKnown(known.id),
-      })),
-      { title: "Remote: Disconnect", disabled: !connected, run: () => void disconnect() },
-      { title: "Remote: Reconnect", disabled: remote.status !== "lost", run: () => void reconnect() },
-
-      { title: "Settings: Appearance…", run: () => (appearanceOpen = true) },
-      { title: "Settings: Languages and Language Servers…", run: () => (lspOpen = true) },
-      {
-        title: "Settings: Open Config File",
-        run: () => void invoke("open_config").catch((e) => console.error("open_config failed", e)),
-      },
-      {
-        title: `Settings: Turn Vim Motions ${on(config.current.vim.enabled)}`,
-        run: () => void config.set("vim", "enabled", !config.current.vim.enabled),
-      },
-      ...SWITCHES.map(([key, name]) => ({
-        title: `Settings: Turn ${name} ${on(config.current.editor[key])}`,
-        run: () => void config.set("editor", key, !config.current.editor[key]),
-      })),
+    const all: Command[] = [
+      { title: "New Terminal", run: () => newTerminal() },
+      { title: "Toggle Terminal", run: toggleTerminal },
+      { title: "Reconnect", disabled: remote.status !== "lost", run: () => void reconnect() },
+      { title: "Reload Window", run: () => void refreshPage() },
+      { title: "Close Window", run: closeWindow },
+      // The same as Close Window, under the name some reach for.
+      { title: "Exit", run: closeWindow },
     ];
+    const used = (command: Command) => {
+      const at = recent.indexOf(command.title);
+      return at === -1 ? recent.length : at;
+    };
+    // Stable, so what has never been run stays in the order above.
+    return all
+      .sort((a, b) => used(a) - used(b))
+      .map((command) => ({
+        ...command,
+        run: () => {
+          ranCommand(command.title);
+          command.run();
+        },
+      }));
   });
 
   /** A new config has arrived, from this window's dialog, another's, or the file. */
@@ -1565,12 +1582,12 @@
     // and the machine that would be asked about them do not match; and not
     // of a connection that has dropped, which cannot answer.
     if (remote.status === "connecting" || remote.status === "lost") return;
-    // Every stamp is a round trip on a remote, so it is asked a third as often.
-    if (remote.remote && diskTicks++ % 3 !== 0) return;
+    // Every stamp is a round trip on a remote, so it is asked half as often.
+    if (remote.remote && diskTicks++ % 2 !== 0) return;
     void docs.checkDisk();
     void tree.poll();
-    // A checkout is rarer than a save; every third of these is often enough.
-    if (gitTicks++ % 3 === 0) void refreshGit();
+    // That one runs `git`: once a second here, and every two on a remote.
+    if (gitTicks++ % 4 === 0) void refreshGit();
   }
 
   onMount(() => {
@@ -1647,7 +1664,10 @@
 <!-- Coming back to the window is when a stale file would be noticed, so that
      moment does not wait for the next tick of the poll. -->
 <svelte:window
-  onkeydowncapture={onKeydown}
+  onkeydowncapture={onKeydownCapture}
+  onkeydown={onKeydown}
+  onpointerdowncapture={onElsewhere}
+  onfocusin={onElsewhere}
   oncontextmenu={onWindowContextMenu}
   onfocus={checkDisk}
 />
@@ -1697,7 +1717,6 @@
       collapsed={sidebarCollapsed}
       {resizing}
       onselect={onTreeSelect}
-      onkey={onTreeKey}
       onedit={(value) => void finishNaming(value)}
       oncontext={onTreeContextMenu}
     />
@@ -1727,13 +1746,15 @@
           closable={layout.leaves.length > 1}
           {docs}
           editor={config.current.editor}
+          {configured}
           onfocus={() => layout.focus(leaf.id)}
           onselect={(key) => layout.open(key, leaf.id)}
           onclose={(key) => closeTab(key, leaf.id)}
           onmove={(key, to, index) => moveTab(key, leaf.id, to, index)}
           oncontext={(event, key) => onTabContextMenu(event, key, leaf.id)}
-          onsplit={(dir) => splitPane(dir, leaf.id)}
+          onsplit={(dir) => splitOff(dir, leaf.id)}
           onclosepane={() => closePane(leaf.id)}
+          oneditorcontext={(event) => onEditorContextMenu(event, leaf.id)}
         />
       {/each}
 
@@ -1748,6 +1769,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="terminal"
+          class:behind={!front}
           data-pane={leaf?.id}
           style={box ? place(box, "var(--tabs-height)") : "display:none"}
           onfocusin={() => leaf && layout.focus(leaf.id)}
@@ -1802,49 +1824,68 @@
     onmove={(pin, index) => void pins.move(pin, index)}
   >
     {#snippet start()}
-      <!-- Where the window is working: this machine or a remote, then as
-           whom, on what, in which mode, and on which branch. All of it is
-           for reading; changing any of it is done from the menus.
+      <!-- Where the window is working, as one capsule: who, and on what.
+           Filled while that is a remote, and in the colour of a fault once
+           the connection to it has dropped. Then the repository the folder
+           is in: its branch, and what in it is not yet where it is going.
+           All of it is for reading; changing any of it is done elsewhere.
 
            `data-drop` is the order they give way in as the window narrows,
-           lowest first (see `PinBar`). The mode has none: it is what the
-           next key depends on, and is the last thing to go. -->
-      <span class="place" data-status={remote.status} data-drop="3">
-        {#if remote.status === "connecting"}
-          Connecting
-        {:else if remote.status === "connected"}
-          Remote
-        {:else if remote.status === "lost"}
-          Disconnected
-        {:else}
-          Local
-        {/if}
+           lowest first (see `PinBar`), the group having half the bar. What
+           is about the file being edited is not here: each pane says that
+           at its own foot. -->
+      <span
+        class="where"
+        data-status={remote.status}
+        title={remote.status === "connecting"
+          ? `Connecting to ${remote.pending ?? "the remote"}`
+          : remote.status === "connected"
+            ? `Remote: ${where.user}@${where.host}`
+            : remote.status === "lost"
+              ? `Disconnected from ${where.user}@${where.host}`
+              : `Local: ${where.user}@${where.host}`}
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path
+            d="M3.6 1.2 L0.9 3.9 L3.6 6.6 M6.4 3.4 L9.1 6.1 L6.4 8.8"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span class="who">{where.user}{where.user && where.host ? "@" : ""}{where.host}</span>
       </span>
-      {#if where.user}
-        <span class="user" data-drop="1">{where.user}</span>
-      {/if}
-      {#if where.host}
-        <span class="host" data-drop="2">{where.host}</span>
-      {/if}
-      {#if docs.vimMode && showingFile}
-        <span class="mode" data-mode={docs.vimMode}>{docs.vimMode}</span>
-      {/if}
-      {#if gitBranch}
-        <span class="git" title="Git branch" data-drop="4">{gitBranch}</span>
-      {/if}
-    {/snippet}
-    {#snippet info()}
-      <!-- What rarely changes goes first as the window narrows; where the
-           cursor is stays to the end. -->
-      {#if docs.active && showingFile}
-        <span>Ln {docs.cursor.line}, Col {docs.cursor.col}</span>
-        <span data-drop="3">{indentLabel(docs.active.indent)}</span>
-        <span data-drop="2">{docs.active.eol === "crlf" ? "CRLF" : "LF"}</span>
-        <span data-drop="1">{docs.active.bom ? "UTF-8 with BOM" : "UTF-8"}</span>
-        <!-- What a file is can change with the config, which names the
-             user's own languages; `languageOf` itself is not watched. -->
-        <span data-drop="4">{(void configured, languageOf(docs.active.name))}</span>
-
+      {#if git}
+        <span class="git" title="Git branch" data-drop="6">{git.branch}</span>
+        {#if git.conflicts > 0}
+          <span class="fault" title="Files left in conflict by a merge" data-drop="5">
+            {git.conflicts} conflicted
+          </span>
+        {/if}
+        {#if git.unstaged > 0}
+          <span title="Files with changes that are not staged" data-drop="4">
+            {git.unstaged} unstaged
+          </span>
+        {/if}
+        {#if git.staged > 0}
+          <span title="Files with changes staged for the next commit" data-drop="3">
+            {git.staged} staged
+          </span>
+        {/if}
+        {#if git.untracked > 0}
+          <span title="Files git has not been told of" data-drop="1">
+            {git.untracked} untracked
+          </span>
+        {/if}
+        {#if git.ahead > 0 || git.behind > 0}
+          <span title="Commits not yet pushed, and commits not yet pulled" data-drop="2">
+            ↑{git.ahead} ↓{git.behind}
+          </span>
+        {:else if git.counted && !git.upstream}
+          <span title="This branch has not been pushed anywhere" data-drop="2">unpublished</span>
+        {/if}
       {/if}
     {/snippet}
   </PinBar>
@@ -1962,6 +2003,12 @@
   .terminal {
     position: absolute;
   }
+  /* With another tab in front it is still laid over the pane, and though
+     nothing of it shows it would take every click meant for the editor
+     under it, and the keyboard with them. */
+  .terminal.behind {
+    pointer-events: none;
+  }
 
   /* The line between two panes, and the handle that moves it. The handle is
      wide enough to hit; what shows is a hairline down its middle. */
@@ -2011,22 +2058,43 @@
     }
   }
 
-  /* The left end of the bottom bar. Every item is the bar's own text, in the
-     accent like the rest of it. Only a connection that has dropped is set
-     apart: that one is a fault, not a fact about the window. */
-  .place[data-status="lost"] {
-    color: var(--danger);
+  /* The left end of the bottom bar. Where the window is working is a
+     capsule: tinted on this machine, filled on a remote, and in the colour
+     of a fault once the connection has dropped. The rest is the bar's own
+     text, in the accent like the rest of it. */
+  .where {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    height: 17px;
+    max-width: 16rem;
+    padding: 0 0.6rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
-  /* Named the way the status items are: "Normal", not vim's shouted "NORMAL". */
-  .mode {
-    text-transform: capitalize;
+  .where[data-status="connected"] {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+  .where[data-status="connecting"] {
+    opacity: 0.6;
+  }
+  .where[data-status="lost"] {
+    background: var(--danger);
+    color: var(--accent-ink);
+  }
+  .where svg {
+    flex: none;
   }
   /* A machine or a branch with a very long name is cut short rather than
      allowed to push everything else out of the bar. */
-  .host,
+  .who,
   .git {
     max-width: 14rem;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .fault {
+    color: var(--danger);
   }
 </style>

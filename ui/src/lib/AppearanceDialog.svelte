@@ -188,7 +188,7 @@
           onchange={(e) =>
             void config.set("palette", "material", e.currentTarget.checked ? "acrylic" : "none")}
         />
-        Acrylic — frost what is behind the command palette
+        Acrylic — frost what is behind the command list
       </label>
 
       <label for="ap-scale">Scale</label>
@@ -327,6 +327,15 @@
         value={config.current.files.exclude.join(", ")}
         onchange={onExcludeChange}
       />
+      <span></span>
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={config.current.files.files_first}
+          onchange={(e) => void config.set("files", "files_first", e.currentTarget.checked)}
+        />
+        Files before folders in the tree
+      </label>
     </div>
     <p class="hint">
       Names, separated by commas. <code>*</code> stands for anything, so <code>.*</code> is every

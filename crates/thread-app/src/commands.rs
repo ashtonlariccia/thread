@@ -482,17 +482,21 @@ pub fn identity() -> Identity {
     }
 }
 
-/// The branch the folder is on, or `None` if it is not in a repository.
-/// Asked again every few seconds, so that a checkout made in a terminal shows.
+/// The branch the folder is on and what in it is changed, staged or not yet
+/// pushed, or `None` if it is not in a repository. Asked again every second
+/// or so, so that what is done in a terminal shows.
 #[tauri::command]
-pub async fn git_branch(
+pub async fn git_status(
     window: WebviewWindow,
     remotes: State<'_, Remotes>,
     dir: String,
-) -> Result<Option<String>, String> {
+) -> Result<Option<git::Status>, String> {
     Ok(match remotes.of(&window) {
-        Some(link) => link.remote.git_branch(&dir).await,
-        None => git::branch(Path::new(&dir)),
+        Some(link) => link.remote.git_status(&dir).await,
+        // Off the main thread: it runs `git` and waits for it.
+        None => tauri::async_runtime::spawn_blocking(move || git::status(Path::new(&dir)))
+            .await
+            .unwrap_or(None),
     })
 }
 
@@ -629,7 +633,7 @@ pub async fn remote_connect(
     link_window(&app, &window, target).await
 }
 
-/// Remote -> Connect Known: sign in with what was saved.
+/// Remote -> Hosts: sign in with what was saved.
 ///
 /// `trust_new_key` is the answer to a question about the host's key, should
 /// it have come to one; a saved connection normally needs none.
@@ -704,7 +708,7 @@ pub async fn remote_save(
     Ok(saved)
 }
 
-/// The saved connections, for Remote -> Connect Known.
+/// The saved connections, for Remote -> Hosts.
 #[tauri::command]
 pub fn remote_known() -> Result<Vec<SavedConnection>, String> {
     Ok(ConnectionStore::load().map_err(|e| e.to_string())?.list())

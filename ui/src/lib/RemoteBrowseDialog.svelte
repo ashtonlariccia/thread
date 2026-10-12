@@ -39,10 +39,18 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
 
-  /** Folders only, when a folder is what is being chosen. */
-  const shown = $derived(
-    request?.mode === "folder" ? entries.filter((entry) => entry.dir) : entries,
-  );
+  /**
+   * What is listed: files above folders, and under a line whatever is
+   * hidden, in the same order. Folders only, when a folder is what is
+   * being chosen.
+   */
+  const shown = $derived.by(() => {
+    const listed = request?.mode === "folder" ? entries.filter((entry) => entry.dir) : entries;
+    // A listing comes with its folders first, each lot by name.
+    const ordered = [...listed.filter((entry) => !entry.dir), ...listed.filter((entry) => entry.dir)];
+    const hidden = (entry: Entry) => entry.name.startsWith(".");
+    return { plain: ordered.filter((entry) => !hidden(entry)), hidden: ordered.filter(hidden) };
+  });
 
   // A new request starts over: where it says to, with nothing left from the last.
   $effect(() => {
@@ -145,23 +153,34 @@
       <p class="error" role="alert">{error}</p>
     {/if}
 
+    {#snippet row(entry: Entry)}
+      <li>
+        <button class="dlg-row entry" onclick={() => choose(entry)}>
+          <img
+            src={entry.dir ? folderIcon(entry.name, false) : fileIcon(entry.name)}
+            alt=""
+            width="14"
+            height="14"
+            draggable="false"
+          />
+          <span class="dlg-label">{entry.name}</span>
+        </button>
+      </li>
+    {/snippet}
+
     <ul class="dlg-list" class:loading>
-      {#each shown as entry (entry.path)}
-        <li>
-          <button class="dlg-row entry" onclick={() => choose(entry)}>
-            <img
-              src={entry.dir ? folderIcon(entry.name, false) : fileIcon(entry.name)}
-              alt=""
-              width="14"
-              height="14"
-              draggable="false"
-            />
-            <span class="dlg-label">{entry.name}</span>
-          </button>
-        </li>
-      {:else}
-        <li class="dlg-empty">{loading ? "Reading…" : "Nothing here."}</li>
+      {#each shown.plain as entry (entry.path)}
+        {@render row(entry)}
       {/each}
+      {#if shown.plain.length > 0 && shown.hidden.length > 0}
+        <li class="rule" role="separator"></li>
+      {/if}
+      {#each shown.hidden as entry (entry.path)}
+        {@render row(entry)}
+      {/each}
+      {#if shown.plain.length + shown.hidden.length === 0}
+        <li class="dlg-empty">{loading ? "Reading…" : "Nothing here."}</li>
+      {/if}
     </ul>
 
     {#if request.mode === "save"}
@@ -250,6 +269,13 @@
   }
   .dlg-list.loading {
     opacity: 0.55;
+  }
+
+  /* Between what is shown and what is hidden. */
+  .rule {
+    height: 1px;
+    margin: 5px 0.5rem;
+    background: var(--border);
   }
 
   .entry {

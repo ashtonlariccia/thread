@@ -162,7 +162,7 @@ fn main() {
             commands::rename_path,
             commands::delete_path,
             commands::identity,
-            commands::git_branch,
+            commands::git_status,
             commands::remote_connect,
             commands::remote_connect_saved,
             commands::remote_reconnect,

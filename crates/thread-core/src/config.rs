@@ -39,7 +39,7 @@ material = "none"
 scale = 100
 
 [palette]
-# The command palette (Ctrl+Shift+P). How solid it is, in percent: 10 to 100.
+# The command list (Edit -> Commands). How solid it is, in percent: 10 to 100.
 background_opacity = 35
 # What shows through it: "acrylic" frosts what is behind, "none" leaves it sharp.
 material = "acrylic"
@@ -71,6 +71,8 @@ auto_close = true
 # Names the file tree leaves out. `*` is any run of characters and `?` is any
 # one, matched against the name alone, so ".*" is every dotfile at any depth.
 exclude = [".*"]
+# Whether the file tree lists a folder's files above its folders.
+files_first = false
 
 [theme]
 # Colours for syntax highlighting. Available: "catppuccin".
@@ -122,13 +124,16 @@ enabled = []
 # line_comment = "#"
 # block_comment = ["/*", "*/"]
 # strings = ['"', "'"]
+# # What opens and closes code inside a string, which is coloured as code.
+# interpolation = ["{", "}"]
 # keywords = ["if", "else", "while", "return"]
 # types = ["int", "string"]
 # constants = ["true", "false", "nil"]
 # functions = ["print", "len"]
 # # Anything the lists cannot say, as regular expressions tried at the start
 # # of each token. `as` is one of: keyword, type, constant, function, builtin,
-# # operator, string, comment, number, property.
+# # operator, string, comment, number, property. With a group in one, only
+# # the group is coloured: 'ds\s+(\w+)' is the name after a `ds`.
 # patterns = [{ match = '@[a-z]+', as = "builtin" }]
 "##;
 
@@ -286,12 +291,15 @@ pub struct Files {
     /// File and folder names left out, as globs over the name (see
     /// [`crate::tree::matches`]).
     pub exclude: Vec<String>,
+    /// Whether the tree lists a folder's files above its folders.
+    pub files_first: bool,
 }
 
 impl Default for Files {
     fn default() -> Self {
         Self {
             exclude: vec![".*".into()],
+            files_first: false,
         }
     }
 }
@@ -414,6 +422,9 @@ pub struct Syntax {
     pub block_comment: Vec<String>,
     /// The delimiters a string starts and ends with.
     pub strings: Vec<String>,
+    /// What opens and what closes a stretch of code inside a string: two, or
+    /// none.
+    pub interpolation: Vec<String>,
     pub keywords: Vec<String>,
     pub types: Vec<String>,
     pub constants: Vec<String>,
@@ -456,6 +467,16 @@ impl Syntax {
             self.block_comment.clear();
         }
         self.strings = words(self.strings);
+        // A pair may be the same thing twice, so not `words`, which would
+        // make one of it.
+        self.interpolation = self
+            .interpolation
+            .into_iter()
+            .map(|mark| mark.trim().to_owned())
+            .collect();
+        if self.interpolation.len() != 2 || self.interpolation.iter().any(String::is_empty) {
+            self.interpolation.clear();
+        }
         self.keywords = words(self.keywords);
         self.types = words(self.types);
         self.constants = words(self.constants);
@@ -646,6 +667,7 @@ fn syntax_table(syntax: &Syntax) -> toml_edit::Table {
     for (key, words) in [
         ("block_comment", &syntax.block_comment),
         ("strings", &syntax.strings),
+        ("interpolation", &syntax.interpolation),
         ("keywords", &syntax.keywords),
         ("types", &syntax.types),
         ("constants", &syntax.constants),
@@ -1070,6 +1092,7 @@ mod tests {
             line_comment: "#".into(),
             block_comment: vec!["/*".into(), "*/".into()],
             strings: vec!["\"".into()],
+            interpolation: vec!["{".into(), "}".into()],
             keywords: vec!["if".into(), "else".into(), "if".into()],
             patterns: vec![SyntaxPattern {
                 pattern: r"@[a-z]+\b".into(),
@@ -1089,6 +1112,7 @@ mod tests {
         // Tidied on the way in: no dots, lower case, nothing twice.
         assert_eq!(stored.extensions, ["my", "myl"]);
         assert_eq!(stored.keywords, ["if", "else"]);
+        assert_eq!(stored.interpolation, ["{", "}"]);
         assert_eq!(stored.patterns[0].pattern, r"@[a-z]+\b");
         assert_eq!(parse(&text).unwrap(), config);
     }
@@ -1113,6 +1137,15 @@ mod tests {
             ..Default::default()
         };
         assert!(syntax.sanitised().block_comment.is_empty());
+    }
+
+    #[test]
+    fn half_an_interpolation_is_none() {
+        let syntax = Syntax {
+            interpolation: vec!["{".into(), " ".into()],
+            ..Default::default()
+        };
+        assert!(syntax.sanitised().interpolation.is_empty());
     }
 
     #[test]

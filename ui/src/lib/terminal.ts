@@ -12,7 +12,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { FitAddon } from "@xterm/addon-fit";
-import { SearchAddon } from "@xterm/addon-search";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
@@ -34,8 +33,6 @@ export type TerminalOptions = TerminalLook & {
   shell: string | null;
   /** A path or a web address in the output was Ctrl+clicked. */
   onlink: (link: Link) => void;
-  /** Ctrl+Shift+F: the way to search what has scrolled past was asked for. */
-  onfind: () => void;
   /** Something run in the terminal asked for a file or a folder to be opened, or closed. */
   onopen: (kind: OpenKind, path: string) => void;
 };
@@ -65,16 +62,12 @@ export function openRequest(data: string): { kind: OpenKind; path: string } | nu
 export type TerminalHandle = {
   focus: () => void;
   hasSelection: () => boolean;
-  /**
-   * Go to the next place `text` appears in the screen and what has scrolled
-   * off it, or the one before with `back`, and select it. False if it is
-   * nowhere.
-   */
-  find: (text: string, back: boolean) => boolean;
   /** Put the selection on the clipboard and drop the highlight. */
   copy: () => void;
   /** Type the clipboard at the shell. */
   paste: () => void;
+  /** Type `text` at the shell, as if at the keyboard. */
+  send: (text: string) => void;
   restyle: (look: TerminalLook) => void;
   /** End the shell and everything running in it. */
   dispose: () => void;
@@ -131,8 +124,6 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
-  const search = new SearchAddon();
-  term.loadAddon(search);
 
   // Paths and web addresses in the output, underlined under the pointer
   // and followed with Ctrl+click. A plain click stays what it is in a
@@ -185,13 +176,6 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
       return !(event.ctrlKey || event.shiftKey);
     }
     if (!event.ctrlKey) return true;
-
-    // Ctrl+Shift+F searches the output. Not Ctrl+F: that is a key the
-    // shell has a use for.
-    if (key === "f" && event.shiftKey) {
-      options.onfind();
-      return false;
-    }
 
     // Ctrl+C copies when something is selected, and is the interrupt it has
     // always been when nothing is. With Shift it only ever copies.
@@ -267,7 +251,6 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
 
   return {
     focus: () => term.focus(),
-    find: (text, back) => (back ? search.findPrevious(text) : search.findNext(text)),
     hasSelection: () => term.hasSelection(),
     copy,
     paste: () => {
@@ -278,6 +261,7 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
         (e) => console.error("paste failed", e),
       );
     },
+    send: (text) => term.input(text),
     restyle: (look) => {
       term.options.fontFamily = look.fontFamily;
       term.options.fontSize = look.fontSize;

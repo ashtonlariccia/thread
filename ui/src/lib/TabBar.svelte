@@ -31,7 +31,7 @@
     onmove: (key: number, to: number, index: number) => void;
     /** Right-click on a tab. App owns the menu, so only one is ever open. */
     oncontext: (event: MouseEvent, key: number) => void;
-    /** Another pane beside this one (`row`) or below it (`column`). */
+    /** The tab in front, to another pane beside this one (`row`) or below it (`column`). */
     onsplit: (dir: SplitDir) => void;
     onclosepane: () => void;
   };
@@ -52,7 +52,7 @@
 
   let strip = $state<HTMLElement | undefined>();
 
-  // Keep the active tab on screen: Ctrl+Tab, or a file opened from the tree,
+  // Keep the active tab on screen: `:bn`, or a file opened from the tree,
   // can land on one that is scrolled out of the strip.
   $effect(() => {
     if (activeKey === null) return;
@@ -193,17 +193,8 @@
     return over.gap;
   });
 
-  function onKeydown(event: KeyboardEvent, key: number, index: number) {
-    if (event.key === "Enter" || event.key === " ") {
-      onselect(key);
-      return;
-    }
-    // Reordering without a mouse, as on the pins.
-    if (event.ctrlKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-      event.preventDefault();
-      const to = index + (event.key === "ArrowLeft" ? -1 : 1);
-      if (to >= 0 && to < tabs.length) onmove(key, pane, to);
-    }
+  function onKeydown(event: KeyboardEvent, key: number) {
+    if (event.key === "Enter" || event.key === " ") onselect(key);
   }
 </script>
 
@@ -228,7 +219,7 @@
         aria-selected={tab.key === activeKey}
         title={tab.detail}
         onclick={() => onClick(tab.key)}
-        onkeydown={(e) => onKeydown(e, tab.key, index)}
+        onkeydown={(e) => onKeydown(e, tab.key)}
         onpointerdown={(e) => onPointerDown(e, index)}
         onpointermove={onPointerMove}
         onpointerup={onPointerUp}
@@ -273,16 +264,16 @@
     {/each}
   </div>
 
-  <!-- The pane's own controls, at the end of its strip: what `:vsp`, `:sp`
-       and `:close` do, for the pointer. -->
+  <!-- The pane's own controls, at the end of its strip. A split takes the
+       tab in front with it; with only the one tab, it is `:vsp` and `:sp`. -->
   <div class="controls">
-    <button class="ctl" title="Split right (:vsp)" aria-label="Split right" onclick={() => onsplit("row")}>
+    <button class="ctl" title="Move tab to a split on the right" aria-label="Split right" onclick={() => onsplit("row")}>
       <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
         <rect x="1" y="1.5" width="10" height="9" rx="1.6" fill="none" stroke="currentColor" />
         <path d="M6 1.5 V10.5" stroke="currentColor" />
       </svg>
     </button>
-    <button class="ctl" title="Split down (:sp)" aria-label="Split down" onclick={() => onsplit("column")}>
+    <button class="ctl" title="Move tab to a split below" aria-label="Split down" onclick={() => onsplit("column")}>
       <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
         <rect x="1" y="1.5" width="10" height="9" rx="1.6" fill="none" stroke="currentColor" />
         <path d="M1 6 H11" stroke="currentColor" />
