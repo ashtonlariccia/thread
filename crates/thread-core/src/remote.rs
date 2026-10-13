@@ -210,7 +210,7 @@ impl Handler for VerifyHostKey {
         key: &russh::keys::ssh_key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
         let fingerprint = key.fingerprint(russh::keys::HashAlg::Sha256).to_string();
-        let mut known = KnownHosts::load().unwrap_or_default();
+        let known = KnownHosts::load().unwrap_or_default();
         let verdict = known.verdict(&self.host, self.port, &fingerprint);
 
         if let Ok(mut seen) = self.seen.lock() {
@@ -221,8 +221,7 @@ impl Handler for VerifyHostKey {
             Verdict::Match => true,
             // A person has been shown this fingerprint and agreed to it.
             _ if self.trust_new_key => {
-                known.trust(&self.host, self.port, &fingerprint);
-                if let Err(e) = known.save() {
+                if let Err(e) = KnownHosts::remember(&self.host, self.port, &fingerprint) {
                     tracing::error!("could not record the host key: {e}");
                 }
                 true
@@ -811,6 +810,38 @@ impl Remote {
         });
 
         Ok(RemoteTerminal { commands, flow })
+    }
+
+    // --- what is running there ---------------------------------------------------
+
+    /// Send a signal to something run in a shell on the remote, and to
+    /// everything it has started: `INT` as Ctrl+C would, `TERM` to ask it to
+    /// end, `KILL` to end it.
+    ///
+    /// A shell that keeps track of what it runs gives each thing its own
+    /// group, and the group is what is signalled, so that a build goes with
+    /// its compilers. `shell` is the shell it was run from: should the two
+    /// share a group, the signal goes to the one process and not to the shell.
+    pub async fn signal(&self, pid: u32, shell: u32, signal: &str) -> Result<()> {
+        if !matches!(signal, "INT" | "TERM" | "KILL") {
+            return Err(refuse(format!(
+                "{signal} is not a signal that is sent from here."
+            )));
+        }
+        let script = format!(
+            "g=$(ps -o pgid= -p {pid} 2>/dev/null | tr -d ' '); \
+             s=$(ps -o pgid= -p {shell} 2>/dev/null | tr -d ' '); \
+             if [ -n \"$g\" ] && [ \"$g\" != \"$s\" ]; then kill -s {signal} -- \"-$g\"; \
+             else kill -s {signal} {pid}; fi 2>&1"
+        );
+        let said = self
+            .output(Self::login(&format!("exec sh -c {}", quoted(&script))))
+            .await?;
+        // Nothing said is nothing wrong; what `kill` does say is why not.
+        match said.lines().rev().find(|line| line.contains("kill")) {
+            Some(why) => Err(refuse(why.trim().to_owned())),
+            None => Ok(()),
+        }
     }
 
     // --- how busy it is -----------------------------------------------------------

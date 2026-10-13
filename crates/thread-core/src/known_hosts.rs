@@ -18,6 +18,12 @@ use crate::{data_dir, strip_bom, Error, Result};
 
 const FILE: &str = "known_hosts.json";
 
+/// Held while the file is read or rewritten. Two connections being made at
+/// once -- two windows starting together -- would otherwise each read it,
+/// add a host, and write it back, and the second would write the first's
+/// host out of it; or one would read it half written and take it for empty.
+static FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What was known about a host before this connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -45,6 +51,20 @@ fn key_for(host: &str, port: u16) -> String {
 
 impl KnownHosts {
     pub fn load() -> Result<Self> {
+        let _held = FILE_LOCK.lock();
+        Self::read()
+    }
+
+    /// Trust a fingerprint from now on, and write it down: added to what is
+    /// in the file at this moment, not to what was read from it earlier.
+    pub fn remember(host: &str, port: u16, fingerprint: &str) -> Result<()> {
+        let _held = FILE_LOCK.lock();
+        let mut known = Self::read().unwrap_or_default();
+        known.trust(host, port, fingerprint);
+        known.save()
+    }
+
+    fn read() -> Result<Self> {
         let path = data_dir()?.join(FILE);
         match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(strip_bom(&text)).map_err(|e| {
@@ -59,7 +79,7 @@ impl KnownHosts {
         }
     }
 
-    pub fn save(&self) -> Result<()> {
+    fn save(&self) -> Result<()> {
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| Error::Other(anyhow::anyhow!("could not write the known hosts: {e}")))?;
         std::fs::write(data_dir()?.join(FILE), text)?;

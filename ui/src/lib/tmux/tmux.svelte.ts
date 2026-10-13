@@ -53,6 +53,8 @@ export type Job = {
   pid: number;
   /** The pane it was run in. */
   pane: number;
+  /** That pane's shell: what it was run from. */
+  shell: number;
   /** Its command line, the folders of the program's own path left off. */
   command: string;
   /** Percent of one core, its children's included. */
@@ -117,7 +119,9 @@ export type Action =
   | { do: "switchSession" | "killSession"; session: number }
   | { do: "newSession"; name: string }
   | { do: "renameSession"; session: number; name: string }
-  | { do: "moveDivider"; window: number; divider: string; delta: number };
+  | { do: "moveDivider"; window: number; divider: string; delta: number }
+  /** Before another window, or with none named, at the end of a session. */
+  | { do: "moveWindow"; window: number; before?: number; session?: number };
 
 type Message =
   | { type: "state"; state: TmuxState }
@@ -190,10 +194,141 @@ export function jobs(panes: PaneBrief[], processes: Process[]): Job[] {
     for (const top of tops) {
       const name = program(top.command);
       const rest = top.command.slice(top.command.split(" ", 1)[0].length);
-      found.push({ pid: top.pid, pane: pane.id, command: name + rest, ...tally(top) });
+      found.push({
+        pid: top.pid,
+        pane: pane.id,
+        shell: pane.pid,
+        command: name + rest,
+        ...tally(top),
+      });
     }
   }
   return found;
+}
+
+/** A tmux pane at the time of a reading. Mirrors `PaneNow` in the core. */
+export type PaneNow = {
+  id: number;
+  window: number;
+  /** When anything in its window last printed, in seconds since 1970. */
+  activity: number;
+  command: string;
+  /** The folder it is in. */
+  path: string;
+};
+
+/** Something that ran in a window and has ended. */
+export type Finished = { command: string; at: number };
+
+/**
+ * How long something has to have run for its ending to be worth a word.
+ * Shorter than this it was watched to the end, or was never waited for.
+ */
+const WORTH_SAYING = 10_000;
+
+/**
+ * What has happened in the windows that are not being looked at: which
+ * have had something finish, and which have printed.
+ *
+ * Fed each reading of the remote. A build left running in another window
+ * is the case: its window is marked when it ends, and until then is marked
+ * as long as it is still printing.
+ */
+export class Watch {
+  /** The windows something has finished in since they were last looked at. */
+  finished = $state.raw<Record<number, Finished>>({});
+  /** The windows that have printed since they were last looked at. */
+  active = $state.raw<number[]>([]);
+
+  /** What was running at the last reading: its window, and since when. */
+  #running = new Map<number, { window: number; command: string; since: number }>();
+  /** Whether there has been a reading to compare with. */
+  #primed = false;
+  /** When each window had last printed, as of when it was last looked at; and as of now. */
+  #seen = new Map<number, number>();
+  #latest = new Map<number, number>();
+
+  /**
+   * Take in a reading. `looking` is the window in front of someone's eyes,
+   * if one is. Gives back what has just finished, to be announced.
+   */
+  update(
+    sessions: SessionInfo[],
+    processes: Process[],
+    panes: PaneNow[],
+    looking: number | null,
+    now: number,
+  ): Finished[] {
+    const windows = new Set(sessions.flatMap((session) => session.list.map((each) => each.id)));
+    const running = new Map<number, { window: number; command: string; since: number }>();
+    for (const session of sessions) {
+      for (const window of session.list) {
+        for (const job of jobs(window.panes, processes)) {
+          const since = this.#running.get(job.pid)?.since ?? now;
+          running.set(job.pid, { window: window.id, command: job.command, since });
+        }
+      }
+    }
+
+    const ended: Finished[] = [];
+    const finished = { ...this.finished };
+    if (this.#primed) {
+      for (const [pid, was] of this.#running) {
+        // Its window going is the window being closed, which is no news.
+        if (running.has(pid) || !windows.has(was.window)) continue;
+        if (now - was.since < WORTH_SAYING || was.window === looking) continue;
+        finished[was.window] = { command: was.command, at: now };
+        ended.push(finished[was.window]);
+      }
+    }
+    this.#running = running;
+    this.#primed = true;
+
+    for (const pane of panes) {
+      this.#latest.set(pane.window, Math.max(pane.activity, this.#latest.get(pane.window) ?? 0));
+    }
+    const active: number[] = [];
+    for (const [window, latest] of this.#latest) {
+      if (!windows.has(window)) {
+        this.#latest.delete(window);
+        this.#seen.delete(window);
+        continue;
+      }
+      // First heard of, it is taken as seen: what it printed before there
+      // was anyone to tell is not news either.
+      const seen = this.#seen.get(window);
+      if (seen === undefined || window === looking) this.#seen.set(window, latest);
+      else if (latest > seen) active.push(window);
+    }
+    for (const window of Object.keys(finished).map(Number)) {
+      if (!windows.has(window) || window === looking) delete finished[window];
+    }
+
+    if (JSON.stringify(finished) !== JSON.stringify(this.finished)) this.finished = finished;
+    if (active.join() !== this.active.join()) this.active = active;
+    return ended;
+  }
+
+  /** A window is being looked at: nothing that has happened in it is news any more. */
+  look(window: number) {
+    const latest = this.#latest.get(window);
+    if (latest !== undefined) this.#seen.set(window, latest);
+    if (this.active.includes(window)) this.active = this.active.filter((each) => each !== window);
+    if (window in this.finished) {
+      const { [window]: _seen, ...rest } = this.finished;
+      this.finished = rest;
+    }
+  }
+
+  /** The remote has gone, and with it everything that was known of it. */
+  reset() {
+    this.#running.clear();
+    this.#seen.clear();
+    this.#latest.clear();
+    this.#primed = false;
+    this.finished = {};
+    this.active = [];
+  }
 }
 
 /** Whether a pane is running something other than a shell waiting to be typed at. */

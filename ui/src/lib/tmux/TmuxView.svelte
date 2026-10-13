@@ -17,7 +17,7 @@
   import type { CellSize, Probe } from "./pane";
   import TmuxPaneView from "./TmuxPaneView.svelte";
   import TmuxHeader from "./TmuxHeader.svelte";
-  import type { Tmux, TmuxDivider, TmuxPane } from "./tmux.svelte";
+  import type { PaneNow, Tmux, TmuxDivider, TmuxPane } from "./tmux.svelte";
 
   type Props = {
     tmux: Tmux;
@@ -30,6 +30,10 @@
     remoteStatus: RemoteStatus;
     /** The remote's name, to say whose sessions these are. */
     host: string;
+    /** Each pane as last read: what it is running, and the folder it is in. */
+    live: PaneNow[];
+    /** The home folder on the remote, which a path is said short of. */
+    home: string;
     look: TerminalLook;
     scrollback: number;
     renderer: TerminalRenderer;
@@ -47,6 +51,8 @@
     railed,
     remoteStatus,
     host,
+    live,
+    home,
     look,
     scrollback,
     renderer,
@@ -160,6 +166,26 @@
     );
   }
 
+  // --- a title for each pane ---------------------------------------------------------
+  //
+  // With more than one pane in a window, each says what it is running and
+  // where. There is no room of a pane's own for it: tmux has given every
+  // row to the program. So it goes in the one row tmux leaves above a pane
+  // for the line between it and the pane over it, and for the panes along
+  // the top, in the strip above them all.
+
+  const titled = $derived((front?.panes.length ?? 0) > 1);
+
+  /** What a pane's title says: what it runs, and the folder it is in. */
+  function titleOf(pane: TmuxPane): { command: string; path: string } {
+    const now = live.find((each) => each.id === pane.id);
+    let path = now?.path ?? "";
+    if (home !== "" && home !== "/" && (path === home || path.startsWith(`${home}/`))) {
+      path = `~${path.slice(home.length)}`;
+    }
+    return { command: now?.command ?? pane.command, path };
+  }
+
   /** Counts the terminals that have come up, for what waits on one to be there. */
   let ready = $state(0);
 
@@ -222,10 +248,30 @@
     <TmuxHeader
       window={front}
       command={tmux.pane?.command ?? ""}
+      bare={titled}
       onsplit={(dir) => tmux.pane && tmux.act({ do: "split", pane: tmux.pane.id, dir })}
       onzoom={() => tmux.pane && tmux.act({ do: "zoom", pane: tmux.pane.id })}
       onclosepane={() => tmux.pane && onclosepane(tmux.pane)}
     />
+    <!-- The titles of the panes along the top, in the strip above them,
+         each over its own pane. -->
+    {#if titled && cell && front}
+      {@const size = cell}
+      <div class="top-titles">
+        {#each front.panes.filter((pane) => pane.y === 0) as pane (pane.id)}
+          {@const title = titleOf(pane)}
+          <div
+            class="pane-title"
+            class:active={pane.active}
+            style="left:{pane.x * size.w}px;width:{pane.w * size.w}px"
+            title={title.path}
+          >
+            <span class="what">{title.command}</span>
+            <span class="where">{title.path}</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
   {:else}
     <!-- The strip's room, kept: the room under it is what tmux is told
          about before there is a strip to show. -->
@@ -238,7 +284,7 @@
 
     {#if tmux.status === "attached" && cell}
       {@const size = cell}
-      <div class="grid">
+      <div class="grid" class:titled>
         {#each mounted as { pane, window } (pane.id)}
           {@const visible = window === front?.id}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -265,6 +311,21 @@
             />
           </div>
         {/each}
+
+        <!-- And of the panes below: in the row tmux leaves above each. -->
+        {#if titled && front}
+          {#each front.panes.filter((pane) => pane.y > 0) as pane (pane.id)}
+            {@const title = titleOf(pane)}
+            <div
+              class="pane-title between"
+              class:active={pane.active}
+              style={place({ x: pane.x, y: pane.y - 1, w: pane.w, h: 1 }, size)}
+            >
+              <span class="what">{title.command}</span>
+              <span class="where">{title.path}</span>
+            </div>
+          {/each}
+        {/if}
 
         {#each front?.dividers ?? [] as line (line.id)}
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -321,6 +382,10 @@
   /* The same card the editor's panes sit in (`.stage` in `App`). */
   .stage {
     --tabs-height: 26px;
+
+    /* For the titles of the panes along the top, which are placed over the
+       strip above them. */
+    position: relative;
 
     flex: 1;
     display: flex;
@@ -428,6 +493,59 @@
   .divider:hover::after,
   .divider.dragging::after {
     background: var(--accent);
+  }
+
+  /* A pane's title: what it runs, then where, the folder giving way
+     first when there is not the room. For reading only: a press on one goes
+     through to whatever is under it, the line that drags two panes apart
+     included. */
+  .top-titles {
+    position: absolute;
+    top: 0;
+    /* The same edge the panes start from (`.area`). */
+    left: 8px;
+    right: 110px;
+    height: var(--tabs-height);
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .pane-title {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0 0.15rem;
+    overflow: hidden;
+    color: var(--fg-dim);
+    font-size: 0.72rem;
+    white-space: nowrap;
+    user-select: none;
+    pointer-events: none;
+  }
+  .pane-title.between {
+    z-index: 6;
+    background: color-mix(in srgb, var(--fg) 5%, transparent);
+    border-radius: 3px;
+  }
+  .pane-title .what {
+    flex: none;
+    color: var(--fg);
+  }
+  .pane-title.active .what {
+    color: var(--accent);
+  }
+  .pane-title .where {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* The line between two panes, one over the other, would run through the
+     lower one's title. The title's own band is the line there; the line
+     itself shows when it is pointed at or dragged. */
+  .grid.titled .divider.across:not(:hover):not(.dragging)::after {
+    background: transparent;
   }
 
   .notice {

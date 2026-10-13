@@ -3,7 +3,7 @@
   import { Channel, invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { message } from "@tauri-apps/plugin-dialog";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 
   import AppearanceDialog from "./lib/AppearanceDialog.svelte";
   import ChangedDialog from "./lib/ChangedDialog.svelte";
@@ -52,7 +52,16 @@
     type SavedConnection,
   } from "./lib/state/remote.svelte";
   import { Tree } from "./lib/state/tree.svelte";
-  import { busy, jobs, Tmux, type Process, type TmuxPane } from "./lib/tmux/tmux.svelte";
+  import {
+    busy,
+    jobs,
+    Tmux,
+    Watch,
+    type Job,
+    type PaneNow,
+    type Process,
+    type TmuxPane,
+  } from "./lib/tmux/tmux.svelte";
   import type { Pin, SidebarItem } from "./lib/types";
 
   const pins = new Pins();
@@ -67,6 +76,8 @@
   });
   docs.watcher = lsp;
   const tmux = new Tmux();
+  /** What has happened in the tmux windows that are not being looked at. */
+  const watch = new Watch();
 
   const appWindow = getCurrentWindow();
 
@@ -169,7 +180,10 @@
   // away afterwards is the user's business.
   $effect(() => {
     const path = docs.active?.path;
-    if (path && tree.roots.length > 0) void tree.reveal(path);
+    // Untracked: `reveal` reads which folders are unfolded as it goes, and
+    // watching those too would have this unfold the file's folder again the
+    // moment it was folded.
+    if (path && tree.roots.length > 0) untrack(() => void tree.reveal(path));
   });
 
   /**
@@ -969,29 +983,60 @@
       /** Watts. */
       power: number | null;
     } | null;
+    /** Each core's share in use, in percent. */
+    perCore: number[];
     /** Every process on one of its terminals: what the windows are running. */
     processes: Process[];
+    /** Every tmux pane as it stands: what it runs, where, and when its window last printed. */
+    panes: PaneNow[];
   };
   /** The latest reading; null until there is one, and on a machine there is none of. */
   let system = $state.raw<SystemSample | null>(null);
 
-  // Read only while it is being looked at: with tmux showing, on a remote
-  // that is there. It is a channel held open and a few lines of shell left
-  // running on the remote, and neither is worth having for a bar out of sight.
+  /** The tmux window in front of someone's eyes, if one is. */
+  const looking = () =>
+    mode === "tmux" && document.hasFocus() ? (tmux.window?.id ?? null) : null;
+
+  // Read from the first turn to tmux for as long as the remote is there,
+  // whichever face is showing after that: it is a channel held open and a
+  // few lines of shell on the remote, against several seconds of an empty
+  // bar on every turn back, and a build that ends while the editor is
+  // showing is still one to be told of.
   $effect(() => {
-    if (mode !== "tmux" || remote.status !== "connected") return;
+    if (!tmuxOpened || remote.status !== "connected") return;
     const samples = new Channel<SystemSample>();
     let watching = true;
     samples.onmessage = (sample) => {
-      if (watching) system = sample;
+      if (!watching) return;
+      system = sample;
+      const ended = watch.update(tmux.sessions, sample.processes, sample.panes, looking(), Date.now());
+      // Something finished while this window was not the one in use: its
+      // button in the taskbar says so, until the window is come back to.
+      if (ended.length > 0 && !document.hasFocus()) {
+        void appWindow.requestUserAttention(UserAttentionType.Informational).catch(() => {});
+      }
     };
     invoke("sysinfo_start", { onSample: samples }).catch((e) => console.error("sysinfo_start failed", e));
     return () => {
       watching = false;
       system = null;
+      watch.reset();
       void invoke("sysinfo_stop").catch(() => {});
     };
   });
+
+  // Coming to a window is seeing what happened in it.
+  $effect(() => {
+    const window = tmux.window?.id;
+    if (mode === "tmux" && window !== undefined) untrack(() => watch.look(window));
+  });
+
+  /** The window has the keyboard again: whatever it is showing has now been seen. */
+  function onWindowFocus() {
+    checkDisk();
+    const window = looking();
+    if (window !== null) watch.look(window);
+  }
 
   /** A size given in mebibytes, in gigabytes to one place. */
   const gigabytes = (mebibytes: number) => (mebibytes / 1024).toFixed(1);
@@ -1087,6 +1132,40 @@
         item("Rename", () => tmuxSidebar?.renameWindow(window)),
         SEP,
         item("Close Window", () => void closeTmuxWindow(session, window), true),
+      ],
+    };
+  }
+
+  /**
+   * Something running in a window. A signal goes to it and to everything it
+   * has started, whichever pane it is in and whether or not it is the one
+   * that pane would hand a Ctrl+C to.
+   */
+  function onTmuxJobContextMenu(event: MouseEvent, job: Job) {
+    const send = (signal: "INT" | "TERM" | "KILL") => () =>
+      void invoke("remote_signal", { pid: job.pid, shell: job.shell, signal }).catch((e) =>
+        message(String(e), { title: "tmux", kind: "error" }),
+      );
+    const name = job.command.split(" ", 1)[0];
+    ctx = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        item("Interrupt (Ctrl+C)", send("INT")),
+        item("Terminate", send("TERM")),
+        SEP,
+        item(
+          "Kill",
+          () =>
+            void confirm({
+              title: "Kill process",
+              message: `Kill ${name}?`,
+              note: "It is ended at once, with no chance to finish what it is doing or clean up after itself.",
+              confirm: "Kill",
+              danger: true,
+            }).then((sure) => sure && send("KILL")()),
+          true,
+        ),
       ],
     };
   }
@@ -1940,7 +2019,7 @@
   onpointerdowncapture={onElsewhere}
   onfocusin={onElsewhere}
   oncontextmenu={onWindowContextMenu}
-  onfocus={checkDisk}
+  onfocus={onWindowFocus}
 />
 
 <div class="app">
@@ -2116,6 +2195,8 @@
         activeId={tmux.state?.session ?? null}
         frontWindow={tmux.window?.id ?? null}
         processes={system?.processes ?? []}
+        finished={watch.finished}
+        active={watch.active}
         usable={remote.status === "connected" && tmux.status !== "missing"}
         attached={tmux.status === "attached"}
         width={tmuxSidebarCollapsed ? RAIL_WIDTH : sidebarWidth}
@@ -2135,6 +2216,9 @@
         onclosewindow={(session, window) => void closeTmuxWindow(session, window)}
         oncontext={onTmuxSessionContextMenu}
         onwindowcontext={onTmuxWindowContextMenu}
+        onjobcontext={onTmuxJobContextMenu}
+        onmove={(window, before, session) =>
+          tmux.act({ do: "moveWindow", window, before: before ?? undefined, session })}
       />
 
       {#if !tmuxSidebarCollapsed}
@@ -2152,6 +2236,8 @@
         railed={tmuxSidebarCollapsed}
         remoteStatus={remote.status}
         host={where.host || "the remote"}
+        live={system?.panes ?? []}
+        home={remote.info?.home ?? ""}
         look={terminalLook}
         scrollback={config.current.terminal.scrollback}
         renderer={config.current.terminal.renderer}
@@ -2206,7 +2292,11 @@
            from the least to the most worth knowing. -->
       {#if mode === "tmux"}
         {#if system}
-          <span title="Processor in use, across {system.cores} cores">
+          <span
+            title="Processor in use, across {system.cores} cores.{system.perCore.length > 0
+              ? ` Each: ${system.perCore.map((each) => Math.round(each)).join(' ')}`
+              : ''}"
+          >
             cpu {Math.round(system.cpu)}%{system.temperature !== null
               ? ` ${Math.round(system.temperature)}°C`
               : ""}

@@ -27,7 +27,16 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import type { PaneHandle } from "./pane";
-import { busy, jobs, Tmux, type Process, type TmuxPane, type TmuxState } from "./tmux.svelte";
+import {
+  busy,
+  jobs,
+  Tmux,
+  Watch,
+  type Process,
+  type SessionInfo,
+  type TmuxPane,
+  type TmuxState,
+} from "./tmux.svelte";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const asked = (command: string): Call[] => backend.calls.filter((call) => call.command === command);
@@ -284,8 +293,8 @@ describe("what is running in a window", () => {
       process(99, 60, "vim notes", 3, "pts/4"),
     ]);
     expect(found).toEqual([
-      { pid: 77, pane: 1, command: "make -j8 all", cpu: 195, children: 3 },
-      { pid: 90, pane: 1, command: "python3 -m http.server", cpu: 1, children: 0 },
+      { pid: 77, pane: 1, shell: 50, command: "make -j8 all", cpu: 195, children: 3 },
+      { pid: 90, pane: 1, shell: 50, command: "python3 -m http.server", cpu: 1, children: 0 },
     ]);
   });
 
@@ -296,7 +305,87 @@ describe("what is running in a window", () => {
 
   it("is the pane's own program where the pane was started on one", () => {
     const found = jobs(panes, [process(50, 1, "/run/current-system/sw/bin/htop -d 5", 4)]);
-    expect(found).toEqual([{ pid: 50, pane: 1, command: "htop -d 5", cpu: 4, children: 0 }]);
+    expect(found).toEqual([
+      { pid: 50, pane: 1, shell: 50, command: "htop -d 5", cpu: 4, children: 0 },
+    ]);
+  });
+});
+
+describe("the watch on windows not being looked at", () => {
+  const process = (pid: number, ppid: number, command: string): Process => ({
+    pid,
+    ppid,
+    tty: "pts/3",
+    cpu: 0,
+    command,
+  });
+  const sessions = (...windows: number[]): SessionInfo[] => [
+    {
+      id: 0,
+      name: "main",
+      windows: windows.length,
+      attached: 1,
+      list: windows.map((id) => ({
+        id,
+        index: id,
+        name: "bash",
+        active: id === 1,
+        // Each window's shell is a hundred times its number.
+        panes: [{ id, pid: id * 100, tty: "/dev/pts/3" }],
+      })),
+    },
+  ];
+  const pane = (window: number, activity: number) => ({
+    id: window,
+    window,
+    activity,
+    command: "bash",
+    path: "/",
+  });
+  const building = [process(200, 1, "-bash"), process(250, 200, "make -j8")];
+  const idle = [process(200, 1, "-bash")];
+
+  it("says when something that ran a while has ended in another window", () => {
+    const watch = new Watch();
+    expect(watch.update(sessions(1, 2), building, [], 1, 0)).toEqual([]);
+    expect(watch.update(sessions(1, 2), building, [], 1, 30_000)).toEqual([]);
+    const ended = watch.update(sessions(1, 2), idle, [], 1, 32_000);
+    expect(ended).toEqual([{ command: "make -j8", at: 32_000 }]);
+    expect(watch.finished).toEqual({ 2: { command: "make -j8", at: 32_000 } });
+
+    // Looked at, it is no longer news.
+    watch.look(2);
+    expect(watch.finished).toEqual({});
+  });
+
+  it("says nothing of what was quick, was watched, or went with its window", () => {
+    const quick = new Watch();
+    quick.update(sessions(1, 2), building, [], 1, 0);
+    expect(quick.update(sessions(1, 2), idle, [], 1, 2_000)).toEqual([]);
+
+    const watched = new Watch();
+    watched.update(sessions(1, 2), building, [], 2, 0);
+    expect(watched.update(sessions(1, 2), idle, [], 2, 60_000)).toEqual([]);
+
+    const closed = new Watch();
+    closed.update(sessions(1, 2), building, [], 1, 0);
+    expect(closed.update(sessions(1), [], [], 1, 60_000)).toEqual([]);
+    expect(closed.finished).toEqual({});
+  });
+
+  it("marks a window that has printed since it was looked at", () => {
+    const watch = new Watch();
+    // First heard of, nothing is news.
+    watch.update(sessions(1, 2), [], [pane(1, 100), pane(2, 100)], 1, 0);
+    expect(watch.active).toEqual([]);
+
+    watch.update(sessions(1, 2), [], [pane(1, 105), pane(2, 105)], 1, 2_000);
+    expect(watch.active).toEqual([2]);
+
+    watch.look(2);
+    expect(watch.active).toEqual([]);
+    watch.update(sessions(1, 2), [], [pane(1, 105), pane(2, 105)], 1, 4_000);
+    expect(watch.active).toEqual([]);
   });
 });
 

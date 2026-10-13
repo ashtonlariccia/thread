@@ -7,7 +7,14 @@
    * them are all here too, as buttons: there are no keys for any of it.
    */
   import { iconUrl } from "../icons";
-  import { jobs, type Process, type SessionInfo, type WindowBrief } from "./tmux.svelte";
+  import {
+    jobs,
+    type Finished,
+    type Job,
+    type Process,
+    type SessionInfo,
+    type WindowBrief,
+  } from "./tmux.svelte";
 
   type Props = {
     sessions: SessionInfo[];
@@ -17,6 +24,10 @@
     frontWindow: number | null;
     /** Every process on one of the remote's terminals, as last read. */
     processes: Process[];
+    /** The windows something has finished in since they were last looked at. */
+    finished: Record<number, Finished>;
+    /** The windows that have printed since they were last looked at. */
+    active: number[];
     /** Whether a session can be started: there is a remote, and it has tmux. */
     usable: boolean;
     /**
@@ -44,6 +55,12 @@
     /** Right-click on a row. App owns the menu, so only one is ever open. */
     oncontext: (event: MouseEvent, session: number) => void;
     onwindowcontext: (event: MouseEvent, session: number, window: number) => void;
+    onjobcontext: (event: MouseEvent, job: Job) => void;
+    /**
+     * A window was dragged: to before another window, or with none named,
+     * to the end of a session.
+     */
+    onmove: (window: number, before: number | null, session: number) => void;
   };
 
   let {
@@ -51,6 +68,8 @@
     activeId,
     frontWindow,
     processes,
+    finished,
+    active,
     usable,
     attached,
     width,
@@ -67,6 +86,8 @@
     onclosewindow,
     oncontext,
     onwindowcontext,
+    onjobcontext,
+    onmove,
   }: Props = $props();
 
   /** The sessions folded shut. Open is how one starts: its windows are the point of it. */
@@ -76,6 +97,104 @@
     folded = folded.includes(session)
       ? folded.filter((each) => each !== session)
       : [...folded, session];
+  }
+
+  /** How long ago something was, in the largest unit that says it. */
+  function ago(at: number): string {
+    const minutes = Math.floor((Date.now() - at) / 60_000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes}m ago`;
+    return `${Math.floor(minutes / 60)}h ago`;
+  }
+
+  /** Whether a session has news in one of its windows, for when they are folded away. */
+  const news = (session: SessionInfo) =>
+    session.list.some((window) => window.id in finished || active.includes(window.id));
+
+  // --- dragging a window ----------------------------------------------------------
+  //
+  // As a tab is dragged in the editor (`TabBar`): pointer events, and a line
+  // where the window will land rather than rows shuffling under the pointer.
+  // Dropped on a window it goes before it; on a session, to the end of it.
+
+  /** Pixels of travel before a press becomes a drag rather than a click. */
+  const DRAG_SLOP = 4;
+
+  let drag = $state<{ window: number; y: number; started: boolean } | null>(null);
+  /** Where the window being dragged would land. */
+  let over = $state<{ before: number | null; session: number } | null>(null);
+  /** Set for the duration of one click, so a finished drag doesn't also select. */
+  let dragged = false;
+
+  /** The window after this one in its session, or null if it is the last. */
+  function following(session: number, window: number): number | null {
+    const list = sessions.find((each) => each.id === session)?.list ?? [];
+    return list[list.findIndex((each) => each.id === window) + 1]?.id ?? null;
+  }
+
+  function targetAt(x: number, y: number): { before: number | null; session: number } | null {
+    const row = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-session]");
+    if (!row) return null;
+    const session = Number(row.dataset.session);
+    // A session's own row, or something running in a window: the end of
+    // the session, and after that window.
+    if (row.dataset.window === undefined) return { before: null, session };
+    const window = Number(row.dataset.window);
+    if (row.dataset.job !== undefined) return { before: following(session, window), session };
+    const box = row.getBoundingClientRect();
+    const upper = y < box.top + box.height / 2;
+    return { before: upper ? window : following(session, window), session };
+  }
+
+  function onPointerDown(event: PointerEvent, window: number) {
+    if (event.button !== 0 || !attached) return;
+    // A press on a button or in the name box is that, and not a drag.
+    if ((event.target as Element).closest("button, input")) return;
+    dragged = false;
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    } catch {
+      /* no capture available for this pointer */
+    }
+    drag = { window, y: event.clientY, started: false };
+  }
+
+  function onPointerMove(event: PointerEvent) {
+    if (!drag) return;
+    if (!drag.started) {
+      if (Math.abs(event.clientY - drag.y) < DRAG_SLOP) return;
+      drag.started = true;
+    }
+    over = targetAt(event.clientX, event.clientY);
+  }
+
+  function endDrag() {
+    drag = null;
+    over = null;
+  }
+
+  function onPointerUp() {
+    const current = drag;
+    const target = over;
+    endDrag();
+    if (!current?.started) return;
+    dragged = true;
+    if (!target) return;
+    // Where it already is: before itself, or before the one it is before.
+    const home = sessions.find((each) => each.list.some((window) => window.id === current.window));
+    const same = home?.id === target.session;
+    if (target.before === current.window) return;
+    if (same && target.before === following(target.session, current.window)) return;
+    onmove(current.window, target.before, target.session);
+  }
+
+  /** A drag finishes with a click on the same row; that click is not a select. */
+  function clicked(act: () => void) {
+    if (dragged) {
+      dragged = false;
+      return;
+    }
+    act();
   }
 
   /** A share of a core, as the bar at the bottom says the whole machine's. */
@@ -166,6 +285,8 @@
           <div
             class="row session"
             class:active={session.id === activeId}
+            class:drop-into={drag?.started && over?.session === session.id && over.before === null}
+            data-session={session.id}
             role="button"
             tabindex="0"
             aria-expanded={session.list.length > 0 ? open : undefined}
@@ -222,6 +343,10 @@
               />
             {:else}
               <span class="label">{session.name}</span>
+              <!-- Folded shut, it says for its windows that one has news. -->
+              {#if !open && news(session)}
+                <span class="news" title="Something has happened in one of its windows"></span>
+              {/if}
               <!-- Lit for a session something is attached to, this window
                    or another terminal somewhere. -->
               <span class="mark" class:attached={session.attached > 0}></span>
@@ -261,10 +386,19 @@
             <div
               class="row window"
               class:active={session.id === activeId && window.id === frontWindow}
+              class:lifted={drag?.started && drag.window === window.id}
+              class:drop-before={drag?.started && over?.before === window.id}
+              data-session={session.id}
+              data-window={window.id}
               role="button"
               tabindex="0"
               title={namingWindow(window.id) ? undefined : `${window.index}: ${window.name}`}
-              onclick={() => !namingWindow(window.id) && onwindow(session.id, window.id)}
+              onclick={() =>
+                clicked(() => !namingWindow(window.id) && onwindow(session.id, window.id))}
+              onpointerdown={(e) => onPointerDown(e, window.id)}
+              onpointermove={onPointerMove}
+              onpointerup={onPointerUp}
+              onpointercancel={endDrag}
               ondblclick={() => renameWindow(window.id)}
               onkeydown={(e) => {
                 if (e.key === "Enter" || e.key === " ") onwindow(session.id, window.id);
@@ -301,6 +435,14 @@
                 />
               {:else}
                 <span class="label">{window.name}</span>
+                <!-- What has happened in it while it was not being looked
+                     at: something finished, or failing that, it printed. -->
+                {#if window.id in finished}
+                  {@const done = finished[window.id]}
+                  <span class="done" title="{done.command} finished {ago(done.at)}">done</span>
+                {:else if active.includes(window.id)}
+                  <span class="news" title="It has printed since you last looked"></span>
+                {/if}
                 <button
                   class="tool hover danger"
                   title="Close window"
@@ -323,10 +465,18 @@
             <li>
               <div
                 class="row job"
+                data-session={session.id}
+                data-window={window.id}
+                data-job
                 role="button"
                 tabindex="0"
                 title={job.command}
                 onclick={() => onjob(session.id, window.id, job.pane)}
+                oncontextmenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onjobcontext(e, job);
+                }}
                 onkeydown={(e) => {
                   if (e.key === "Enter" || e.key === " ") onjob(session.id, window.id, job.pane);
                 }}
@@ -517,6 +667,42 @@
   /* Something that is working, as against something that is waiting. */
   .cpu.working {
     color: var(--accent);
+  }
+
+  /* News of a window not being looked at. Something finishing is said in
+     a word, being what was waited for; printing is a dot. */
+  .done {
+    flex: none;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-size: 0.66rem;
+    line-height: 14px;
+  }
+  .news {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    margin: 0 0.25rem;
+    border-radius: 50%;
+    background: var(--ok);
+  }
+  .row:hover .done,
+  .row:hover .news {
+    display: none;
+  }
+
+  /* A window in flight, and where it would land: a line above the window
+     it would go before, or its session marked for the end of it. */
+  .row.lifted {
+    opacity: 0.4;
+  }
+  .row.drop-before {
+    box-shadow: 0 -2px 0 var(--accent);
+  }
+  .row.drop-into {
+    background: var(--accent-soft);
   }
 
   .mark {

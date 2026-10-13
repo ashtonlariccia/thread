@@ -528,7 +528,20 @@ pub enum Action {
         divider: String,
         delta: i32,
     },
+    /// Put a window somewhere else in the order: before another window,
+    /// whichever session that is in, or at the end of a session.
+    MoveWindow {
+        window: u32,
+        #[serde(default)]
+        before: Option<u32>,
+        #[serde(default)]
+        session: Option<u32>,
+    },
 }
+
+/// Where something new starts: the folder the pane it comes from is in,
+/// rather than the one its session was started in. tmux fills this in.
+const HERE: &str = "-c '#{pane_current_path}'";
 
 /// What to do at the start: join a session that is there, or make one.
 #[derive(Debug, Clone)]
@@ -1268,7 +1281,7 @@ impl Engine {
                 };
                 self.send(
                     out,
-                    &format!("split-window {flag} -t %{pane}"),
+                    &format!("split-window {flag} {HERE} -t %{pane}"),
                     Pending::Report,
                 );
             }
@@ -1285,10 +1298,10 @@ impl Engine {
             Action::NewWindow { session } => {
                 match session {
                     Some(session) => {
-                        let command = format!("new-window -t '${session}:'");
+                        let command = format!("new-window {HERE} -t '${session}:'");
                         self.send(out, &command, Pending::Report);
                     }
-                    None => self.send(out, "new-window", Pending::Report),
+                    None => self.send(out, &format!("new-window {HERE}"), Pending::Report),
                 }
                 self.go_to(session, out);
             }
@@ -1344,6 +1357,23 @@ impl Engine {
                 let command = format!("rename-session -t '${session}' -- {}", quoted(name.trim()));
                 self.send(out, &command, Pending::Report);
             }
+            // Without going to it: putting a window in order is not asking
+            // to look at it.
+            Action::MoveWindow {
+                window,
+                before,
+                session,
+            } => match (before, session) {
+                (Some(before), _) if before != window => {
+                    let command = format!("move-window -d -b -s @{window} -t @{before}");
+                    self.send(out, &command, Pending::Report);
+                }
+                (None, Some(session)) => {
+                    let command = format!("move-window -d -s @{window} -t '${session}:'");
+                    self.send(out, &command, Pending::Report);
+                }
+                _ => {}
+            },
             Action::MoveDivider {
                 window,
                 divider,
@@ -1813,10 +1843,46 @@ mod tests {
 
         let mut out = Out::default();
         engine.act(Action::NewWindow { session: Some(1) }, &mut out);
-        assert_eq!(said(&out), ["new-window -t '$1:'", "switch-client -t '$1'"]);
+        assert_eq!(
+            said(&out),
+            [
+                "new-window -c '#{pane_current_path}' -t '$1:'",
+                "switch-client -t '$1'"
+            ]
+        );
         let mut out = Out::default();
         engine.act(Action::NewWindow { session: None }, &mut out);
-        assert_eq!(said(&out), ["new-window"]);
+        assert_eq!(said(&out), ["new-window -c '#{pane_current_path}'"]);
+    }
+
+    #[test]
+    fn a_window_is_moved_before_another_or_to_the_end_of_a_session() {
+        let mut engine = attached();
+        let moved = |engine: &mut Engine, before, session| {
+            let mut out = Out::default();
+            let action = Action::MoveWindow {
+                window: 4,
+                before,
+                session,
+            };
+            engine.act(action, &mut out);
+            said(&out)
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            moved(&mut engine, Some(2), Some(1)),
+            ["move-window -d -b -s @4 -t @2"]
+        );
+        assert_eq!(
+            moved(&mut engine, None, Some(1)),
+            ["move-window -d -s @4 -t '$1:'"]
+        );
+        assert!(
+            moved(&mut engine, Some(4), None).is_empty(),
+            "before itself is where it is"
+        );
     }
 
     #[test]

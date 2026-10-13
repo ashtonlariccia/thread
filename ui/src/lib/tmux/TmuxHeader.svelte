@@ -13,6 +13,11 @@
     window: TmuxWindow | null;
     /** What is running in the pane typed into, as tmux names it. */
     command: string;
+    /**
+     * Say nothing of the window here: each of its panes has a title of its
+     * own, and the ones along the top are drawn where this would be.
+     */
+    bare: boolean;
     /** Split the pane typed into: beside it (`row`) or below it (`column`). */
     onsplit: (dir: Dir) => void;
     /** Let the pane typed into fill the window, or put it back. */
@@ -21,12 +26,12 @@
     onclosepane: () => void;
   };
 
-  let { window, command, onsplit, onzoom, onclosepane }: Props = $props();
+  let { window, command, bare, onsplit, onzoom, onclosepane }: Props = $props();
 </script>
 
 <div class="bar">
   <div class="title">
-    {#if window}
+    {#if window && !bare}
       <span class="name">{window.name}</span>
       <!-- Said only where it says something the name does not: tmux names
            a window after what runs in it unless told otherwise. -->

@@ -310,6 +310,7 @@ fn main() {
             commands::tmux_close,
             commands::sysinfo_start,
             commands::sysinfo_stop,
+            commands::remote_signal,
             commands::lsp_catalog,
             commands::lsp_start,
             commands::lsp_send,

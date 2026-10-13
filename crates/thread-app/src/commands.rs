@@ -1378,6 +1378,24 @@ pub async fn sysinfo_start(
     Ok(())
 }
 
+/// Send a signal to something running in a tmux pane's shell on this
+/// window's remote: `INT`, `TERM` or `KILL`. `shell` is the pane's shell.
+#[tauri::command]
+pub async fn remote_signal(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    pid: u32,
+    shell: u32,
+    signal: String,
+) -> Result<(), String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    tracing::info!(target: "thread::tmux", "SIGNAL {signal} to {pid} on {}", link.info.label);
+    link.remote
+        .signal(pid, shell, &signal)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn sysinfo_stop(window: WebviewWindow, stats: State<'_, Stats>) {
     stats.close_window(window.label());

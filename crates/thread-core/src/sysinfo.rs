@@ -20,6 +20,11 @@ const MARK: &str = "thread-sys:";
 const PROCESS: &str = "thread-ps:";
 /// `pid terminal command line`, from `ps`.
 const ARGS: &str = "thread-arg:";
+/// `core user nice system idle ...`, one core's counters from `/proc/stat`.
+const CORE: &str = "thread-cpu:";
+/// A tmux pane as it stands, tab between each: its number, its window's,
+/// when the window last printed, what it is running, and the folder it is in.
+const PANE: &str = "thread-pane:";
 
 /// What is left running on the remote, for `sh`.
 ///
@@ -29,6 +34,10 @@ const ARGS: &str = "thread-arg:";
 /// read from where the kernel keeps it. The processor's temperature is the
 /// package's, from whichever sensor the kernel has for it. How full the
 /// disk is, is looked at now and then rather than every time.
+///
+/// The second reading follows the first by a fraction of a second, and
+/// only then does it settle to one every two: the rates are the difference
+/// between two readings, and no one should wait two seconds to see the first.
 ///
 /// It ends when there is no one left to print to.
 pub const SCRIPT: &str = r#"n=$(grep -c ^processor /proc/cpuinfo 2>/dev/null)
@@ -63,6 +72,8 @@ disk=
 while :; do
   cat /proc/[0-9]*/stat 2>/dev/null | sed -n 's/^\([0-9]*\) (.*) . \([0-9]*\) [0-9]* [0-9]* \([0-9]*\) [-0-9]* [0-9]* [0-9]* [0-9]* [0-9]* [0-9]* \([0-9]*\) \([0-9]*\) .*/thread-ps:\1 \2 \3 \4 \5/p' | grep -v '^thread-ps:[0-9]* [0-9]* 0 '
   ps -eo pid=,tty=,args= 2>/dev/null | awk '$2 != "?" { print "thread-arg:" substr($0, 1, 240) }'
+  sed -n 's/^cpu\([0-9][0-9]*\) /thread-cpu:\1 /p' /proc/stat
+  tmux list-panes -a -F 'thread-pane:#{pane_id}	#{window_id}	#{window_activity}	#{pane_current_command}	#{pane_current_path}' 2>/dev/null
   read -r _ a b c d e f g h _ < /proc/stat
   m=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} /^SwapTotal:/{st=$2} /^SwapFree:/{sf=$2} END{print t","a","st","sf}' /proc/meminfo)
   read -r l1 l5 l15 lr _ < /proc/loadavg
@@ -73,7 +84,7 @@ while :; do
   if [ -n "$temp" ]; then read -r t < "$temp" 2>/dev/null; fi
   read -r up _ < /proc/uptime
   echo "thread-sys:cpu=$a $b $c $d $e $f $g $h|mem=$m|load=$l1 $l5 $l15 $lr|n=$n|hz=$hz|net=$net|disk=$disk|temp=$t|up=$up|gpu=$(gpu)" || exit 0
-  sleep 2
+  if [ "$i" -eq 1 ]; then sleep 0.3; else sleep 2; fi
 done"#;
 
 /// One reading of the machine.
@@ -107,8 +118,27 @@ pub struct Sample {
     /// Seconds since the machine started.
     pub uptime: u64,
     pub gpu: Option<Gpu>,
+    /// Each core's share in use, in percent, in the kernel's order.
+    pub per_core: Vec<f32>,
     /// Every process that has a terminal.
     pub processes: Vec<Process>,
+    /// Every tmux pane, as it stands now: tmux says when a window is made
+    /// or closed, and says nothing when a shell changes folder.
+    pub panes: Vec<PaneNow>,
+}
+
+/// A tmux pane at the time of a reading.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneNow {
+    pub id: u32,
+    pub window: u32,
+    /// When anything in its window last printed, in seconds since 1970.
+    pub activity: u64,
+    /// What it is running, as tmux names it.
+    pub command: String,
+    /// The folder it is in.
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -157,6 +187,11 @@ pub struct Sampler {
     stats: HashMap<u32, (u32, u64)>,
     /// And its terminal and command line.
     args: Vec<(u32, String, String)>,
+    /// This round's counters for each core, in all and idle; and last round's.
+    cores: Vec<(u64, u64)>,
+    last_cores: Vec<(u64, u64)>,
+    /// This round's tmux panes.
+    panes: Vec<PaneNow>,
 }
 
 impl Sampler {
@@ -184,6 +219,28 @@ impl Sampler {
                     self.args
                         .push((pid, tty.to_owned(), command.trim().to_owned()));
                 }
+            } else if let Some(core) = line.strip_prefix(CORE) {
+                // The core's number, then its counters as the whole machine's are.
+                let counters: Vec<u64> = core
+                    .split(' ')
+                    .skip(1)
+                    .map(|count| count.parse().unwrap_or(0))
+                    .collect();
+                let idle =
+                    counters.get(3).copied().unwrap_or(0) + counters.get(4).copied().unwrap_or(0);
+                self.cores.push((counters.iter().take(8).sum(), idle));
+            } else if let Some(pane) = line.strip_prefix(PANE) {
+                let mut fields = pane.splitn(5, '\t');
+                let parsed = (|| {
+                    Some(PaneNow {
+                        id: fields.next()?.strip_prefix('%')?.parse().ok()?,
+                        window: fields.next()?.strip_prefix('@')?.parse().ok()?,
+                        activity: fields.next()?.parse().unwrap_or(0),
+                        command: fields.next()?.to_owned(),
+                        path: fields.next()?.to_owned(),
+                    })
+                })();
+                self.panes.extend(parsed);
             } else if let Some(reading) = line.trim().strip_prefix(MARK) {
                 samples.extend(self.read(reading));
             }
@@ -209,6 +266,24 @@ impl Sampler {
         // there turns out to be a reading.
         let stats = std::mem::take(&mut self.stats);
         let args = std::mem::take(&mut self.args);
+        let panes = std::mem::take(&mut self.panes);
+        let cores_now = std::mem::take(&mut self.cores);
+        let cores_before = std::mem::replace(&mut self.last_cores, cores_now.clone());
+        let per_core = match cores_before.len() == cores_now.len() {
+            true => cores_now
+                .iter()
+                .zip(&cores_before)
+                .map(|((total, idle), (was_total, was_idle))| {
+                    let passed = total.saturating_sub(*was_total);
+                    let idled = idle.saturating_sub(*was_idle).min(passed);
+                    match passed {
+                        0 => 0.0,
+                        _ => (passed - idled) as f32 * 100.0 / passed as f32,
+                    }
+                })
+                .collect(),
+            false => Vec::new(),
+        };
 
         // user nice system idle iowait irq softirq steal: idle is the
         // fourth and the fifth, waiting on a disk being no work either.
@@ -289,7 +364,9 @@ impl Sampler {
             disk_total: at(&disk, 1),
             uptime: field("up").trim().parse::<f64>().unwrap_or(0.0) as u64,
             gpu: read_gpu(field("gpu")),
+            per_core,
             processes,
+            panes,
         })
     }
 }
@@ -401,6 +478,35 @@ mod tests {
     }
 
     #[test]
+    fn each_core_and_each_tmux_pane_is_read_with_the_rest() {
+        let mut sampler = Sampler::default();
+        let first = format!(
+            "thread-cpu:0 100 0 0 100 0 0 0 0 0 0\nthread-cpu:1 0 0 0 200 0 0 0 0 0 0\n{}",
+            line("100 0 0 300 0 0 0 0", "")
+        );
+        sampler.feed(first.as_bytes());
+        let next = format!(
+            "thread-cpu:0 300 0 0 100 0 0 0 0 0 0\nthread-cpu:1 50 0 0 350 0 0 0 0 0 0\n\
+             thread-pane:%3\t@1\t1791850000\tmake\t/home/ash/my project\n\
+             thread-pane:nonsense\n{}",
+            line("350 0 0 450 0 0 0 0", "")
+        );
+        let sample = sampler.feed(next.as_bytes()).remove(0);
+        // The first did nothing but work; the second worked a quarter of the time.
+        assert_eq!(sample.per_core, [100.0, 25.0]);
+        assert_eq!(
+            sample.panes,
+            [PaneNow {
+                id: 3,
+                window: 1,
+                activity: 1_791_850_000,
+                command: "make".into(),
+                path: "/home/ash/my project".into(),
+            }]
+        );
+    }
+
+    #[test]
     fn a_graphics_card_is_read_whichever_way_it_was_asked() {
         let mut sampler = Sampler::default();
         sampler.feed(line("1 0 0 1 0 0 0 0", "gpu=").as_bytes());
@@ -441,6 +547,8 @@ mod tests {
         assert!(SCRIPT.contains(&format!("echo \"{MARK}cpu=$a")));
         assert!(SCRIPT.contains(&format!("/{PROCESS}\\1 \\2 \\3 \\4 \\5/p")));
         assert!(SCRIPT.contains(&format!("print \"{ARGS}\"")));
-        assert!(SCRIPT.contains("sleep 2"));
+        assert!(SCRIPT.contains(&format!("/{CORE}\\1 /p")));
+        assert!(SCRIPT.contains(&format!("-F '{PANE}#{{pane_id}}\t#{{window_id}}")));
+        assert!(SCRIPT.contains("sleep 0.3; else sleep 2"));
     }
 }

@@ -81,6 +81,10 @@ fn in_wsl(distro: &str, script: &str) -> std::process::Command {
         .replace(
             "tmux list-sessions",
             &format!("tmux -L {TMUX_SOCKET} list-sessions"),
+        )
+        .replace(
+            "tmux list-panes",
+            &format!("tmux -L {TMUX_SOCKET} list-panes"),
         );
     let file = std::env::temp_dir().join(format!(
         "thread-test-{}-{}.sh",
@@ -197,7 +201,9 @@ impl russh::server::Handler for Connection {
         // tmux, if there is one to borrow, and the script that reads how
         // busy the machine is: run for real, its output sent as
         // it comes and the channel closed when it ends.
-        let borrowed = command.contains("tmux") || command.contains("thread-sys:");
+        let borrowed = ["tmux", "thread-sys:", "kill -s"]
+            .iter()
+            .any(|mark| command.contains(mark));
         if let (true, Some(distro)) = (borrowed, tmux_distro()) {
             let mut child = in_wsl(&distro, &command)
                 .stdin(std::process::Stdio::piped())
