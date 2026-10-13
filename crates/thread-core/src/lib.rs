@@ -18,7 +18,9 @@ pub mod lsp;
 pub mod pins;
 pub mod remote;
 pub mod session;
+pub mod sysinfo;
 pub mod terminal;
+pub mod tmux;
 pub mod tree;
 pub mod vault;
 

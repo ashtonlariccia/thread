@@ -196,7 +196,8 @@ mod tests {
 
     #[test]
     fn a_detached_head_is_its_hash_and_nothing_at_all_is_no_repository() {
-        let detached = "# branch.oid 4ae8666b1c0d9f2e7a6b5c4d3e2f1a0b9c8d7e6f\n# branch.head (detached)\n";
+        let detached =
+            "# branch.oid 4ae8666b1c0d9f2e7a6b5c4d3e2f1a0b9c8d7e6f\n# branch.head (detached)\n";
         let status = parse_status(detached).unwrap();
         assert_eq!(status.branch, "4ae8666");
         assert!(!status.upstream);

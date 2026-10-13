@@ -50,7 +50,13 @@ export type Config = {
   theme: { syntax: string; accent: string };
   vim: { enabled: boolean };
   /** `shell` is a command line; empty leaves the choice to the backend. */
-  terminal: { shell: string; scrollback: number; font_size: number; cursor: TerminalCursor };
+  terminal: {
+    shell: string;
+    scrollback: number;
+    font_size: number;
+    cursor: TerminalCursor;
+    renderer: "dom" | "webgl";
+  };
   /** `enabled` is the language servers that are switched on, by id. */
   lsp: { enabled: string[] };
   /** By language name, lower-case. */
@@ -79,7 +85,7 @@ export const DEFAULTS: Config = {
   files: { exclude: [".*"], files_first: false },
   theme: { syntax: "catppuccin", accent: "#cba6f7" },
   vim: { enabled: true },
-  terminal: { shell: "", scrollback: 2000, font_size: 14, cursor: "block" },
+  terminal: { shell: "", scrollback: 2000, font_size: 14, cursor: "block", renderer: "dom" },
   lsp: { enabled: [] },
   language: {},
   syntax: {},

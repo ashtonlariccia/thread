@@ -9,7 +9,7 @@
   import { onMount } from "svelte";
 
   import type { Link } from "./links";
-  import type { OpenKind, TerminalHandle, TerminalLook } from "./terminal";
+  import type { OpenKind, TerminalHandle, TerminalLook, TerminalRenderer } from "./terminal";
 
   type Props = {
     /** Whether this is the tab being shown. The shell runs either way. */
@@ -22,6 +22,8 @@
     shell: string | null;
     look: TerminalLook;
     scrollback: number;
+    /** What draws it. Read once. */
+    renderer: TerminalRenderer;
     /** The shell ended by itself. */
     onexit: () => void;
     /** The `thread` command was run in it, on a file or a folder. */
@@ -31,8 +33,19 @@
     oncontext: (event: MouseEvent) => void;
   };
 
-  let { active, focused, cwd, shell, look, scrollback, onexit, onopen, onlink, oncontext }: Props =
-    $props();
+  let {
+    active,
+    focused,
+    cwd,
+    shell,
+    look,
+    scrollback,
+    renderer,
+    onexit,
+    onopen,
+    onlink,
+    oncontext,
+  }: Props = $props();
 
   let host: HTMLElement;
   let handle = $state.raw<TerminalHandle | null>(null);
@@ -66,6 +79,7 @@
         shell,
         ...look,
         scrollback,
+        renderer,
         onexit,
         onopen,
         onlink,

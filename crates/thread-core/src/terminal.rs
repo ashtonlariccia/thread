@@ -14,8 +14,9 @@ use std::io::{Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
@@ -27,7 +28,7 @@ use windows::Win32::System::JobObjects::{
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
-use windows::Win32::System::Pipes::CreatePipe;
+use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, ResumeThread,
     TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED,
@@ -39,10 +40,153 @@ use windows::Win32::System::Threading::{
 use crate::{Error, Result};
 
 /// A running terminal, wherever its shell is. Dropping it ends the shell.
+///
+/// None of these waits on the shell, or on anything else: they are called
+/// from the window's own thread.
 pub trait Terminal: Send {
     /// Send input. Returns once it is queued, not once the shell has read it.
     fn write(&self, data: &[u8]);
+    /// Returns once it is queued, behind whatever input was sent before it.
     fn resize(&self, cols: u16, rows: u16);
+    /// How much of its output is still on its way to the screen.
+    fn flow(&self) -> &Flow;
+}
+
+/// Output on its way to the screen that makes the shell wait for the screen.
+const HIGH_WATER: u64 = 256 * 1024;
+/// How far that has to fall before the shell is read from again.
+const LOW_WATER: u64 = 64 * 1024;
+/// The least time between two pieces of output: about half a frame. What
+/// arrives inside it goes over as one piece, which is what keeps a flood from
+/// being ten thousand messages a second to the window.
+pub(crate) const FRAME: Duration = Duration::from_millis(8);
+
+/// The output of one terminal that has been sent and not yet drawn.
+///
+/// A program can print faster than a screen can draw. Nothing in between
+/// says so by itself: the output queues on the window, without limit, until
+/// the window is doing nothing else. So whatever reads the shell counts what
+/// it [`sent`](Flow::sent), the screen says what it has
+/// [`drawn`](Flow::drawn), and past [`HIGH_WATER`] the reading stops. A shell
+/// that is not being read from fills its pipe and waits, as it would behind
+/// any slow terminal.
+#[derive(Default)]
+pub struct Flow {
+    level: Mutex<Level>,
+    eased: Condvar,
+    /// The same news as `eased`, for a reader that is a task and not a thread.
+    eased_async: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct Level {
+    pending: u64,
+    /// Since when the reader has been waiting, if it is.
+    held: Option<Instant>,
+    /// How many times it has had to. For the log.
+    holds: u64,
+    /// The terminal has gone: nothing is drawing, and nothing should wait.
+    released: bool,
+}
+
+impl Flow {
+    /// The reader handed this much on.
+    pub fn sent(&self, bytes: usize) {
+        if let Ok(mut level) = self.level.lock() {
+            level.pending += bytes as u64;
+        }
+    }
+
+    /// The screen has drawn this much more.
+    pub fn drawn(&self, bytes: u64) {
+        let Ok(mut level) = self.level.lock() else {
+            return;
+        };
+        level.pending = level.pending.saturating_sub(bytes);
+        if level.held.is_some() && level.pending <= LOW_WATER {
+            level.held = None;
+            drop(level);
+            self.wake();
+        }
+    }
+
+    /// Nothing waits from here on. For a terminal that is closing, whose
+    /// reader has still to see the end of the output and say so.
+    pub fn release(&self) {
+        if let Ok(mut level) = self.level.lock() {
+            level.released = true;
+            level.held = None;
+        }
+        self.wake();
+    }
+
+    /// Block for as long as the screen is too far behind.
+    pub fn wait(&self) {
+        let Ok(mut level) = self.level.lock() else {
+            return;
+        };
+        level.check();
+        while level.held.is_some() {
+            match self.eased.wait(level) {
+                Ok(next) => level = next,
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// [`Flow::wait`], for a task.
+    pub async fn ready(&self) {
+        loop {
+            // Listening before looking, so that being let go between the two
+            // is not missed.
+            let eased = self.eased_async.notified();
+            tokio::pin!(eased);
+            eased.as_mut().enable();
+            if !self.holding() {
+                return;
+            }
+            eased.await;
+        }
+    }
+
+    /// Whether the reader is to wait, starting to if it is time.
+    fn holding(&self) -> bool {
+        self.level.lock().is_ok_and(|mut level| {
+            level.check();
+            level.held.is_some()
+        })
+    }
+
+    /// What has been sent and not drawn, in bytes.
+    pub fn pending(&self) -> u64 {
+        self.level.lock().map_or(0, |level| level.pending)
+    }
+
+    /// How long the shell has been kept waiting for the screen, if it is.
+    pub fn held_for(&self) -> Option<Duration> {
+        let held = self.level.lock().ok()?.held?;
+        Some(held.elapsed())
+    }
+
+    /// How many times the shell has been made to wait.
+    pub fn holds(&self) -> u64 {
+        self.level.lock().map_or(0, |level| level.holds)
+    }
+
+    fn wake(&self) {
+        self.eased.notify_all();
+        self.eased_async.notify_waiters();
+    }
+}
+
+impl Level {
+    /// Start holding, if the screen has fallen far enough behind.
+    fn check(&mut self) {
+        if self.held.is_none() && !self.released && self.pending >= HIGH_WATER {
+            self.held = Some(Instant::now());
+            self.holds += 1;
+        }
+    }
 }
 
 /// How to start a local shell.
@@ -180,12 +324,19 @@ fn distribution_names(listing: &[u8]) -> Vec<String> {
 
 /// A shell on this machine, behind a pseudoconsole.
 pub struct LocalTerminal {
-    console: Arc<Console>,
     /// Input is queued for a thread that owns the pipe; see [`LocalTerminal::spawn`].
-    input: mpsc::Sender<Vec<u8>>,
+    input: mpsc::Sender<Input>,
+    flow: Arc<Flow>,
     process: Arc<OwnedHandle>,
     /// Closing this kills whatever the shell started and left running.
     _job: Option<OwnedHandle>,
+}
+
+/// What is queued for the shell: what was typed, and the size of the screen
+/// it is typed at. One queue, so that each takes effect in the order sent.
+enum Input {
+    Data(Vec<u8>),
+    Resize { cols: u16, rows: u16 },
 }
 
 impl LocalTerminal {
@@ -198,8 +349,10 @@ impl LocalTerminal {
         D: FnMut(&[u8]) + Send + 'static,
         E: FnOnce() + Send + 'static,
     {
-        let (input_read, input_write) = pipe()?;
-        let (output_read, output_write) = pipe()?;
+        let (input_read, input_write) = pipe(0)?;
+        // Room for what is printed while the screen is being waited for, so
+        // that a short wait is not one the program feels.
+        let (output_read, output_write) = pipe(READ)?;
 
         // SAFETY: both handles are live pipe ends for the duration of the call.
         let console = unsafe {
@@ -219,15 +372,44 @@ impl LocalTerminal {
         let (process, job) = launch(&options, &console)?;
         let process = Arc::new(process);
 
-        // One read is whatever has piled up since the last, so a flood reaches
-        // `on_data` in large pieces with nothing here having to batch it.
+        // The console host writes a few kilobytes at a time, and a message to
+        // the window for each would be thousands a second under a flood. So
+        // what is handed to `on_data` is what arrived in a frame, or a full
+        // buffer of it. After a quiet spell the frame is long over: what was
+        // typed is echoed the moment it arrives, and only what follows on its
+        // heels is held back to go together.
+        let flow = Arc::new(Flow::default());
         let mut output = File::from(output_read);
-        thread::spawn(move || {
-            let mut buf = vec![0u8; 64 * 1024];
-            while let Ok(n @ 1..) = output.read(&mut buf) {
-                on_data(&buf[..n]);
+        thread::spawn({
+            let flow = Arc::clone(&flow);
+            move || {
+                let mut buf = vec![0u8; READ as usize];
+                let mut sent: Option<Instant> = None;
+                loop {
+                    flow.wait();
+                    let Ok(mut n @ 1..) = output.read(&mut buf) else {
+                        break;
+                    };
+                    let rest = sent.and_then(|at| FRAME.checked_sub(at.elapsed()));
+                    let began = Instant::now();
+                    while n < buf.len() && rest.is_some_and(|rest| began.elapsed() < rest) {
+                        // Only ever a read of what is already there: one that
+                        // waited would sit on what has been gathered so far.
+                        match waiting(&output) {
+                            Some(0) => thread::sleep(Duration::from_millis(1)),
+                            Some(_) => match output.read(&mut buf[n..]) {
+                                Ok(more @ 1..) => n += more,
+                                _ => break,
+                            },
+                            None => break,
+                        }
+                    }
+                    flow.sent(n);
+                    on_data(&buf[..n]);
+                    sent = Some(Instant::now());
+                }
+                on_exit();
             }
-            on_exit();
         });
 
         // The end is the *process* ending, not the output pipe: the
@@ -245,24 +427,44 @@ impl LocalTerminal {
 
         // Writes are queued rather than made by the caller: a program that has
         // stopped reading its input fills the pipe, and the write that then
-        // blocks would otherwise be on the window's own thread.
-        let (input, queued) = mpsc::channel::<Vec<u8>>();
+        // blocks would otherwise be on the window's own thread. A new size
+        // goes the same way, being a call into the console host.
+        let (input, queued) = mpsc::channel::<Input>();
         let mut pipe = File::from(input_write);
-        thread::spawn(move || {
-            while let Ok(mut data) = queued.recv() {
-                // A paste arrives in pieces; whatever is waiting goes together.
-                while let Ok(more) = queued.try_recv() {
-                    data.extend_from_slice(&more);
-                }
-                if pipe.write_all(&data).is_err() {
-                    break;
+        thread::spawn({
+            let console = Arc::clone(&console);
+            move || {
+                let mut next = queued.recv().ok();
+                while let Some(input) = next.take() {
+                    match input {
+                        Input::Resize { cols, rows } => console.resize(cols, rows),
+                        Input::Data(mut data) => {
+                            // A paste arrives in pieces; whatever is waiting
+                            // goes together, up to a change of size.
+                            while let Ok(more) = queued.try_recv() {
+                                match more {
+                                    Input::Data(more) => data.extend_from_slice(&more),
+                                    resize => {
+                                        next = Some(resize);
+                                        break;
+                                    }
+                                }
+                            }
+                            if pipe.write_all(&data).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    if next.is_none() {
+                        next = queued.recv().ok();
+                    }
                 }
             }
         });
 
         Ok(Self {
-            console,
             input,
+            flow,
             process,
             _job: job,
         })
@@ -272,16 +474,22 @@ impl LocalTerminal {
 impl Terminal for LocalTerminal {
     fn write(&self, data: &[u8]) {
         // Refused only once the shell has gone, which is not worth reporting.
-        let _ = self.input.send(data.to_vec());
+        let _ = self.input.send(Input::Data(data.to_vec()));
     }
 
     fn resize(&self, cols: u16, rows: u16) {
-        self.console.resize(cols, rows);
+        let _ = self.input.send(Input::Resize { cols, rows });
+    }
+
+    fn flow(&self) -> &Flow {
+        &self.flow
     }
 }
 
 impl Drop for LocalTerminal {
     fn drop(&mut self) {
+        // Its tab has gone, so nothing is left to say the output was drawn.
+        self.flow.release();
         // The shell here; what it started goes when the job closes after this.
         // SAFETY: the handle is owned by `self`.
         let _ = unsafe { TerminateProcess(raw(&self.process), 1) };
@@ -473,10 +681,32 @@ fn environment() -> Vec<u16> {
     block
 }
 
-fn pipe() -> Result<(OwnedHandle, OwnedHandle)> {
+/// The most of the shell's output handed over as one piece, in bytes.
+const READ: u32 = 64 * 1024;
+
+/// How much is in a pipe to be read without waiting, or `None` if it has closed.
+fn waiting(pipe: &File) -> Option<u32> {
+    let mut bytes = 0u32;
+    // SAFETY: the handle is open, and only the count is asked for.
+    unsafe {
+        PeekNamedPipe(
+            HANDLE(pipe.as_raw_handle()),
+            None,
+            0,
+            None,
+            Some(&mut bytes),
+            None,
+        )
+    }
+    .ok()?;
+    Some(bytes)
+}
+
+/// A pipe that holds `size` bytes; none asked for is the system's default.
+fn pipe(size: u32) -> Result<(OwnedHandle, OwnedHandle)> {
     let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
     // SAFETY: both out-pointers are to locals.
-    unsafe { CreatePipe(&mut read, &mut write, None, 0) }.map_err(os)?;
+    unsafe { CreatePipe(&mut read, &mut write, None, size) }.map_err(os)?;
     // SAFETY: CreatePipe succeeded, so both are handles this now owns.
     Ok(unsafe {
         (
@@ -510,8 +740,7 @@ fn os(error: windows::core::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Type `line` at a `cmd.exe` and wait for `done` to say it has finished.
     ///
@@ -606,6 +835,124 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// What brought the window down: output printed faster than it is drawn
+    /// has to stop at the shell, not pile up on the way to the screen.
+    #[test]
+    fn a_flood_waits_for_the_screen_and_goes_on_once_it_is_drawn() {
+        let seen = Arc::new(AtomicU64::new(0));
+        let asked = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+        let terminal = LocalTerminal::spawn(
+            Options {
+                shell: "cmd.exe".into(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+            },
+            {
+                let (seen, asked) = (Arc::clone(&seen), Arc::clone(&asked));
+                move |chunk| {
+                    if chunk.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                        asked.store(true, Ordering::SeqCst);
+                    }
+                    seen.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+                }
+            },
+            {
+                let exited = Arc::clone(&exited);
+                move || exited.store(true, Ordering::SeqCst)
+            },
+        )
+        .expect("spawn cmd.exe");
+
+        // The console's opening question, answered or given up on; see `run`.
+        let start = Instant::now();
+        while !asked.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        terminal.write(b"\x1b[1;1R");
+        let line = "0123456789".repeat(7);
+        terminal.write(format!("(for /L %i in (1,1,40000) do @echo {line}) & exit\r\n").as_bytes());
+
+        // Nothing is drawn, so it has to stop -- and stay stopped.
+        let start = Instant::now();
+        while terminal.flow().held_for().is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "never held; {} bytes were let through",
+                seen.load(Ordering::SeqCst)
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        thread::sleep(Duration::from_millis(500));
+        let stopped_at = seen.load(Ordering::SeqCst);
+        assert!(
+            stopped_at < HIGH_WATER + u64::from(READ),
+            "{stopped_at} bytes got past a screen that drew none of them"
+        );
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(seen.load(Ordering::SeqCst), stopped_at, "still reading");
+        assert!(!exited.load(Ordering::SeqCst));
+
+        // Drawn as fast as it comes, it runs to the end.
+        let start = Instant::now();
+        let mut drawn = 0;
+        while !exited.load(Ordering::SeqCst) {
+            let now = seen.load(Ordering::SeqCst);
+            terminal.flow().drawn(now - drawn);
+            drawn = now;
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "the flood never finished"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(terminal.flow().holds() >= 1);
+    }
+
+    #[test]
+    fn the_screen_is_waited_for_from_the_high_mark_down_to_the_low_one() {
+        let flow = Flow::default();
+        flow.sent(HIGH_WATER as usize - 1);
+        flow.wait();
+        assert!(flow.held_for().is_none(), "held below the mark");
+
+        flow.sent(1);
+        let flow = Arc::new(flow);
+        let waiter = thread::spawn({
+            let flow = Arc::clone(&flow);
+            move || flow.wait()
+        });
+        while flow.held_for().is_none() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Not let go by the first thing drawn: it would be held again at once.
+        flow.drawn(1);
+        thread::sleep(Duration::from_millis(50));
+        assert!(!waiter.is_finished());
+
+        flow.drawn(HIGH_WATER - LOW_WATER);
+        waiter.join().unwrap();
+        assert_eq!((flow.pending(), flow.holds()), (LOW_WATER - 1, 1));
+    }
+
+    #[test]
+    fn a_terminal_that_has_gone_keeps_nothing_waiting() {
+        let flow = Arc::new(Flow::default());
+        flow.sent(HIGH_WATER as usize * 2);
+        let waiter = thread::spawn({
+            let flow = Arc::clone(&flow);
+            move || flow.wait()
+        });
+        while flow.held_for().is_none() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        flow.release();
+        waiter.join().unwrap();
+        // Nor again, for what is read after.
+        flow.wait();
     }
 
     #[test]

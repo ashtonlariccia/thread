@@ -1,5 +1,5 @@
 //! Tauri command surface: windows, files, remote connections, the config,
-//! terminals, and the pinned strip.
+//! terminals, tmux, and the pinned strip.
 //!
 //! This layer owns the windows and the IPC transport. Anything that can be
 //! decided without a window lives in `thread-core`.
@@ -12,8 +12,12 @@ use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalSize, State, Webvi
 
 use thread_core::connections::{SavedConnection, Store as ConnectionStore};
 use thread_core::lsp;
-use thread_core::remote::{self, ConnectError, DiscoveredKey, Failure, Remote, Target};
+use thread_core::remote::{
+    self, ConnectError, DiscoveredKey, Failure, Remote, RemoteStats, RemoteTmux, Target,
+};
+use thread_core::sysinfo;
 use thread_core::terminal::{self, LocalTerminal, Terminal};
+use thread_core::tmux;
 
 use thread_core::{
     config, document, fsops, git, tree, Appearance, Config, Document, Entry, Eol, Material, Pin,
@@ -681,7 +685,11 @@ pub fn remote_state(window: WebviewWindow, remotes: State<'_, Remotes>) -> Optio
 pub async fn remote_disconnect(
     window: WebviewWindow,
     remotes: State<'_, Remotes>,
+    tmuxes: State<'_, Tmuxes>,
+    stats: State<'_, Stats>,
 ) -> Result<(), String> {
+    tmuxes.close_window(window.label());
+    stats.close_window(window.label());
     if let Some(link) = remotes.set(window.label(), None) {
         link.remote.disconnect().await;
         tracing::info!(target: "thread::remote", "DISCONNECTED {}", link.info.label);
@@ -924,6 +932,25 @@ impl Terminals {
         Some(terminal)
     }
 
+    /// Every terminal whose output the page has left undrawn for `long`, with
+    /// how much of it there is: `#3 262144B for 6s`. For the log.
+    pub fn stalled(&self, long: std::time::Duration) -> Vec<String> {
+        let Ok(open) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut stalled: Vec<(u64, String)> = open
+            .iter()
+            .filter_map(|(id, (_, terminal))| {
+                let flow = terminal.flow();
+                let held = flow.held_for().filter(|held| *held >= long)?;
+                let pending = flow.pending();
+                Some((*id, format!("#{id} {pending}B for {}s", held.as_secs())))
+            })
+            .collect();
+        stalled.sort();
+        stalled.into_iter().map(|(_, line)| line).collect()
+    }
+
     /// The window has gone, or its page has been reloaded and can no longer
     /// reach them: its shells go too.
     pub fn close_window(&self, label: &str) {
@@ -935,9 +962,13 @@ impl Terminals {
             .filter(|(_, (window, _))| window == label)
             .map(|(id, _)| *id)
             .collect();
-        let closed: Vec<_> = ids.iter().filter_map(|id| open.remove(id)).collect();
+        let closed = ids
+            .iter()
+            .filter_map(|id| open.remove(id))
+            .map(|(_, terminal)| terminal)
+            .collect();
         drop(open);
-        drop(closed);
+        end(closed);
     }
 
     fn with(&self, id: u64, act: impl FnOnce(&dyn Terminal)) {
@@ -949,8 +980,18 @@ impl Terminals {
     }
 }
 
+/// End these terminals, somewhere other than here: ending one is the death
+/// of a tree of processes, and "here" is as often as not the window's thread.
+fn end(terminals: Vec<Box<dyn Terminal>>) {
+    if !terminals.is_empty() {
+        std::thread::spawn(move || drop(terminals));
+    }
+}
+
 /// Start a terminal for this window, in `cwd`. Output arrives on `on_output`
-/// as raw bytes; `on_exit` hears once, when the shell has ended.
+/// as raw bytes, a frame's worth to a message, and no faster than the page
+/// says it has [drawn](terminal_drawn) it; `on_exit` hears once, when the
+/// shell has ended.
 // One argument for each thing the page sends, which is how a command takes them.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -977,9 +1018,15 @@ pub async fn terminal_open(
     let ended = {
         let app = app.clone();
         move || {
-            drop(app.state::<Terminals>().take(id));
+            let holds = app
+                .state::<Terminals>()
+                .take(id)
+                .map_or(0, |terminal| terminal.flow().holds());
             let _ = on_exit.send(());
-            tracing::info!(target: "thread::terminal", "ENDED #{id}");
+            tracing::info!(
+                target: "thread::terminal",
+                "ENDED #{id}, having waited for the screen {holds} times"
+            );
         }
     };
 
@@ -1045,7 +1092,8 @@ pub fn open_external(url: String) -> Result<(), String> {
 }
 
 // Not `async`, unlike the rest: these run in the order they were sent, which
-// is the order the keys were pressed. Neither waits on the shell.
+// is the order the keys were pressed. That puts them on the window's own
+// thread, so none does more than queue something or count it.
 
 /// What was typed, or pasted, as the terminal emulator encoded it.
 #[tauri::command]
@@ -1058,11 +1106,223 @@ pub fn terminal_resize(terminals: State<'_, Terminals>, id: u64, cols: u16, rows
     terminals.with(id, |terminal| terminal.resize(cols, rows));
 }
 
+/// The page has drawn `bytes` more of a terminal's output. This is what lets
+/// its shell be read from again once it has printed more than can be drawn.
+#[tauri::command]
+pub fn terminal_drawn(terminals: State<'_, Terminals>, id: u64, bytes: u64) {
+    terminals.with(id, |terminal| terminal.flow().drawn(bytes));
+}
+
 /// End a terminal and everything running in it. Nothing happens if it has
 /// already gone.
 #[tauri::command]
 pub fn terminal_close(terminals: State<'_, Terminals>, id: u64) {
-    drop(terminals.take(id));
+    end(terminals.take(id).into_iter().collect());
+}
+
+// --- tmux -----------------------------------------------------------------------
+//
+// The other face of a window on a remote: its tmux sessions, drawn as the
+// window's own tabs and panes. One attachment to a window, on the connection
+// the window already has. Ending one detaches and nothing more: the sessions
+// are the remote's, and are there to come back to.
+
+/// Each window's attachment to tmux, by window label, with a number to tell
+/// it from the one before it.
+#[derive(Default)]
+pub struct Tmuxes(Mutex<HashMap<String, (u64, Arc<RemoteTmux>)>>);
+
+impl Tmuxes {
+    fn of(&self, window: &WebviewWindow) -> Option<Arc<RemoteTmux>> {
+        let open = self.0.lock().ok()?;
+        open.get(window.label()).map(|(_, tmux)| Arc::clone(tmux))
+    }
+
+    /// The window has gone, or its page has been reloaded, or it has left
+    /// the remote: detach.
+    pub fn close_window(&self, label: &str) {
+        let closed = self.0.lock().ok().and_then(|mut open| open.remove(label));
+        drop(closed);
+    }
+
+    /// An attachment has ended by itself. Only if it is still the window's:
+    /// the window may have attached again since.
+    fn ended(&self, label: &str, id: u64) {
+        if let Ok(mut open) = self.0.lock() {
+            if open.get(label).is_some_and(|(current, _)| *current == id) {
+                open.remove(label);
+            }
+        }
+    }
+}
+
+/// The tmux sessions on the remote this window is connected to.
+#[tauri::command]
+pub async fn tmux_sessions(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<tmux::Listing, String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    link.remote.tmux_sessions().await.map_err(|e| e.to_string())
+}
+
+/// Attach this window to a tmux session: `session` if one is named, and a
+/// new one, called `name` if that is not empty, otherwise.
+///
+/// Everything arrives on `on_event`, in order: what there is as JSON, and
+/// what a pane printed as raw bytes, the pane's number in the first four.
+/// Its last message says the attachment has ended.
+#[tauri::command]
+pub async fn tmux_open(
+    app: AppHandle,
+    window: WebviewWindow,
+    on_event: Channel<InvokeResponseBody>,
+    session: Option<u32>,
+    name: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    let link = app
+        .state::<Remotes>()
+        .of(&window)
+        .ok_or("This window is not connected.")?;
+    let label = window.label().to_owned();
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let start = match session {
+        Some(session) => tmux::Start::Attach(session),
+        None => tmux::Start::New(name.unwrap_or_default()),
+    };
+
+    let json = |value: serde_json::Value| InvokeResponseBody::Json(value.to_string());
+    let heard = {
+        let on_event = on_event.clone();
+        move |event: tmux::Event| {
+            // A channel that refuses is a page that has gone.
+            let _ = on_event.send(match event {
+                tmux::Event::Output { pane, data } => {
+                    let mut bytes = Vec::with_capacity(4 + data.len());
+                    bytes.extend_from_slice(&pane.to_le_bytes());
+                    bytes.extend_from_slice(&data);
+                    InvokeResponseBody::Raw(bytes)
+                }
+                tmux::Event::State(state) => {
+                    json(serde_json::json!({ "type": "state", "state": state }))
+                }
+                tmux::Event::Sizes(panes) => {
+                    json(serde_json::json!({ "type": "sizes", "panes": panes }))
+                }
+                tmux::Event::Error(message) => {
+                    json(serde_json::json!({ "type": "error", "message": message }))
+                }
+            });
+        }
+    };
+    let ended = {
+        let (app, label) = (app.clone(), label.clone());
+        move |ended: tmux::Ended| {
+            app.state::<Tmuxes>().ended(&label, id);
+            tracing::info!(
+                target: "thread::tmux",
+                "ENDED #{id} in {label}: {}",
+                ended.reason.as_deref().unwrap_or("detached")
+            );
+            let _ = on_event.send(json(serde_json::json!({ "type": "exit", "ended": ended })));
+        }
+    };
+
+    let history = stored_config().terminal.scrollback;
+    let attached = link
+        .remote
+        .tmux(start, cols, rows, history, heard, ended)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!(target: "thread::tmux", "OPENED #{id} in {label} {cols}x{rows}");
+    let replaced = app
+        .state::<Tmuxes>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut open| open.insert(label, (id, Arc::new(attached))));
+    drop(replaced);
+    Ok(())
+}
+
+// Not `async`, as a terminal's are not: what is typed arrives in the order
+// it was typed, and none of these does more than queue something.
+
+/// Something the page asks of tmux: keys for a pane, a split, a new window.
+#[tauri::command]
+pub fn tmux_do(window: WebviewWindow, tmuxes: State<'_, Tmuxes>, action: tmux::Action) {
+    if let Some(attached) = tmuxes.of(&window) {
+        attached.act(action);
+    }
+}
+
+/// The page has drawn `bytes` more of what the panes printed.
+#[tauri::command]
+pub fn tmux_drawn(window: WebviewWindow, tmuxes: State<'_, Tmuxes>, bytes: u64) {
+    if let Some(attached) = tmuxes.of(&window) {
+        attached.flow().drawn(bytes);
+    }
+}
+
+/// Detach this window from tmux. The sessions carry on.
+#[tauri::command]
+pub fn tmux_close(window: WebviewWindow, tmuxes: State<'_, Tmuxes>) {
+    tmuxes.close_window(window.label());
+}
+
+// --- how busy the remote is -----------------------------------------------------
+//
+// For the bottom bar, while the window shows tmux: a build is what is run
+// there, and how hard the machine is working is what there is to say of one.
+
+/// Each window's watch on its remote, by window label.
+#[derive(Default)]
+pub struct Stats(Mutex<HashMap<String, RemoteStats>>);
+
+impl Stats {
+    /// Stop watching for a window: it has gone, or turned away, or left the remote.
+    pub fn close_window(&self, label: &str) {
+        let closed = self.0.lock().ok().and_then(|mut open| open.remove(label));
+        drop(closed);
+    }
+}
+
+/// Start saying how busy this window's remote is, every couple of seconds,
+/// in place of any watch the window already had.
+#[tauri::command]
+pub async fn sysinfo_start(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    stats: State<'_, Stats>,
+    on_sample: Channel<sysinfo::Sample>,
+) -> Result<(), String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    let watch = link
+        .remote
+        .watch_system(move |sample| {
+            // A channel that refuses is a page that has gone.
+            let _ = on_sample.send(sample);
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let replaced = stats
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut open| open.insert(window.label().to_owned(), watch));
+    drop(replaced);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sysinfo_stop(window: WebviewWindow, stats: State<'_, Stats>) {
+    stats.close_window(window.label());
 }
 
 // --- language servers ---------------------------------------------------------

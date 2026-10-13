@@ -83,13 +83,119 @@ fn message_box(caption: &str, text: &str) {
     }
 }
 
-fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("THREAD_LOG")
-                .unwrap_or_else(|_| "info".into()),
-        )
+/// The log, `%APPDATA%\thread\thread.log`, opened to be added to.
+///
+/// A release build has no console, so without this whatever went wrong went
+/// unrecorded. Kept small rather than rotated on a schedule: past a megabyte
+/// at launch, it becomes `thread.log.old` and a new one is begun.
+fn log_file() -> Option<std::fs::File> {
+    const KEPT: u64 = 1024 * 1024;
+
+    let path = thread_core::data_dir().ok()?.join("thread.log");
+    if std::fs::metadata(&path).is_ok_and(|log| log.len() > KEPT) {
+        let _ = std::fs::rename(&path, path.with_extension("log.old"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
+fn start_logging() {
+    use tracing_subscriber::prelude::*;
+
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_env("THREAD_LOG").unwrap_or_else(|_| "info".into());
+    let to_file = log_file().map(|file| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+    });
+    // The console too, where there is one: see the top of this file.
+    let to_console = cfg!(debug_assertions).then(tracing_subscriber::fmt::layer);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(to_file)
+        .with(to_console)
         .init();
+
+    // A release build aborts on a panic, and this is all that will say why.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        tracing::error!("PANIC {panic}");
+        report(panic);
+    }));
+}
+
+/// Say so in the log when the window stops answering, and when the page
+/// leaves a terminal's output undrawn.
+///
+/// Windows closes a window that does not answer it, and leaves behind only
+/// the fact that it did. This leaves which of the two had stopped, and for a
+/// terminal, how far behind the screen was.
+fn watch(app: tauri::AppHandle) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Longer than anything the window does on purpose.
+    const STALLED: Duration = Duration::from_secs(4);
+
+    std::thread::spawn(move || {
+        let start = Instant::now();
+        let now = move || start.elapsed().as_millis() as u64;
+        // When the window's thread last ran something it was asked to, and
+        // whether it is being asked now: one question at a time, so a window
+        // that is stuck is not left a queue of them to answer.
+        let answered = Arc::new(AtomicU64::new(0));
+        let asking = Arc::new(AtomicBool::new(false));
+        let (mut window_stalled, mut page_stalled) = (false, false);
+
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+
+            if !asking.swap(true, Ordering::SeqCst) {
+                let (answered, asking) = (Arc::clone(&answered), Arc::clone(&asking));
+                let asked = app.run_on_main_thread(move || {
+                    answered.store(now(), Ordering::SeqCst);
+                    asking.store(false, Ordering::SeqCst);
+                });
+                // Refused: the app is closing, and there is no one to watch.
+                if asked.is_err() {
+                    return;
+                }
+            }
+
+            let silent = Duration::from_millis(now() - answered.load(Ordering::SeqCst));
+            if silent >= STALLED && !window_stalled {
+                tracing::warn!(
+                    target: "thread::ui",
+                    "STALLED the window has not answered for {}s",
+                    silent.as_secs()
+                );
+            } else if silent < STALLED && window_stalled {
+                tracing::warn!(target: "thread::ui", "RECOVERED the window is answering again");
+            }
+            window_stalled = silent >= STALLED;
+
+            let behind = app.state::<commands::Terminals>().stalled(STALLED);
+            if !behind.is_empty() && !page_stalled {
+                tracing::warn!(
+                    target: "thread::terminal",
+                    "STALLED the page has not drawn the output of {}",
+                    behind.join(", ")
+                );
+            } else if behind.is_empty() && page_stalled {
+                tracing::warn!(target: "thread::terminal", "RECOVERED the page is drawing again");
+            }
+            page_stalled = !behind.is_empty();
+        }
+    });
+}
+
+fn main() {
+    start_logging();
 
     #[cfg(debug_assertions)]
     require_dev_server();
@@ -104,9 +210,17 @@ fn main() {
         .manage(commands::Terminals::default())
         .manage(commands::Remotes::default())
         .manage(commands::Servers::default())
+        .manage(commands::Tmuxes::default())
+        .manage(commands::Stats::default())
         // However a window goes, its shells and its connection go with it.
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
+                window
+                    .state::<commands::Tmuxes>()
+                    .close_window(window.label());
+                window
+                    .state::<commands::Stats>()
+                    .close_window(window.label());
                 window
                     .state::<commands::Terminals>()
                     .close_window(window.label());
@@ -128,6 +242,12 @@ fn main() {
                 webview
                     .state::<commands::Servers>()
                     .close_window(webview.label());
+                webview
+                    .state::<commands::Tmuxes>()
+                    .close_window(webview.label());
+                webview
+                    .state::<commands::Stats>()
+                    .close_window(webview.label());
             }
             tracing::info!(
                 target: "thread::ui",
@@ -141,6 +261,7 @@ fn main() {
         // -- otherwise it survives in settings.json but not on screen.
         .setup(|app| {
             commands::open_main_window(app.handle());
+            watch(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -178,9 +299,17 @@ fn main() {
             commands::terminal_open,
             commands::terminal_write,
             commands::terminal_resize,
+            commands::terminal_drawn,
             commands::terminal_close,
             commands::terminal_shells,
             commands::open_external,
+            commands::tmux_sessions,
+            commands::tmux_open,
+            commands::tmux_do,
+            commands::tmux_drawn,
+            commands::tmux_close,
+            commands::sysinfo_start,
+            commands::sysinfo_stop,
             commands::lsp_catalog,
             commands::lsp_start,
             commands::lsp_send,

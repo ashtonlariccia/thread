@@ -5,9 +5,12 @@
  * source that a window with no terminal open has no use for, so it is loaded
  * with the first terminal and not before.
  *
- * Drawn by xterm's DOM renderer. The WebGL one is faster under a flood of
- * output, and costs a GPU context and the memory behind it for every
- * terminal that is open — the wrong trade for a tab that mostly runs a build.
+ * Drawn by xterm's DOM renderer unless the config asks for the WebGL one.
+ * That is faster under a flood of output, and costs a GPU context and the
+ * memory behind it for every terminal that is open — the wrong trade for a
+ * tab that mostly runs a build, and the right one for tmux.
+ *
+ * Either way the shell is only read as fast as this draws: see `ACK_EVERY`.
  */
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -23,7 +26,20 @@ export type TerminalLook = {
   cursor: "block" | "bar" | "underline";
 };
 
+export type TerminalRenderer = "dom" | "webgl";
+
+/**
+ * How much output is drawn between one word to the backend that it has been
+ * and the next. The backend stops reading a shell that is a few of these
+ * ahead of the screen (`Flow`, in `terminal.rs`), which is what keeps a
+ * program that prints faster than this can draw from burying the window.
+ * Counted, not sent piece by piece: typing costs no messages at all.
+ */
+const ACK_EVERY = 32 * 1024;
+
 export type TerminalOptions = TerminalLook & {
+  /** What draws it. Read once, when it opens. */
+  renderer: TerminalRenderer;
   /** Where the shell starts; null leaves it to the backend. */
   cwd: string | null;
   scrollback: number;
@@ -78,7 +94,7 @@ export type TerminalHandle = {
  * below are Catppuccin's, with its blue-greys swapped for the neutral ones
  * the rest of this window uses.
  */
-function theme(): ITheme {
+export function theme(): ITheme {
   const style = getComputedStyle(document.documentElement);
   const color = (name: string) => style.getPropertyValue(name).trim();
 
@@ -109,55 +125,11 @@ function theme(): ITheme {
   };
 }
 
-export function openTerminal(host: HTMLElement, options: TerminalOptions): TerminalHandle {
-  const term = new Terminal({
-    fontFamily: options.fontFamily,
-    fontSize: options.fontSize,
-    cursorStyle: options.cursor,
-    scrollback: options.scrollback,
-    // Eased rather than switched on and off: see `TerminalView`'s styles.
-    cursorBlink: true,
-    // No hollow box while the editor has the keyboard: one caret at a time.
-    cursorInactiveStyle: "none",
-    allowTransparency: true,
-    theme: theme(),
-  });
-  const fit = new FitAddon();
-  term.loadAddon(fit);
-
-  // Paths and web addresses in the output, underlined under the pointer
-  // and followed with Ctrl+click. A plain click stays what it is in a
-  // terminal: the start of a selection, or a click for the program.
-  term.registerLinkProvider({
-    provideLinks(row, callback) {
-      const text = term.buffer.active.getLine(row - 1)?.translateToString(true) ?? "";
-      const links = findLinks(text).map((link) => ({
-        // Columns count from one, and the end is the last one in it.
-        range: { start: { x: link.start + 1, y: row }, end: { x: link.end, y: row } },
-        text: text.slice(link.start, link.end),
-        activate: (event: MouseEvent) => {
-          if (event.ctrlKey) options.onlink(link);
-        },
-      }));
-      callback(links.length > 0 ? links : undefined);
-    },
-  });
-  term.open(host);
-  fit.fit();
-
-  // `thread some-file`, typed at the shell: the command has no way to
-  // reach this window but through the terminal it is run in, so it says
-  // what it wants on the screen, in a sequence only this reads.
-  term.parser.registerOscHandler(OPEN_OSC, (data) => {
-    const request = openRequest(data);
-    if (request) options.onopen(request.kind, request.path);
-    return true;
-  });
-
-  let disposed = false;
-  /** Set once the shell is running; what `dispose` has to end. */
-  let id: number | null = null;
-
+/**
+ * The clipboard's keys, for a terminal: what Windows has always had for
+ * them, and the modern ones. Gives back the copy it does, for a menu to do.
+ */
+export function clipboardKeys(term: Terminal): () => void {
   const copy = () => {
     if (!term.hasSelection()) return;
     void writeText(term.getSelection()).catch((e) => console.error("copy failed", e));
@@ -192,6 +164,85 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     if (key === "v") return false;
     return true;
   });
+  return copy;
+}
+
+/**
+ * Underline the paths and web addresses in a terminal's output under the
+ * pointer, and follow one that is Ctrl+clicked. A plain click stays what it
+ * is in a terminal: the start of a selection, or a click for the program.
+ */
+export function followLinks(term: Terminal, onlink: (link: Link) => void) {
+  term.registerLinkProvider({
+    provideLinks(row, callback) {
+      const text = term.buffer.active.getLine(row - 1)?.translateToString(true) ?? "";
+      const links = findLinks(text).map((link) => ({
+        // Columns count from one, and the end is the last one in it.
+        range: { start: { x: link.start + 1, y: row }, end: { x: link.end, y: row } },
+        text: text.slice(link.start, link.end),
+        activate: (event: MouseEvent) => {
+          if (event.ctrlKey) onlink(link);
+        },
+      }));
+      callback(links.length > 0 ? links : undefined);
+    },
+  });
+}
+
+export function openTerminal(host: HTMLElement, options: TerminalOptions): TerminalHandle {
+  const term = new Terminal({
+    fontFamily: options.fontFamily,
+    fontSize: options.fontSize,
+    cursorStyle: options.cursor,
+    scrollback: options.scrollback,
+    // Eased rather than switched on and off: see `TerminalView`'s styles.
+    cursorBlink: true,
+    // No hollow box while the editor has the keyboard: one caret at a time.
+    cursorInactiveStyle: "none",
+    allowTransparency: true,
+    theme: theme(),
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+
+  followLinks(term, options.onlink);
+  term.open(host);
+  fit.fit();
+
+  let disposed = false;
+
+  // Loaded only when asked for, as xterm itself is. A graphics context can
+  // be refused, or taken away later; either leaves the DOM renderer, which
+  // is what is drawing until this arrives anyway.
+  if (options.renderer === "webgl") {
+    void import("@xterm/addon-webgl").then(
+      ({ WebglAddon }) => {
+        if (disposed) return;
+        try {
+          const webgl = new WebglAddon();
+          webgl.onContextLoss(() => webgl.dispose());
+          term.loadAddon(webgl);
+        } catch (e) {
+          console.error("no WebGL for the terminal", e);
+        }
+      },
+      (e) => console.error("no WebGL for the terminal", e),
+    );
+  }
+
+  // `thread some-file`, typed at the shell: the command has no way to
+  // reach this window but through the terminal it is run in, so it says
+  // what it wants on the screen, in a sequence only this reads.
+  term.parser.registerOscHandler(OPEN_OSC, (data) => {
+    const request = openRequest(data);
+    if (request) options.onopen(request.kind, request.path);
+    return true;
+  });
+
+  /** Set once the shell is running; what `dispose` has to end. */
+  let id: number | null = null;
+
+  const copy = clipboardKeys(term);
 
   // Held until the shell has an id to address it by. xterm answers the
   // console's opening questions the moment they arrive, which can be before
@@ -205,8 +256,24 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     if (id !== null) void invoke("terminal_resize", { id, cols, rows });
   });
 
+  /** Output drawn since the backend was last told. */
+  let drawn = 0;
+  const acknowledge = () => {
+    if (id === null || drawn < ACK_EVERY) return;
+    void invoke("terminal_drawn", { id, bytes: drawn });
+    drawn = 0;
+  };
+
   const onOutput = new Channel<ArrayBuffer>();
-  onOutput.onmessage = (bytes) => term.write(new Uint8Array(bytes));
+  onOutput.onmessage = (bytes) => {
+    const size = bytes.byteLength;
+    // xterm takes what it is given and works through it in its own time;
+    // the callback is when this piece has been.
+    term.write(new Uint8Array(bytes), () => {
+      drawn += size;
+      acknowledge();
+    });
+  };
   const onExit = new Channel<null>();
   onExit.onmessage = () => {
     if (!disposed) options.onexit();
@@ -227,6 +294,8 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
       }
       id = opened;
       if (early.length > 0) void invoke("terminal_write", { id, data: early.join("") });
+      // What was drawn before there was an id to say so by.
+      acknowledge();
       // The window may have been resized while the shell was starting.
       void invoke("terminal_resize", { id, cols: term.cols, rows: term.rows });
     },

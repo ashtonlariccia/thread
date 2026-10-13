@@ -7,12 +7,17 @@
 //!
 //! `serve` at the bottom runs the same server until it is killed, for
 //! pointing a real Thread window at. It is ignored by a normal test run.
+//!
+//! There is no tmux on Windows, so the server has none either unless it is
+//! lent one: with `THREAD_TMUX_WSL` naming a WSL distribution that has it,
+//! a command that runs tmux is run there, on a socket of its own and with
+//! no config, so that no session of anyone's is touched.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,6 +33,9 @@ use thread_core::terminal::Terminal;
 const USER: &str = "tester";
 const PASSWORD: &str = "correct-horse";
 const BANNER: &str = "REMOTE-SHELL-READY";
+/// What typing `flood` at the shell prints: this many pieces of a kilobyte.
+const FLOOD_PIECES: u64 = 4096;
+const FLOOD_DONE: &str = "FLOOD-DONE";
 
 // --- the server -----------------------------------------------------------------
 
@@ -45,8 +53,48 @@ impl russh::server::Server for Server {
             channels: HashMap::new(),
             shells: HashSet::new(),
             raw: HashSet::new(),
+            programs: HashMap::new(),
         }
     }
+}
+
+/// The socket the borrowed tmux keeps to.
+const TMUX_SOCKET: &str = "thread-test";
+
+/// The WSL distribution to borrow a tmux from, if one was named.
+fn tmux_distro() -> Option<String> {
+    std::env::var("THREAD_TMUX_WSL")
+        .ok()
+        .filter(|name| !name.is_empty())
+}
+
+/// A command for the borrowed tmux, run in WSL. It is handed over as a file:
+/// a line with this much quoting in it does not survive being an argument
+/// to `wsl.exe`.
+fn in_wsl(distro: &str, script: &str) -> std::process::Command {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let script = script
+        .replace(
+            "exec tmux ",
+            &format!("exec tmux -L {TMUX_SOCKET} -f /dev/null "),
+        )
+        .replace(
+            "tmux list-sessions",
+            &format!("tmux -L {TMUX_SOCKET} list-sessions"),
+        );
+    let file = std::env::temp_dir().join(format!(
+        "thread-test-{}-{}.sh",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&file, script).expect("the script");
+    // `C:\Users\me` is `/mnt/c/Users/me` from in there.
+    let path = file.to_string_lossy().replace('\\', "/");
+    let (drive, rest) = path.split_once(":/").expect("a drive");
+    let mut command = std::process::Command::new("wsl.exe");
+    command.args(["-d", distro, "-e", "sh"]);
+    command.arg(format!("/mnt/{}/{rest}", drive.to_lowercase()));
+    command
 }
 
 struct Connection {
@@ -59,6 +107,8 @@ struct Connection {
     /// The channels standing in for a language server: what is sent comes
     /// back as it was, byte for byte.
     raw: HashSet<ChannelId>,
+    /// The channels that are a program run in WSL, by what it reads from.
+    programs: HashMap<ChannelId, std::process::ChildStdin>,
 }
 
 impl russh::server::Handler for Connection {
@@ -144,6 +194,34 @@ impl russh::server::Handler for Connection {
     ) -> Result<(), Self::Error> {
         session.channel_success(id)?;
         let command = String::from_utf8_lossy(command);
+        // tmux, if there is one to borrow, and the script that reads how
+        // busy the machine is: run for real, its output sent as
+        // it comes and the channel closed when it ends.
+        let borrowed = command.contains("tmux") || command.contains("thread-sys:");
+        if let (true, Some(distro)) = (borrowed, tmux_distro()) {
+            let mut child = in_wsl(&distro, &command)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("wsl.exe");
+            self.programs
+                .insert(id, child.stdin.take().expect("its input"));
+            let mut output = child.stdout.take().expect("its output");
+            let (handle, runtime) = (session.handle(), tokio::runtime::Handle::current());
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 16 * 1024];
+                while let Ok(n @ 1..) = output.read(&mut buf) {
+                    let sent = runtime.block_on(handle.data(id, buf[..n].to_vec()));
+                    if sent.is_err() {
+                        break;
+                    }
+                }
+                let _ = child.wait();
+                let _ = runtime.block_on(handle.close(id));
+            });
+            return Ok(());
+        }
         // Asked which programs there are: there is `clangd`, said among the
         // sort of thing a login shell prints on its way.
         if command.contains("command -v") {
@@ -163,7 +241,8 @@ impl russh::server::Handler for Connection {
         Ok(())
     }
 
-    /// The shell: what is typed comes back, and `exit` ends it.
+    /// The shell: what is typed comes back, `flood` prints far more than a
+    /// screen draws in a moment, and `exit` ends it.
     async fn data(
         &mut self,
         id: ChannelId,
@@ -174,6 +253,10 @@ impl russh::server::Handler for Connection {
             session.data(id, data.to_vec())?;
             return Ok(());
         }
+        if let Some(input) = self.programs.get_mut(&id) {
+            let _ = input.write_all(data).and_then(|()| input.flush());
+            return Ok(());
+        }
         if !self.shells.contains(&id) {
             return Ok(());
         }
@@ -181,8 +264,35 @@ impl russh::server::Handler for Connection {
             session.close(id)?;
             return Ok(());
         }
+        if data.starts_with(b"flood") {
+            for _ in 0..FLOOD_PIECES {
+                session.data(id, vec![b'x'; 1024])?;
+            }
+            session.data(id, FLOOD_DONE.as_bytes().to_vec())?;
+            return Ok(());
+        }
         let echoed = String::from_utf8_lossy(data).replace('\r', "\r\n$ ");
         session.data(id, echoed.into_bytes())?;
+        Ok(())
+    }
+
+    /// The other end has finished with a channel: a program on it is told
+    /// so the way it would be anywhere, by its input ending.
+    async fn channel_eof(
+        &mut self,
+        id: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.programs.remove(&id);
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        id: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.programs.remove(&id);
         Ok(())
     }
 }
@@ -656,6 +766,81 @@ async fn a_terminal_is_a_shell_on_the_remote() {
     .await;
 }
 
+/// Output printed faster than it is drawn stops at the remote, and comes in
+/// pieces a window can take: not one for every packet.
+#[tokio::test]
+async fn a_flood_from_the_remote_waits_for_the_screen() {
+    let (_root, remote) = connected().await;
+    let (bytes, pieces) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (done, ended) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    let terminal = remote
+        .shell(
+            None,
+            80,
+            24,
+            {
+                let (bytes, pieces, done) =
+                    (Arc::clone(&bytes), Arc::clone(&pieces), Arc::clone(&done));
+                move |chunk| {
+                    bytes.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+                    pieces.fetch_add(1, Ordering::SeqCst);
+                    if chunk.ends_with(FLOOD_DONE.as_bytes()) {
+                        done.store(true, Ordering::SeqCst);
+                    }
+                }
+            },
+            {
+                let ended = Arc::clone(&ended);
+                move || ended.store(true, Ordering::SeqCst)
+            },
+        )
+        .await
+        .expect("a shell");
+    terminal.write(b"flood\r");
+
+    // Nothing is drawn, so it has to stop -- well short of all of it.
+    eventually("the shell to be made to wait", || {
+        terminal.flow().held_for().is_some()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let stopped_at = bytes.load(Ordering::SeqCst);
+    assert!(
+        stopped_at < 512 * 1024,
+        "{stopped_at} bytes got past a screen that drew none of them"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(bytes.load(Ordering::SeqCst), stopped_at, "still reading");
+    assert!(!done.load(Ordering::SeqCst));
+
+    // Drawn as fast as it comes, the rest follows.
+    let mut drawn = 0;
+    for _ in 0..2000 {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        let now = bytes.load(Ordering::SeqCst);
+        terminal.flow().drawn(now - drawn);
+        drawn = now;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(done.load(Ordering::SeqCst), "the flood never finished");
+    assert!(bytes.load(Ordering::SeqCst) >= FLOOD_PIECES * 1024);
+    let pieces = pieces.load(Ordering::SeqCst);
+    assert!(pieces < FLOOD_PIECES / 4, "handed over in {pieces} pieces");
+
+    // What is typed still gets through after all that.
+    terminal.write(b"exit\r");
+    eventually("`exit` to end the terminal", || {
+        ended.load(Ordering::SeqCst)
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn dropping_a_terminal_ends_it_and_leaves_the_connection_up() {
     let (_root, remote) = connected().await;
@@ -735,6 +920,115 @@ async fn a_language_server_runs_on_the_remote_and_ends_when_dropped() {
         .serve("no-such-server", None, |_| {}, || {})
         .await
         .is_err());
+}
+
+/// tmux for real, over the connection: a session made, typed into, left
+/// running when the window lets go, and come back to with its past intact.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a tmux in WSL: set THREAD_TMUX_WSL to the distribution"]
+async fn a_tmux_session_outlives_the_attachment_to_it() {
+    use thread_core::tmux::{Action, Ended, Event, Start, State};
+
+    let distro = tmux_distro().expect("THREAD_TMUX_WSL is not set");
+    let end_server = || {
+        let _ = in_wsl(&distro, "exec tmux kill-server\n")
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    end_server();
+    let (_root, remote) = connected().await;
+
+    let listing = remote.tmux_sessions().await.expect("a listing");
+    assert!(listing.installed);
+    assert!(listing.sessions.is_empty(), "{:?}", listing.sessions);
+
+    /// What an attachment has said: the state, each pane's output, the end.
+    #[derive(Default)]
+    struct Heard {
+        state: Option<State>,
+        shown: HashMap<u32, Vec<u8>>,
+        ended: Option<Ended>,
+    }
+    let attach = |start: Start| {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let (on_event, on_exit) = (Arc::clone(&heard), Arc::clone(&heard));
+        let attaching = remote.tmux(
+            start,
+            100,
+            30,
+            200,
+            move |event| {
+                let mut heard = on_event.lock().unwrap();
+                match event {
+                    Event::State(state) => heard.state = Some(state),
+                    Event::Sizes(_) => {}
+                    Event::Output { pane, data } => {
+                        heard.shown.entry(pane).or_default().extend(data)
+                    }
+                    Event::Error(message) => panic!("tmux refused something: {message}"),
+                }
+            },
+            move |ended| on_exit.lock().unwrap().ended = Some(ended),
+        );
+        async move { (attaching.await.expect("tmux"), heard) }
+    };
+    let shown = |heard: &Arc<Mutex<Heard>>, pane: u32| {
+        let heard = heard.lock().unwrap();
+        String::from_utf8_lossy(heard.shown.get(&pane).map_or(&[][..], Vec::as_slice)).into_owned()
+    };
+    let pane_of = |heard: &Arc<Mutex<Heard>>| {
+        let heard = heard.lock().unwrap();
+        heard
+            .state
+            .as_ref()
+            .map(|state| (state.session.unwrap(), state.windows[0].panes[0].id))
+    };
+
+    // A new session, and something typed into it.
+    let (tmux, heard) = attach(Start::New("over ssh".into())).await;
+    eventually("attached", || pane_of(&heard).is_some()).await;
+    let (session, pane) = pane_of(&heard).unwrap();
+    tmux.act(Action::Watch { pane });
+    eventually("shown", || shown(&heard, pane).starts_with("\x1bc")).await;
+    tmux.act(Action::Write {
+        pane,
+        text: "echo still-''here\r".into(),
+    });
+    eventually("echoed", || shown(&heard, pane).contains("still-here")).await;
+
+    // Let go of it. It ends as a detachment, and the session is still there.
+    drop(tmux);
+    eventually("detached", || heard.lock().unwrap().ended.is_some()).await;
+    assert!(heard.lock().unwrap().ended.as_ref().unwrap().attached);
+    let listing = remote.tmux_sessions().await.expect("a listing");
+    assert_eq!(listing.sessions.len(), 1, "{:?}", listing.sessions);
+    assert_eq!(
+        (listing.sessions[0].id, listing.sessions[0].attached),
+        (session, 0)
+    );
+    assert_eq!(listing.sessions[0].name, "over ssh");
+
+    // Back to it: what was on the pane is on it still.
+    let (tmux, heard) = attach(Start::Attach(session)).await;
+    eventually("attached again", || pane_of(&heard).is_some()).await;
+    tmux.act(Action::Watch { pane });
+    eventually("its past", || shown(&heard, pane).contains("still-here")).await;
+
+    // One that is not there is a reason, not an attachment.
+    let (_gone, missing) = attach(Start::Attach(session + 40)).await;
+    eventually("refused", || missing.lock().unwrap().ended.is_some()).await;
+    let ended = missing.lock().unwrap().ended.clone().unwrap();
+    assert!(!ended.attached);
+    assert!(ended
+        .reason
+        .is_some_and(|reason| reason.contains("session")));
+
+    // Ended on purpose, it lets go of us.
+    tmux.act(Action::KillSession { session });
+    eventually("ended", || heard.lock().unwrap().ended.is_some()).await;
+    let listing = remote.tmux_sessions().await.expect("a listing");
+    assert!(listing.sessions.is_empty(), "{:?}", listing.sessions);
+    end_server();
 }
 
 /// Not a test: the server above, kept running, to point a Thread window at.

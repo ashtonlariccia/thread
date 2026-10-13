@@ -1,8 +1,9 @@
 //! A remote machine, reached over SSH.
 //!
 //! One connection does everything a window needs of a remote: its files go
-//! over SFTP, and each terminal is a shell channel beside it. Nothing is
-//! installed on the other end; anything that runs `sshd` will do.
+//! over SFTP, and each terminal is a shell channel beside it, as is tmux
+//! when the window is showing that. Nothing is installed on the other end;
+//! anything that runs `sshd` will do.
 //!
 //! What SFTP cannot do is tell us when a file changes, and it does not need
 //! to: open files and unfolded folders are already kept current by asking for
@@ -24,10 +25,13 @@ use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::time::Instant;
 
 use crate::document::{self, Document, Eol, Stamp};
 use crate::known_hosts::{KnownHosts, Verdict};
-use crate::terminal::Terminal;
+use crate::sysinfo;
+use crate::terminal::{Flow, Terminal, FRAME};
+use crate::tmux;
 use crate::tree::{self, Entry};
 use crate::{Error, Result};
 
@@ -697,7 +701,7 @@ impl Remote {
     {
         let describe = |what: &str, e: russh::Error| refuse(format!("{what}: {e}"));
 
-        let mut channel = self
+        let channel = self
             .handle
             .channel_open_session()
             .await
@@ -732,38 +736,287 @@ impl Remote {
         }
         .map_err(|e| describe("the server refused a shell", e))?;
 
+        // Two tasks, one for each way: the output is not read while the screen
+        // is behind (see `Flow`), and what is typed -- a Ctrl+C, above all --
+        // must not have to wait for that.
+        let (mut output, input) = channel.split();
         let (commands, mut queued) = unbounded_channel::<Command>();
         tokio::spawn(async move {
+            while let Some(command) = queued.recv().await {
+                match command {
+                    Command::Data(bytes) => {
+                        if input.data(&bytes[..]).await.is_err() {
+                            break;
+                        }
+                    }
+                    Command::Resize { cols, rows } => {
+                        let _ = input
+                            .window_change(u32::from(cols), u32::from(rows), 0, 0)
+                            .await;
+                    }
+                    // The shell ended, or the terminal was dropped.
+                    Command::Close => break,
+                }
+            }
+            let _ = input.close().await;
+        });
+
+        // While this is not reading, the connection's own queue for the
+        // channel fills, and then the connection waits too: that is what
+        // passes the wait back to the program, and it holds up the window's
+        // files for as long. The screen catches up in a fraction of a second.
+        let flow = Arc::new(Flow::default());
+        tokio::spawn({
+            let (flow, commands) = (Arc::clone(&flow), commands.clone());
+            async move {
+                let mut batch = Vec::new();
+                let mut sent: Option<Instant> = None;
+                let mut open = true;
+                while open {
+                    flow.ready().await;
+                    match output.wait().await {
+                        // The shell's stderr belongs on screen with the rest.
+                        Some(ChannelMsg::Data { data })
+                        | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            batch.extend_from_slice(&data)
+                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                        Some(_) => continue,
+                    }
+                    // What comes in the rest of the frame goes with it. After
+                    // a quiet spell there is no rest, and it goes at once.
+                    let until = sent.map_or_else(Instant::now, |at| at + FRAME);
+                    while batch.len() < BATCH {
+                        match tokio::time::timeout_at(until, output.wait()).await {
+                            Ok(Some(ChannelMsg::Data { data }))
+                            | Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                                batch.extend_from_slice(&data)
+                            }
+                            Ok(Some(ChannelMsg::Eof)) | Ok(Some(ChannelMsg::Close)) | Ok(None) => {
+                                open = false;
+                                break;
+                            }
+                            Ok(Some(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
+                    flow.sent(batch.len());
+                    on_data(&batch);
+                    batch.clear();
+                    sent = Some(Instant::now());
+                }
+                let _ = commands.send(Command::Close);
+                on_exit();
+            }
+        });
+
+        Ok(RemoteTerminal { commands, flow })
+    }
+
+    // --- how busy it is -----------------------------------------------------------
+
+    /// Keep reading how busy the remote is, as a channel on this connection.
+    /// `on_sample` hears every couple of seconds, for as long as what comes
+    /// back is kept; a machine there is no reading of is never heard from.
+    pub async fn watch_system<S>(&self, mut on_sample: S) -> Result<RemoteStats>
+    where
+        S: FnMut(sysinfo::Sample) + Send + 'static,
+    {
+        let describe = |what: &str, e: russh::Error| refuse(format!("{what}: {e}"));
+
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| describe("the server would not open a channel", e))?;
+        // By way of the login shell, for its `PATH`, and then `sh` whatever
+        // that shell is: the script is not one a fish would read.
+        let command = Self::login(&format!("exec sh -c {}", quoted(&sysinfo::script())));
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| describe("the server refused to run it", e))?;
+
+        let (commands, mut queued) = unbounded_channel::<Command>();
+        tokio::spawn(async move {
+            let mut sampler = sysinfo::Sampler::default();
             loop {
                 tokio::select! {
                     command = queued.recv() => match command {
-                        Some(Command::Data(bytes)) => {
-                            if channel.data(&bytes[..]).await.is_err() {
-                                break;
-                            }
-                        }
-                        Some(Command::Resize { cols, rows }) => {
-                            let _ = channel
-                                .window_change(u32::from(cols), u32::from(rows), 0, 0)
-                                .await;
-                        }
-                        // Closed, or the terminal was dropped.
                         Some(Command::Close) | None => break,
+                        Some(_) => {}
                     },
                     message = channel.wait() => match message {
-                        // The shell's stderr belongs on screen with the rest.
-                        Some(ChannelMsg::Data { data })
-                        | Some(ChannelMsg::ExtendedData { data, .. }) => on_data(&data),
+                        Some(ChannelMsg::Data { data }) => {
+                            sampler.feed(&data).into_iter().for_each(&mut on_sample);
+                        }
                         Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
                         Some(_) => {}
                     },
                 }
             }
+            // Closing it is what ends the script: it has no one to print to.
             let _ = channel.close().await;
-            on_exit();
         });
 
-        Ok(RemoteTerminal { commands })
+        Ok(RemoteStats { commands })
+    }
+
+    // --- tmux -------------------------------------------------------------------
+
+    /// The tmux sessions there are on the remote, and whether it has tmux
+    /// at all. Asked without attaching to anything: with no session to
+    /// attach to, there is no other way to ask.
+    pub async fn tmux_sessions(&self) -> Result<tmux::Listing> {
+        /// Marks an answer, among whatever else a login shell prints.
+        const MISSING: &str = "thread-tmux:missing";
+        const SESSION: &str = "thread-tmux:";
+        // No server running is no sessions, and tmux says so as an error.
+        let script = format!(
+            "command -v tmux >/dev/null 2>&1 || {{ echo {MISSING}; exit 0; }}; \
+             tmux list-sessions -F '{SESSION}{}' 2>/dev/null",
+            tmux::SESSIONS_FORMAT
+        );
+        let printed = self.output(Self::login(&script)).await?;
+        let lines = || printed.lines().map(|line| line.trim_end_matches('\r'));
+        Ok(tmux::Listing {
+            installed: !lines().any(|line| line.trim() == MISSING),
+            sessions: lines()
+                .filter_map(|line| tmux::parse_session(line.strip_prefix(SESSION)?))
+                .collect(),
+        })
+    }
+
+    /// Attach to tmux on the remote, in its control mode, as a channel on
+    /// this connection. `on_event` hears what there is to show; `on_exit`
+    /// hears once, when tmux has let go -- detached, its last session ended,
+    /// or the connection gone from under it. The sessions themselves stay.
+    pub async fn tmux<V, E>(
+        &self,
+        start: tmux::Start,
+        cols: u16,
+        rows: u16,
+        history: u32,
+        mut on_event: V,
+        on_exit: E,
+    ) -> Result<RemoteTmux>
+    where
+        V: FnMut(tmux::Event) + Send + 'static,
+        E: FnOnce(tmux::Ended) + Send + 'static,
+    {
+        let describe = |what: &str, e: russh::Error| refuse(format!("{what}: {e}"));
+
+        let channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| describe("the server would not open a channel", e))?;
+        // No terminal: control mode is lines of text, and wants none.
+        let command = Self::login(&format!("exec tmux {}", start.arguments(cols, rows)));
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| describe("the server refused to run tmux", e))?;
+
+        let (mut output, input) = channel.split();
+        let (commands, mut queued) = unbounded_channel::<Command>();
+        tokio::spawn(async move {
+            while let Some(command) = queued.recv().await {
+                match command {
+                    Command::Data(bytes) => {
+                        if input.data(&bytes[..]).await.is_err() {
+                            break;
+                        }
+                    }
+                    Command::Resize { .. } => {}
+                    Command::Close => break,
+                }
+            }
+            // Its input ending is what tells tmux to detach.
+            let _ = input.close().await;
+        });
+
+        let engine = Arc::new(Mutex::new(tmux::Engine::new(cols, rows, history)));
+        // One count for every pane: they share the channel, so what holds
+        // one back holds them all. See `shell` for the rest of it.
+        let flow = Arc::new(Flow::default());
+        tokio::spawn({
+            let (engine, flow, commands) =
+                (Arc::clone(&engine), Arc::clone(&flow), commands.clone());
+            async move {
+                let mut batch = Vec::new();
+                // What tmux, or the shell that could not find it, said aside.
+                let mut aside = Vec::new();
+                let mut sent: Option<Instant> = None;
+                let mut open = true;
+                while open {
+                    flow.ready().await;
+                    match output.wait().await {
+                        Some(ChannelMsg::Data { data }) => batch.extend_from_slice(&data),
+                        Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            aside.extend_from_slice(&data);
+                            continue;
+                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                        Some(_) => continue,
+                    }
+                    let until = sent.map_or_else(Instant::now, |at| at + FRAME);
+                    while batch.len() < BATCH {
+                        match tokio::time::timeout_at(until, output.wait()).await {
+                            Ok(Some(ChannelMsg::Data { data })) => batch.extend_from_slice(&data),
+                            Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                                aside.extend_from_slice(&data)
+                            }
+                            Ok(Some(ChannelMsg::Eof)) | Ok(Some(ChannelMsg::Close)) | Ok(None) => {
+                                open = false;
+                                break;
+                            }
+                            Ok(Some(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
+
+                    let mut out = tmux::Out::default();
+                    if let Ok(mut engine) = engine.lock() {
+                        engine.feed(&batch, &mut out);
+                    }
+                    batch.clear();
+                    if !out.commands.is_empty() {
+                        let _ = commands.send(Command::Data(out.commands));
+                    }
+                    for event in out.events {
+                        if let tmux::Event::Output { data, .. } = &event {
+                            flow.sent(data.len());
+                        }
+                        on_event(event);
+                    }
+                    sent = Some(Instant::now());
+                }
+                let _ = commands.send(Command::Close);
+
+                let aside = String::from_utf8_lossy(&aside).trim().to_owned();
+                let ended = match engine.lock() {
+                    Ok(engine) => tmux::Ended {
+                        attached: engine.started(),
+                        reason: engine
+                            .reason()
+                            .map(str::to_owned)
+                            .or((!aside.is_empty()).then_some(aside)),
+                    },
+                    Err(_) => tmux::Ended {
+                        attached: false,
+                        reason: None,
+                    },
+                };
+                on_exit(ended);
+            }
+        });
+
+        Ok(RemoteTmux {
+            commands,
+            flow,
+            engine,
+        })
     }
 
     // --- language servers -------------------------------------------------------
@@ -982,7 +1235,11 @@ enum Command {
 /// A shell on the remote. Dropping it closes its channel, which ends it.
 pub struct RemoteTerminal {
     commands: UnboundedSender<Command>,
+    flow: Arc<Flow>,
 }
+
+/// The most output handed over as one piece, give or take a packet.
+const BATCH: usize = 64 * 1024;
 
 impl Terminal for RemoteTerminal {
     fn write(&self, data: &[u8]) {
@@ -992,10 +1249,60 @@ impl Terminal for RemoteTerminal {
     fn resize(&self, cols: u16, rows: u16) {
         let _ = self.commands.send(Command::Resize { cols, rows });
     }
+
+    fn flow(&self) -> &Flow {
+        &self.flow
+    }
 }
 
 impl Drop for RemoteTerminal {
     fn drop(&mut self) {
+        // Its tab has gone, so nothing is left to say the output was drawn.
+        self.flow.release();
+        let _ = self.commands.send(Command::Close);
+    }
+}
+
+/// A watch kept on how busy the remote is. Dropping it ends the watch.
+pub struct RemoteStats {
+    commands: UnboundedSender<Command>,
+}
+
+impl Drop for RemoteStats {
+    fn drop(&mut self) {
+        let _ = self.commands.send(Command::Close);
+    }
+}
+
+/// An attachment to tmux on the remote. Dropping it detaches: the sessions,
+/// and everything running in them, carry on.
+pub struct RemoteTmux {
+    commands: UnboundedSender<Command>,
+    flow: Arc<Flow>,
+    engine: Arc<Mutex<tmux::Engine>>,
+}
+
+impl RemoteTmux {
+    /// Do something the page asked for. Returns once it is queued.
+    pub fn act(&self, action: tmux::Action) {
+        let mut out = tmux::Out::default();
+        if let Ok(mut engine) = self.engine.lock() {
+            engine.act(action, &mut out);
+        }
+        if !out.commands.is_empty() {
+            let _ = self.commands.send(Command::Data(out.commands));
+        }
+    }
+
+    /// How much of what the panes printed is still on its way to the screen.
+    pub fn flow(&self) -> &Flow {
+        &self.flow
+    }
+}
+
+impl Drop for RemoteTmux {
+    fn drop(&mut self) {
+        self.flow.release();
         let _ = self.commands.send(Command::Close);
     }
 }

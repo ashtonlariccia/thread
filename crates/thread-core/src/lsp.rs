@@ -151,7 +151,12 @@ pub const CATALOG: &[Spec] = &[
         name: "TypeScript",
         command: "typescript-language-server",
         args: &["--stdio"],
-        languages: &[("TypeScript", "typescript"), ("TypeScript JSX", "typescriptreact"), ("JavaScript", "javascript"), ("JavaScript JSX", "javascriptreact")],
+        languages: &[
+            ("TypeScript", "typescript"),
+            ("TypeScript JSX", "typescriptreact"),
+            ("JavaScript", "javascript"),
+            ("JavaScript JSX", "javascriptreact"),
+        ],
         folders: &[],
     },
     Spec {

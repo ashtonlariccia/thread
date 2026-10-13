@@ -97,6 +97,11 @@ font_size = 14
 cursor = "block"
 # How many lines that have scrolled off the top are kept to scroll back to.
 scrollback = 2000
+# What draws a terminal: "dom" or "webgl". "webgl" keeps up far better with a
+# program that redraws the whole screen, such as tmux, and costs a graphics
+# context and its memory for every terminal that is open. Terminals opened
+# after a change use it.
+renderer = "dom"
 
 [lsp]
 # The language servers that are switched on, by name: completion as you type,
@@ -359,6 +364,17 @@ pub enum TerminalCursor {
     Underline,
 }
 
+/// What draws a terminal's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalRenderer {
+    /// As elements of the page. Slower under a flood, and no memory of its own.
+    #[default]
+    Dom,
+    /// On the graphics card.
+    Webgl,
+}
+
 /// The terminals that open as tabs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -372,6 +388,7 @@ pub struct Terminal {
     /// reads well as prose to edit and as output to scan are not the same.
     pub font_size: f64,
     pub cursor: TerminalCursor,
+    pub renderer: TerminalRenderer,
 }
 
 impl Default for Terminal {
@@ -381,6 +398,7 @@ impl Default for Terminal {
             scrollback: 2000,
             font_size: 14.0,
             cursor: TerminalCursor::default(),
+            renderer: TerminalRenderer::default(),
         }
     }
 }
@@ -947,6 +965,15 @@ mod tests {
             }
         );
         assert!(parse("[terminal]\ncursor = \"wedge\"").is_err());
+
+        assert_eq!(
+            parse("[terminal]\nrenderer = \"webgl\"")
+                .unwrap()
+                .terminal
+                .renderer,
+            TerminalRenderer::Webgl
+        );
+        assert!(parse("[terminal]\nrenderer = \"canvas\"").is_err());
 
         let (after, config) =
             patched(TEMPLATE, "terminal", "cursor", &json("underline".into())).unwrap();

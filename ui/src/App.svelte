@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { Channel, invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { message } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -21,6 +21,8 @@
   import type { Tab } from "./lib/TabBar.svelte";
   import TerminalView from "./lib/TerminalView.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
+  import TmuxSidebar from "./lib/tmux/TmuxSidebar.svelte";
+  import TmuxView from "./lib/tmux/TmuxView.svelte";
   import UnsavedDialog from "./lib/UnsavedDialog.svelte";
 
   import { applyAccent } from "./lib/accent";
@@ -50,6 +52,7 @@
     type SavedConnection,
   } from "./lib/state/remote.svelte";
   import { Tree } from "./lib/state/tree.svelte";
+  import { busy, Tmux, type TmuxPane } from "./lib/tmux/tmux.svelte";
   import type { Pin, SidebarItem } from "./lib/types";
 
   const pins = new Pins();
@@ -63,6 +66,7 @@
     ready: () => remote.status === "local" || remote.status === "connected",
   });
   docs.watcher = lsp;
+  const tmux = new Tmux();
 
   const appWindow = getCurrentWindow();
 
@@ -451,6 +455,11 @@
 
   /** Put the keyboard back in whatever the focused pane is showing. */
   function grabFocus() {
+    if (mode === "tmux") {
+      const pane = tmux.pane;
+      if (pane) tmux.handle(pane.id)?.focus();
+      return;
+    }
     const active = layout.current.active;
     if (active === null) return;
     if (isTerminal(active)) terminalViews[active]?.focus();
@@ -847,6 +856,266 @@
     remote.status = "connected";
     checkDisk();
   }
+
+  // --- tmux ---------------------------------------------------------------------
+  //
+  // The window's other face. The editor is one; this is the remote's tmux
+  // sessions, drawn as the window's own: a session in the sidebar, each of
+  // its windows a tab, each pane a terminal. Turning to it puts nothing of
+  // the editor away, and turning back finds it as it was. It is the same
+  // connection either way: a window is on one remote, whichever face shows.
+
+  type Mode = "ide" | "tmux";
+  const MODE_KEY = "thread.mode";
+
+  let mode = $state<Mode>("ide");
+  /** Whether the tmux face has been turned to at all: it is not built before. */
+  let tmuxOpened = $state(false);
+  /** Its sidebar is the list of sessions, and starts out open. */
+  let tmuxSidebarCollapsed = $state(false);
+  let tmuxView = $state<TmuxView | undefined>();
+  let tmuxSidebar = $state<TmuxSidebar | undefined>();
+
+  tmux.onerror = (text) => void message(text, { title: "tmux", kind: "error" });
+
+  /**
+   * Turn the window to one face or the other. tmux is a remote's: turned to
+   * on this machine, it asks which, unless told not to.
+   */
+  function setMode(next: Mode, ask = true) {
+    if (next === mode) return;
+    mode = next;
+    if (keepsSession) {
+      try {
+        localStorage.setItem(MODE_KEY, next);
+      } catch {
+        /* nowhere to keep it; the window starts as the editor next time */
+      }
+    }
+    if (next === "ide") {
+      // Once it is laid out again, which is when it can take the keyboard.
+      requestAnimationFrame(grabFocus);
+      return;
+    }
+    tmuxOpened = true;
+    tmux.enter();
+    if (ask && remote.status === "local") openConnect();
+  }
+
+  // The store follows the connection: up, dropped, or left.
+  $effect(() => {
+    const status = remote.status;
+    untrack(() => tmux.link(status));
+  });
+
+  // A dropped connection is made again without being asked, once tmux has
+  // been in use: sessions that outlive the connection are the point of it.
+  // Quietly, and for as long as it takes; Reconnect, in the command list,
+  // is still there to be told why it is not working.
+  $effect(() => {
+    if (remote.status !== "lost" || !tmuxOpened) return;
+    let trying = false;
+    const again = async () => {
+      if (trying || remote.status !== "lost") return;
+      trying = true;
+      try {
+        const info = await invoke<RemoteInfo>("remote_reconnect");
+        if (remote.status === "lost") {
+          remote.info = info;
+          lsp.reset();
+          remote.status = "connected";
+          checkDisk();
+        }
+      } catch {
+        /* still unreachable; the next tick tries again */
+      } finally {
+        trying = false;
+      }
+    };
+    const first = setTimeout(again, 1000);
+    const timer = setInterval(again, 5000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  });
+
+  /** How busy the remote is, as the backend reads it. Mirrors `Sample` in the core. */
+  type SystemSample = {
+    cpu: number;
+    cores: number;
+    load: number;
+    /** Kilobytes. */
+    memUsed: number;
+    memTotal: number;
+    /** Its memory is in mebibytes, and nought where the card does not say. */
+    gpu: { usage: number; memUsed: number; memTotal: number; temperature: number | null } | null;
+  };
+  /** The latest reading; null until there is one, and on a machine there is none of. */
+  let system = $state.raw<SystemSample | null>(null);
+
+  // Read only while it is being looked at: with tmux showing, on a remote
+  // that is there. It is a channel held open and a few lines of shell left
+  // running on the remote, and neither is worth having for a bar out of sight.
+  $effect(() => {
+    if (mode !== "tmux" || remote.status !== "connected") return;
+    const samples = new Channel<SystemSample>();
+    let watching = true;
+    samples.onmessage = (sample) => {
+      if (watching) system = sample;
+    };
+    invoke("sysinfo_start", { onSample: samples }).catch((e) => console.error("sysinfo_start failed", e));
+    return () => {
+      watching = false;
+      system = null;
+      void invoke("sysinfo_stop").catch(() => {});
+    };
+  });
+
+  /** A size given in mebibytes, in gigabytes to one place. */
+  const gigabytes = (mebibytes: number) => (mebibytes / 1024).toFixed(1);
+
+  /** What the title bar says while tmux is showing: the session, and the window in front. */
+  const tmuxTitle = $derived.by(() => {
+    const session = tmux.session;
+    if (!session) return null;
+    const window = tmux.window;
+    return window ? `${session.name} › ${window.name}` : session.name;
+  });
+
+  const names = (panes: TmuxPane[]) => [...new Set(panes.map((pane) => pane.command))].join(", ");
+
+  /** Close a pane, asking first if something is running in it. */
+  async function closeTmuxPane(pane: TmuxPane) {
+    if (busy(pane)) {
+      const sure = await confirm({
+        title: "Close pane",
+        message: `${pane.command} is running in this pane.`,
+        note: "Closing the pane ends it.",
+        confirm: "Close Pane",
+        danger: true,
+      });
+      if (!sure) return;
+    }
+    tmux.act({ do: "killPane", pane: pane.id });
+  }
+
+  /** Close a tmux window, asking first if that would end something. */
+  async function closeTmuxWindow(id: number) {
+    const window = tmux.state?.windows.find((each) => each.id === id);
+    if (!window) return;
+    const running = window.panes.filter(busy);
+    const last = tmux.state?.windows.length === 1;
+    if (running.length > 0 || last) {
+      const sure = await confirm({
+        title: "Close window",
+        message:
+          running.length > 0
+            ? `${names(running)} ${running.length === 1 ? "is" : "are"} running in "${window.name}".`
+            : `Close "${window.name}"?`,
+        note: last
+          ? "It is the last window of its session, so the session ends with it."
+          : "Closing the window ends everything running in it.",
+        confirm: "Close Window",
+        danger: true,
+      });
+      if (!sure) return;
+    }
+    tmux.act({ do: "killWindow", window: id });
+  }
+
+  /** End a session. Always asked about: it is what was meant to last. */
+  async function killTmuxSession(id: number) {
+    const session = tmux.sessions.find((each) => each.id === id);
+    if (!session) return;
+    const sure = await confirm({
+      title: "Kill session",
+      message: `Kill the session "${session.name}"?`,
+      note:
+        `Everything running in its ${session.windows === 1 ? "window" : `${session.windows} windows`} ` +
+        "is ended, and there is no getting it back.",
+      confirm: "Kill Session",
+      danger: true,
+    });
+    if (sure) tmux.act({ do: "killSession", session: id });
+  }
+
+  function onTmuxPaneContextMenu(event: MouseEvent, pane: TmuxPane) {
+    const handle = tmux.handle(pane.id);
+    const back = (act: () => void) => () => {
+      act();
+      // The menu took the focus to be clicked; typing carries on after it.
+      handle?.focus();
+    };
+    const copy = handle?.hasSelection() ? [item("Copy", back(() => handle.copy()))] : [];
+    const window = tmux.window;
+    const zoom =
+      window && window.paneCount > 1
+        ? [
+            item(window.zoomed ? "Show Every Pane" : "Fill the Window", () =>
+              tmux.act({ do: "zoom", pane: pane.id }),
+            ),
+          ]
+        : [];
+    ctx = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        ...copy,
+        item("Paste", back(() => handle?.paste())),
+        SEP,
+        item("Split Right", () => tmux.act({ do: "split", pane: pane.id, dir: "row" })),
+        item("Split Down", () => tmux.act({ do: "split", pane: pane.id, dir: "column" })),
+        ...zoom,
+        SEP,
+        item("Close Pane", () => void closeTmuxPane(pane), true),
+      ],
+    };
+  }
+
+  function onTmuxTabContextMenu(event: MouseEvent, window: number) {
+    ctx = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        item("Rename", () => tmuxView?.renameWindow(window)),
+        item("New Window", () => tmux.act({ do: "newWindow" })),
+        SEP,
+        item("Close Window", () => void closeTmuxWindow(window), true),
+      ],
+    };
+  }
+
+  function onTmuxSessionContextMenu(event: MouseEvent, session: number) {
+    ctx = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        item("Rename", () => tmuxSidebar?.rename(session)),
+        SEP,
+        item("Kill Session", () => void killTmuxSession(session), true),
+      ],
+    };
+  }
+
+  /** A path or an address in a pane was Ctrl+clicked. A file opens in the editor. */
+  function followTmuxLink(link: Link) {
+    if (!("url" in link)) setMode("ide");
+    followLink(link, null);
+  }
+
+  /** Something over the window has the keyboard, and a pane is not to take it back. */
+  const overlaid = $derived.by(
+    () =>
+      paletteOpen ||
+      appearanceOpen ||
+      lspOpen ||
+      connectOpen ||
+      question !== null ||
+      browse !== null ||
+      ctx !== null ||
+      docs.busy,
+  );
 
   // --- the bottom bar ------------------------------------------------------------
   //
@@ -1303,7 +1572,10 @@
       if (blocked) return;
       // Held down, Ctrl+Tab runs along the strip; the list opens the once.
       if (!palette) {
-        if (!paletteOpen) cycleTabs(event.shiftKey ? -1 : 1);
+        if (paletteOpen) return;
+        // The strip in sight: the editor's tabs, or the session's windows.
+        if (mode === "tmux") tmux.cycle(event.shiftKey ? -1 : 1);
+        else cycleTabs(event.shiftKey ? -1 : 1);
       } else if (!event.repeat) paletteOpen = true;
       return;
     }
@@ -1549,8 +1821,12 @@
 
   const commands = $derived.by((): Command[] => {
     const all: Command[] = [
-      { title: "New Terminal", run: () => newTerminal() },
-      { title: "Toggle Terminal", run: toggleTerminal },
+      { title: "New Terminal", disabled: mode !== "ide", run: () => newTerminal() },
+      { title: "Toggle Terminal", disabled: mode !== "ide", run: toggleTerminal },
+      // The window's two faces: the editor, and the remote's tmux sessions.
+      mode === "ide"
+        ? { title: "Switch to tmux", run: () => setMode("tmux") }
+        : { title: "Switch to IDE", run: () => setMode("ide") },
       { title: "Reconnect", disabled: remote.status !== "lost", run: () => void reconnect() },
       { title: "Reload Window", run: () => void refreshPage() },
       { title: "Close Window", run: closeWindow },
@@ -1624,6 +1900,9 @@
       if (keepsSession) {
         if (startup.length === 0) await restoreSession().catch((e) => console.error(e));
         sessionRestored = true;
+        // The face it was showing, too: without asking who to connect to,
+        // if the remote it was on is not there to go back to.
+        if (startup.length === 0 && localStorage.getItem(MODE_KEY) === "tmux") setMode("tmux", false);
       } else {
         // A reloaded page starts over, but the connection it had is still up.
         const live = await invoke<RemoteInfo | null>("remote_state").catch(() => null);
@@ -1682,25 +1961,46 @@
 
 <div class="app">
   <TitleBar
-    hasFile={showingFile}
-    path={activeTerminal !== null
-      ? (terminals.find((t) => t.key === activeTerminal)?.cwd ?? null)
-      : docs.active
-        ? (docs.active.path ?? docs.active.name)
-        : null}
+    hasFile={mode === "ide" && showingFile}
+    path={mode === "tmux"
+      ? tmuxTitle
+      : activeTerminal !== null
+        ? (terminals.find((t) => t.key === activeTerminal)?.cwd ?? null)
+        : docs.active
+          ? (docs.active.path ?? docs.active.name)
+          : null}
     folderCount={tree.roots.length}
-    onnew={() => docs.newFile()}
-    onopen={() => void docs.openDialog()}
-    onopenfolder={() => void openFolder()}
+    onnew={() => {
+      // What the File and Terminal menus make is the editor's, and is made there.
+      setMode("ide");
+      docs.newFile();
+    }}
+    onopen={() => {
+      setMode("ide");
+      void docs.openDialog();
+    }}
+    onopenfolder={() => {
+      setMode("ide");
+      void openFolder();
+    }}
     onclosefolder={() => void closeFolders(tree.roots.map((root) => root.path))}
     onsave={() => void docs.save()}
     onsaveas={() => void docs.saveAs()}
     onclosefile={() => closeTab()}
-    {sidebarCollapsed}
-    ontogglesidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
-    onnewterminal={() => newTerminal()}
+    sidebarCollapsed={mode === "tmux" ? tmuxSidebarCollapsed : sidebarCollapsed}
+    ontogglesidebar={() => {
+      if (mode === "tmux") tmuxSidebarCollapsed = !tmuxSidebarCollapsed;
+      else sidebarCollapsed = !sidebarCollapsed;
+    }}
+    onnewterminal={() => {
+      setMode("ide");
+      newTerminal();
+    }}
     shells={shells.map((shell) => shell.name)}
-    onnewterminalin={(index) => newTerminal(shells[index])}
+    onnewterminalin={(index) => {
+      setMode("ide");
+      newTerminal(shells[index]);
+    }}
     onpalette={() => (paletteOpen = true)}
     remoteStatus={remote.status}
     known={remote.known}
@@ -1716,7 +2016,9 @@
     onquit={quit}
   />
 
-  <main class:resizing>
+  <!-- Out of sight while the window shows tmux, and otherwise untouched:
+       every file, pane and terminal in it is as it was on coming back. -->
+  <main class:resizing class:away={mode !== "ide"}>
     <Sidebar
       items={treeItems}
       activeKey={activeTreeKey}
@@ -1791,6 +2093,7 @@
             shell={terminal.shell}
             look={terminalLook}
             scrollback={config.current.terminal.scrollback}
+            renderer={config.current.terminal.renderer}
             onexit={() => closeTerminal(terminal.key)}
             onopen={fromTerminal}
             onlink={(link) => followLink(link, terminal.cwd)}
@@ -1821,6 +2124,54 @@
     </section>
   </main>
 
+  <!-- The other face: the remote's tmux. Not built until first turned to. -->
+  {#if tmuxOpened}
+    <main class:resizing class:away={mode !== "tmux"}>
+      <TmuxSidebar
+        bind:this={tmuxSidebar}
+        sessions={tmux.sessions}
+        activeId={tmux.state?.session ?? null}
+        usable={remote.status === "connected" && tmux.status !== "missing"}
+        attached={tmux.status === "attached"}
+        width={tmuxSidebarCollapsed ? RAIL_WIDTH : sidebarWidth}
+        collapsed={tmuxSidebarCollapsed}
+        {resizing}
+        onselect={(session) => tmux.select(session)}
+        onnew={(name) => tmux.create(name)}
+        onrename={(session, name) => tmux.act({ do: "renameSession", session, name })}
+        onkill={(session) => void killTmuxSession(session)}
+        oncontext={onTmuxSessionContextMenu}
+      />
+
+      {#if !tmuxSidebarCollapsed}
+        <SidebarResizer
+          width={sidebarWidth}
+          onresize={(w) => (sidebarWidth = w)}
+          ondragging={(d) => (resizing = d)}
+        />
+      {/if}
+
+      <TmuxView
+        bind:this={tmuxView}
+        {tmux}
+        shown={mode === "tmux"}
+        blocked={overlaid}
+        railed={tmuxSidebarCollapsed}
+        remoteStatus={remote.status}
+        host={where.host || "the remote"}
+        look={terminalLook}
+        scrollback={config.current.terminal.scrollback}
+        renderer={config.current.terminal.renderer}
+        onconnect={openConnect}
+        onlink={followTmuxLink}
+        onclosewindow={(window) => void closeTmuxWindow(window)}
+        onclosepane={(pane) => void closeTmuxPane(pane)}
+        onpanecontext={onTmuxPaneContextMenu}
+        ontabcontext={onTmuxTabContextMenu}
+      />
+    </main>
+  {/if}
+
   {#if ctx}
     <ContextMenu x={ctx.x} y={ctx.y} items={ctx.items} onclose={() => (ctx = null)} />
   {/if}
@@ -1832,6 +2183,34 @@
     onmove={(pin, index) => void pins.move(pin, index)}
   >
     {#snippet start()}
+      <!-- While the window shows tmux, how hard the remote is working: a
+           build is what runs there. Nothing until the first reading, and
+           nothing at all of a machine that cannot be read. -->
+      {#if mode === "tmux"}
+        {#if system}
+          <span title="Processor in use, across {system.cores} cores">
+            cpu {Math.round(system.cpu)}%
+          </span>
+          <span title="Memory in use, not counting what the kernel keeps as cache" data-drop="4">
+            ram {gigabytes(system.memUsed / 1024)}/{gigabytes(system.memTotal / 1024)}G
+          </span>
+          {#if system.gpu}
+            <span title="Graphics card in use, and its memory" data-drop="3">
+              gpu {Math.round(system.gpu.usage)}%{system.gpu.memTotal > 0
+                ? ` ${gigabytes(system.gpu.memUsed)}/${gigabytes(system.gpu.memTotal)}G`
+                : ""}
+            </span>
+            {#if system.gpu.temperature !== null}
+              <span title="Graphics card temperature" data-drop="1">
+                {Math.round(system.gpu.temperature)}°C
+              </span>
+            {/if}
+          {/if}
+          <span title="Load average over the last minute, on {system.cores} cores" data-drop="2">
+            load {system.load.toFixed(2)}
+          </span>
+        {/if}
+      {:else}
       <!-- Where the window is working, as one capsule: who, and on what.
            Filled while that is a remote, and in the colour of a fault once
            the connection to it has dropped. Then the repository the folder
@@ -1863,7 +2242,7 @@
             stroke-linejoin="round"
           />
         </svg>
-        <span class="who">{where.user}{where.user && where.host ? "@" : ""}{where.host}</span>
+        <span class="who">{where.user}{where.user && where.host ? "  " : ""}{where.host}</span>
       </span>
       <!-- Always all of it, at nought where there is nothing to count or
            no repository to count in, so the bar keeps its shape. -->
@@ -1894,6 +2273,28 @@
         data-drop="2"
       >
         ↑{git?.ahead ?? 0} ↓{git?.behind ?? 0}
+      </span>
+      {/if}
+    {/snippet}
+    {#snippet info()}
+      <!-- Which face the window shows: the editor, or the remote's tmux. -->
+      <span class="modes" role="group" aria-label="What the window shows">
+        <button
+          class:on={mode === "ide"}
+          aria-pressed={mode === "ide"}
+          title="The editor, as it was left"
+          onclick={() => setMode("ide")}
+        >
+          ide
+        </button>
+        <button
+          class:on={mode === "tmux"}
+          aria-pressed={mode === "tmux"}
+          title="The remote's tmux sessions"
+          onclick={() => setMode("tmux")}
+        >
+          tmux
+        </button>
       </span>
     {/snippet}
   </PinBar>
@@ -1967,6 +2368,12 @@
     display: flex;
     flex: 1;
     min-height: 0;
+  }
+
+  /* The face the window is not showing. Not there to be laid out, and all
+     of it still alive: an editor keeps its place, and a terminal its shell. */
+  main.away {
+    display: none;
   }
 
   /* While dragging, stop the stage from selecting text under the cursor and
@@ -2102,5 +2509,32 @@
   }
   .fault {
     color: var(--danger);
+  }
+
+  /* The right end of the bottom bar: which face the window shows. One
+     capsule, as where it is working is at the other end, with the half that
+     is showing filled. */
+  .modes {
+    display: inline-flex;
+    height: 17px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    overflow: hidden;
+  }
+  .modes button {
+    padding: 0 0.65rem;
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    line-height: 17px;
+  }
+  .modes button:hover {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .modes button.on {
+    background: var(--accent);
+    color: var(--accent-ink);
   }
 </style>
