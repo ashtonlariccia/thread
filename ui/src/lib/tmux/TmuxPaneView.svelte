@@ -26,11 +26,9 @@
     /** Its terminal is up, and can be given the keyboard. */
     onready: () => void;
     onlink: (link: Link) => void;
-    oncontext: (event: MouseEvent) => void;
   };
 
-  let { tmux, pane, cols, rows, look, scrollback, renderer, onready, onlink, oncontext }: Props =
-    $props();
+  let { tmux, pane, cols, rows, look, scrollback, renderer, onready, onlink }: Props = $props();
 
   let host: HTMLElement;
   let handle = $state.raw<PaneHandle | null>(null);
@@ -67,12 +65,14 @@
     handle?.restyle(look);
   });
 
-  // In the capture phase, ahead of xterm: a program reading the mouse would
-  // otherwise be sent the right-click as a click of its own.
+  // The right button is the clipboard, as in every terminal here: it
+  // copies what is selected, and pastes when nothing is (see `TerminalView`).
   function onContextMenu(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
-    oncontext(event);
+    if (handle?.hasSelection()) handle.copy();
+    else handle?.paste();
+    handle?.focus();
   }
 </script>
 

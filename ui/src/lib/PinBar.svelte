@@ -14,9 +14,14 @@
     info?: Snippet;
     /** What leads the bar, from its left-hand end. */
     start?: Snippet;
+    /**
+     * Give the left-hand group all the room the right-hand one does not
+     * use, rather than half the bar each.
+     */
+    wide?: boolean;
   };
 
-  let { pins, onopen, onunpin, onmove, info, start }: Props = $props();
+  let { pins, onopen, onunpin, onmove, info, start, wide = false }: Props = $props();
 
   /**
    * Keep a group of status items to the room it has.
@@ -235,7 +240,7 @@
 
 <svelte:window onkeydown={onWindowKey} onclick={() => (menu = null)} />
 
-<footer class="pinbar">
+<footer class="pinbar" class:wide>
   <!-- Two halves: one group from the left edge, the other up to the right. -->
   <div class="side">
     {#if start}
@@ -315,6 +320,12 @@
     padding-bottom: var(--viewport-inset);
     user-select: none;
     overflow: hidden;
+  }
+
+  /* The left with as much as the right leaves it: for when the left has
+     a great deal to say and the right next to nothing. */
+  .pinbar.wide {
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .side {

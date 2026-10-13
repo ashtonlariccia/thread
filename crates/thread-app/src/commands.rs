@@ -73,6 +73,64 @@ fn dress(window: &WebviewWindow, appearance: &Appearance) {
         // should cost the blur, not the settings dialog.
         tracing::warn!(target: "thread::ui", "set_effects on {label} failed: {e}");
     }
+
+    // The handle is a pointer, and goes to the window's own thread as a number.
+    if let Ok(hwnd) = window.hwnd() {
+        let hwnd = hwnd.0 as isize;
+        let _ = window.run_on_main_thread(move || backdrop::keep_lit(hwnd));
+    }
+}
+
+/// Keeping a window's backdrop when the window is not the one in front.
+///
+/// Acrylic is the system's backdrop for a window, and the system draws it
+/// only for a window it takes to be active: a frosted window goes flat the
+/// moment another is clicked. What it goes by is what the window itself says
+/// when told it is being deactivated, so this has every window answer that
+/// as though it were still active. There is no title bar of the system's on
+/// these windows for that to mislead anyone with.
+mod backdrop {
+    use std::ffi::c_void;
+
+    type SubclassProc =
+        unsafe extern "system" fn(*mut c_void, u32, usize, isize, usize, usize) -> isize;
+
+    #[link(name = "comctl32")]
+    extern "system" {
+        fn SetWindowSubclass(hwnd: *mut c_void, proc: SubclassProc, id: usize, data: usize) -> i32;
+        fn DefSubclassProc(hwnd: *mut c_void, message: u32, wparam: usize, lparam: isize) -> isize;
+    }
+
+    const WM_NCACTIVATE: u32 = 0x0086;
+    /// Which of a window's subclasses this one is. Setting it again under
+    /// the same number replaces it, so a window dressed twice has it once.
+    const ID: usize = 0x7468_7264;
+
+    unsafe extern "system" fn proc(
+        hwnd: *mut c_void,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        _id: usize,
+        _data: usize,
+    ) -> isize {
+        // Told it is no longer active: passed on as the opposite. Everything
+        // else about losing the focus happens as it would.
+        let wparam = match message {
+            WM_NCACTIVATE => 1,
+            _ => wparam,
+        };
+        // SAFETY: the arguments are the ones this was called with.
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    /// Have a window keep its backdrop from here on. Called on the window's
+    /// own thread, which is the only one that may.
+    pub fn keep_lit(hwnd: isize) {
+        // SAFETY: the window is this process's own and is open, and `proc`
+        // lives as long as the program does.
+        unsafe { SetWindowSubclass(hwnd as *mut c_void, proc, ID, 0) };
+    }
 }
 
 /// Size, dress and reveal the window declared in tauri.conf.json.

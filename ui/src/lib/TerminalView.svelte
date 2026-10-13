@@ -30,7 +30,6 @@
     onopen: (kind: OpenKind, path: string) => void;
     /** A path or a web address in its output was Ctrl+clicked. */
     onlink: (link: Link) => void;
-    oncontext: (event: MouseEvent) => void;
   };
 
   let {
@@ -44,7 +43,6 @@
     onexit,
     onopen,
     onlink,
-    oncontext,
   }: Props = $props();
 
   let host: HTMLElement;
@@ -103,12 +101,16 @@
     handle?.restyle(look);
   });
 
-  // In the capture phase, ahead of xterm: a program reading the mouse would
-  // otherwise be sent the right-click as a click of its own.
+  // The right button is the clipboard, as it is in a console window: it
+  // copies what is selected, and pastes when nothing is. No menu to pick
+  // from. In the capture phase, ahead of xterm: a program reading the mouse
+  // would otherwise be sent the right-click as a click of its own.
   function onContextMenu(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
-    oncontext(event);
+    if (handle?.hasSelection()) handle.copy();
+    else handle?.paste();
+    handle?.focus();
   }
 </script>
 

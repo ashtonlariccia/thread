@@ -1,8 +1,8 @@
 <script lang="ts">
   /**
-   * The stage, while the window is showing tmux: the session's windows as a
-   * strip of tabs, and under it the panes of the one in front, each where
-   * tmux has put it.
+   * The stage, while the window is showing tmux: the panes of the window
+   * in front, each where tmux has put it, under a strip that names the
+   * window and holds the buttons for its panes.
    *
    * tmux lays a window out in character cells, for the room it is told there
    * is. So this measures a cell, says how many fit, and draws each pane at
@@ -16,7 +16,7 @@
   import type { TerminalLook, TerminalRenderer } from "../terminal";
   import type { CellSize, Probe } from "./pane";
   import TmuxPaneView from "./TmuxPaneView.svelte";
-  import TmuxTabs from "./TmuxTabs.svelte";
+  import TmuxHeader from "./TmuxHeader.svelte";
   import type { Tmux, TmuxDivider, TmuxPane } from "./tmux.svelte";
 
   type Props = {
@@ -36,11 +36,8 @@
     /** Ask who to connect to: tmux is a remote's. */
     onconnect: () => void;
     onlink: (link: Link) => void;
-    /** Close a window or a pane, which may be asked about first. */
-    onclosewindow: (window: number) => void;
+    /** Close a pane, which may be asked about first. */
     onclosepane: (pane: TmuxPane) => void;
-    onpanecontext: (event: MouseEvent, pane: TmuxPane) => void;
-    ontabcontext: (event: MouseEvent, window: number) => void;
   };
 
   let {
@@ -55,17 +52,8 @@
     renderer,
     onconnect,
     onlink,
-    onclosewindow,
     onclosepane,
-    onpanecontext,
-    ontabcontext,
   }: Props = $props();
-
-  let tabs = $state<TmuxTabs | undefined>();
-  /** Type a new name onto a window's tab. */
-  export function renameWindow(window: number) {
-    tabs?.rename(window);
-  }
 
   // --- the size of things -----------------------------------------------------------
 
@@ -231,15 +219,9 @@
 
 <section class="stage" class:railed>
   {#if tmux.status === "attached" && tmux.state}
-    <TmuxTabs
-      bind:this={tabs}
-      windows={tmux.state.windows}
-      activeId={front?.id ?? null}
-      onselect={(window) => tmux.show(window)}
-      onclose={onclosewindow}
-      onnew={() => tmux.act({ do: "newWindow" })}
-      onrename={(window, name) => tmux.act({ do: "renameWindow", window, name })}
-      oncontext={ontabcontext}
+    <TmuxHeader
+      window={front}
+      command={tmux.pane?.command ?? ""}
       onsplit={(dir) => tmux.pane && tmux.act({ do: "split", pane: tmux.pane.id, dir })}
       onzoom={() => tmux.pane && tmux.act({ do: "zoom", pane: tmux.pane.id })}
       onclosepane={() => tmux.pane && onclosepane(tmux.pane)}
@@ -280,7 +262,6 @@
               {renderer}
               onready={() => ready++}
               {onlink}
-              oncontext={(event) => onpanecontext(event, pane)}
             />
           </div>
         {/each}

@@ -831,7 +831,7 @@ impl Remote {
             .map_err(|e| describe("the server would not open a channel", e))?;
         // By way of the login shell, for its `PATH`, and then `sh` whatever
         // that shell is: the script is not one a fish would read.
-        let command = Self::login(&format!("exec sh -c {}", quoted(&sysinfo::script())));
+        let command = Self::login(&format!("exec sh -c {}", quoted(sysinfo::SCRIPT)));
         channel
             .exec(true, command)
             .await

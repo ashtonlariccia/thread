@@ -15,7 +15,51 @@ import type { PaneHandle } from "./pane";
 
 export type Dir = "row" | "column";
 
-export type SessionInfo = { id: number; name: string; windows: number; attached: number };
+/** A pane, as what runs in it is found: its first process, and its terminal. */
+export type PaneBrief = { id: number; pid: number; tty: string };
+
+/** A window of any session, as the list of sessions shows it. */
+export type WindowBrief = {
+  id: number;
+  index: number;
+  name: string;
+  /** The window of its session that is in front. */
+  active: boolean;
+  panes: PaneBrief[];
+};
+
+export type SessionInfo = {
+  id: number;
+  name: string;
+  windows: number;
+  attached: number;
+  /** Its windows, in order. Empty while not attached to tmux: there is no one to ask. */
+  list: WindowBrief[];
+};
+
+/** A process on one of the remote's terminals. Mirrors `Process` in the core. */
+export type Process = {
+  pid: number;
+  ppid: number;
+  /** As `ps` names it: `pts/3`. */
+  tty: string;
+  /** Percent of one core. */
+  cpu: number;
+  command: string;
+};
+
+/** Something run in a pane, with everything it has started counted into it. */
+export type Job = {
+  pid: number;
+  /** The pane it was run in. */
+  pane: number;
+  /** Its command line, the folders of the program's own path left off. */
+  command: string;
+  /** Percent of one core, its children's included. */
+  cpu: number;
+  /** How many processes it has started, and they have. */
+  children: number;
+};
 
 export type TmuxPane = {
   id: number;
@@ -66,8 +110,9 @@ export type Action =
   | { do: "write"; pane: number; text: string }
   | { do: "writeBytes"; pane: number; bytes: number[] }
   | { do: "split"; pane: number; dir: Dir }
-  | { do: "selectWindow" | "killWindow"; window: number }
-  | { do: "newWindow" }
+  | { do: "selectWindow"; window: number; session?: number }
+  | { do: "killWindow"; window: number }
+  | { do: "newWindow"; session?: number }
   | { do: "renameWindow"; window: number; name: string }
   | { do: "switchSession" | "killSession"; session: number }
   | { do: "newSession"; name: string }
@@ -103,6 +148,53 @@ const ACK_EVERY = 32 * 1024;
 
 /** The names a shell goes by: a pane running one has nothing to lose. */
 const SHELL = /^-?(ba|z|fi|da|a|k|c|tc)?sh$|^(nu|xonsh|elvish|pwsh|login)$/;
+
+/** The program a command line runs, by its own name: `/usr/bin/make -j8` is `make`. */
+function program(command: string): string {
+  const first = command.split(" ", 1)[0];
+  return first.slice(first.lastIndexOf("/") + 1);
+}
+
+/**
+ * What is running in a window: for each of its panes, what was run from
+ * the pane's shell, each with what it has started in turn counted into it.
+ * A build is then one line, however many compilers it has going. A pane
+ * that was started on a program rather than a shell is that program.
+ */
+export function jobs(panes: PaneBrief[], processes: Process[]): Job[] {
+  const started = new Map<number, Process[]>();
+  for (const process of processes) {
+    const siblings = started.get(process.ppid);
+    if (siblings) siblings.push(process);
+    else started.set(process.ppid, [process]);
+  }
+  const tally = (process: Process): { cpu: number; children: number } => {
+    let cpu = process.cpu;
+    let children = 0;
+    for (const child of started.get(process.pid) ?? []) {
+      const below = tally(child);
+      cpu += below.cpu;
+      children += 1 + below.children;
+    }
+    return { cpu, children };
+  };
+
+  const found: Job[] = [];
+  for (const pane of panes) {
+    const tty = pane.tty.replace(/^\/dev\//, "");
+    let tops = (started.get(pane.pid) ?? []).filter((process) => process.tty === tty);
+    if (tops.length === 0) {
+      const root = processes.find((process) => process.pid === pane.pid);
+      if (root && !SHELL.test(program(root.command))) tops = [root];
+    }
+    for (const top of tops) {
+      const name = program(top.command);
+      const rest = top.command.slice(top.command.split(" ", 1)[0].length);
+      found.push({ pid: top.pid, pane: pane.id, command: name + rest, ...tally(top) });
+    }
+  }
+  return found;
+}
 
 /** Whether a pane is running something other than a shell waiting to be typed at. */
 export function busy(pane: TmuxPane): boolean {
@@ -387,10 +479,11 @@ export class Tmux {
   }
 
   /** Bring a window to the front. */
-  show(window: number) {
-    if (this.front === window) return;
-    this.front = window;
-    this.act({ do: "selectWindow", window });
+  show(window: number, session = this.state?.session ?? undefined) {
+    const here = session === (this.state?.session ?? undefined);
+    if (here && this.front === window) return;
+    if (here) this.front = window;
+    this.act({ do: "selectWindow", window, session });
   }
 
   /** Step to the next or previous window, wrapping at the ends. */

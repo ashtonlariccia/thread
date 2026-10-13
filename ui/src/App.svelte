@@ -52,7 +52,7 @@
     type SavedConnection,
   } from "./lib/state/remote.svelte";
   import { Tree } from "./lib/state/tree.svelte";
-  import { busy, Tmux, type TmuxPane } from "./lib/tmux/tmux.svelte";
+  import { busy, jobs, Tmux, type Process, type TmuxPane } from "./lib/tmux/tmux.svelte";
   import type { Pin, SidebarItem } from "./lib/types";
 
   const pins = new Pins();
@@ -873,7 +873,6 @@
   let tmuxOpened = $state(false);
   /** Its sidebar is the list of sessions, and starts out open. */
   let tmuxSidebarCollapsed = $state(false);
-  let tmuxView = $state<TmuxView | undefined>();
   let tmuxSidebar = $state<TmuxSidebar | undefined>();
 
   tmux.onerror = (text) => void message(text, { title: "tmux", kind: "error" });
@@ -944,12 +943,34 @@
   type SystemSample = {
     cpu: number;
     cores: number;
-    load: number;
+    /** The processor's, in degrees Celsius, where it has a sensor. */
+    temperature: number | null;
+    /** Over the last one, five and fifteen minutes. */
+    load: [number, number, number];
     /** Kilobytes. */
     memUsed: number;
     memTotal: number;
+    swapUsed: number;
+    swapTotal: number;
+    /** Bytes a second. */
+    netDown: number;
+    netUp: number;
+    /** Kilobytes, of the disk the home folder is on. */
+    diskUsed: number;
+    diskTotal: number;
+    /** Seconds. */
+    uptime: number;
     /** Its memory is in mebibytes, and nought where the card does not say. */
-    gpu: { usage: number; memUsed: number; memTotal: number; temperature: number | null } | null;
+    gpu: {
+      usage: number;
+      memUsed: number;
+      memTotal: number;
+      temperature: number | null;
+      /** Watts. */
+      power: number | null;
+    } | null;
+    /** Every process on one of its terminals: what the windows are running. */
+    processes: Process[];
   };
   /** The latest reading; null until there is one, and on a machine there is none of. */
   let system = $state.raw<SystemSample | null>(null);
@@ -975,6 +996,22 @@
   /** A size given in mebibytes, in gigabytes to one place. */
   const gigabytes = (mebibytes: number) => (mebibytes / 1024).toFixed(1);
 
+  /** Bytes a second, as short as it can be said: `340K`, `1.2M`. */
+  function rate(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}M`;
+    return `${Math.round(bytes / 1024)}K`;
+  }
+
+  /** How long a machine has been up, in its two largest units: `3d 4h`. */
+  function lasted(seconds: number): string {
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    if (days > 0) return `${days}d ${hours % 24}h`;
+    if (hours > 0) return `${hours}h ${minutes % 60}m`;
+    return `${minutes}m`;
+  }
+
   /** What the title bar says while tmux is showing: the session, and the window in front. */
   const tmuxTitle = $derived.by(() => {
     const session = tmux.session;
@@ -982,8 +1019,6 @@
     const window = tmux.window;
     return window ? `${session.name} › ${window.name}` : session.name;
   });
-
-  const names = (panes: TmuxPane[]) => [...new Set(panes.map((pane) => pane.command))].join(", ");
 
   /** Close a pane, asking first if something is running in it. */
   async function closeTmuxPane(pane: TmuxPane) {
@@ -1000,21 +1035,24 @@
     tmux.act({ do: "killPane", pane: pane.id });
   }
 
-  /** Close a tmux window, asking first if that would end something. */
-  async function closeTmuxWindow(id: number) {
-    const window = tmux.state?.windows.find((each) => each.id === id);
-    if (!window) return;
-    const running = window.panes.filter(busy);
-    const last = tmux.state?.windows.length === 1;
+
+  /** Close a tmux window, of any session, asking first if that would end something. */
+  async function closeTmuxWindow(sessionId: number, id: number) {
+    const session = tmux.sessions.find((each) => each.id === sessionId);
+    const window = session?.list.find((each) => each.id === id);
+    if (!session || !window) return;
+    const running = jobs(window.panes, system?.processes ?? []);
+    const last = session.list.length === 1;
     if (running.length > 0 || last) {
+      const what = [...new Set(running.map((job) => job.command.split(" ", 1)[0]))].join(", ");
       const sure = await confirm({
         title: "Close window",
         message:
           running.length > 0
-            ? `${names(running)} ${running.length === 1 ? "is" : "are"} running in "${window.name}".`
+            ? `${what} ${running.length === 1 ? "is" : "are"} running in "${window.name}".`
             : `Close "${window.name}"?`,
         note: last
-          ? "It is the last window of its session, so the session ends with it."
+          ? `It is the last window of "${session.name}", so the session ends with it.`
           : "Closing the window ends everything running in it.",
         confirm: "Close Window",
         danger: true,
@@ -1040,48 +1078,15 @@
     if (sure) tmux.act({ do: "killSession", session: id });
   }
 
-  function onTmuxPaneContextMenu(event: MouseEvent, pane: TmuxPane) {
-    const handle = tmux.handle(pane.id);
-    const back = (act: () => void) => () => {
-      act();
-      // The menu took the focus to be clicked; typing carries on after it.
-      handle?.focus();
-    };
-    const copy = handle?.hasSelection() ? [item("Copy", back(() => handle.copy()))] : [];
-    const window = tmux.window;
-    const zoom =
-      window && window.paneCount > 1
-        ? [
-            item(window.zoomed ? "Show Every Pane" : "Fill the Window", () =>
-              tmux.act({ do: "zoom", pane: pane.id }),
-            ),
-          ]
-        : [];
-    ctx = {
-      x: event.clientX,
-      y: event.clientY,
-      items: [
-        ...copy,
-        item("Paste", back(() => handle?.paste())),
-        SEP,
-        item("Split Right", () => tmux.act({ do: "split", pane: pane.id, dir: "row" })),
-        item("Split Down", () => tmux.act({ do: "split", pane: pane.id, dir: "column" })),
-        ...zoom,
-        SEP,
-        item("Close Pane", () => void closeTmuxPane(pane), true),
-      ],
-    };
-  }
 
-  function onTmuxTabContextMenu(event: MouseEvent, window: number) {
+  function onTmuxWindowContextMenu(event: MouseEvent, session: number, window: number) {
     ctx = {
       x: event.clientX,
       y: event.clientY,
       items: [
-        item("Rename", () => tmuxView?.renameWindow(window)),
-        item("New Window", () => tmux.act({ do: "newWindow" })),
+        item("Rename", () => tmuxSidebar?.renameWindow(window)),
         SEP,
-        item("Close Window", () => void closeTmuxWindow(window), true),
+        item("Close Window", () => void closeTmuxWindow(session, window), true),
       ],
     };
   }
@@ -1092,6 +1097,7 @@
       y: event.clientY,
       items: [
         item("Rename", () => tmuxSidebar?.rename(session)),
+        item("New Window", () => tmux.act({ do: "newWindow", session })),
         SEP,
         item("Kill Session", () => void killTmuxSession(session), true),
       ],
@@ -1689,28 +1695,6 @@
     ctx = { x: event.clientX, y: event.clientY, items };
   }
 
-  /** A terminal. The way to copy out of it, and one of the ways to end it. */
-  function onTerminalContextMenu(event: MouseEvent, key: number) {
-    const view = terminalViews[key];
-    const back = (act: () => void) => () => {
-      act();
-      // The menu took the focus to be clicked; typing carries on after it.
-      view?.focus();
-    };
-    // Only with something selected: there is nothing else it could copy.
-    const copy = view?.hasSelection() ? [item("Copy", back(() => view.copy()))] : [];
-
-    ctx = {
-      x: event.clientX,
-      y: event.clientY,
-      items: [
-        ...copy,
-        item("Paste", back(() => view?.paste())),
-        SEP,
-        item("Kill Terminal", () => closeTerminal(key), true),
-      ],
-    };
-  }
 
   /** A tab, in the strip of one pane. */
   function onTabContextMenu(event: MouseEvent, key: number, pane: number) {
@@ -2097,7 +2081,6 @@
             onexit={() => closeTerminal(terminal.key)}
             onopen={fromTerminal}
             onlink={(link) => followLink(link, terminal.cwd)}
-            oncontext={(event) => onTerminalContextMenu(event, terminal.key)}
           />
         </div>
       {/each}
@@ -2131,16 +2114,27 @@
         bind:this={tmuxSidebar}
         sessions={tmux.sessions}
         activeId={tmux.state?.session ?? null}
+        frontWindow={tmux.window?.id ?? null}
+        processes={system?.processes ?? []}
         usable={remote.status === "connected" && tmux.status !== "missing"}
         attached={tmux.status === "attached"}
         width={tmuxSidebarCollapsed ? RAIL_WIDTH : sidebarWidth}
         collapsed={tmuxSidebarCollapsed}
         {resizing}
         onselect={(session) => tmux.select(session)}
+        onwindow={(session, window) => tmux.show(window, session)}
+        onjob={(session, window, pane) => {
+          tmux.show(window, session);
+          tmux.act({ do: "selectPane", pane });
+        }}
         onnew={(name) => tmux.create(name)}
+        onnewwindow={(session) => tmux.act({ do: "newWindow", session })}
         onrename={(session, name) => tmux.act({ do: "renameSession", session, name })}
+        onrenamewindow={(window, name) => tmux.act({ do: "renameWindow", window, name })}
         onkill={(session) => void killTmuxSession(session)}
+        onclosewindow={(session, window) => void closeTmuxWindow(session, window)}
         oncontext={onTmuxSessionContextMenu}
+        onwindowcontext={onTmuxWindowContextMenu}
       />
 
       {#if !tmuxSidebarCollapsed}
@@ -2152,7 +2146,6 @@
       {/if}
 
       <TmuxView
-        bind:this={tmuxView}
         {tmux}
         shown={mode === "tmux"}
         blocked={overlaid}
@@ -2164,10 +2157,7 @@
         renderer={config.current.terminal.renderer}
         onconnect={openConnect}
         onlink={followTmuxLink}
-        onclosewindow={(window) => void closeTmuxWindow(window)}
         onclosepane={(pane) => void closeTmuxPane(pane)}
-        onpanecontext={onTmuxPaneContextMenu}
-        ontabcontext={onTmuxTabContextMenu}
       />
     </main>
   {/if}
@@ -2181,46 +2171,11 @@
     onopen={openPin}
     onunpin={(pin) => void pins.remove(pin)}
     onmove={(pin, index) => void pins.move(pin, index)}
+    wide={mode === "tmux"}
   >
     {#snippet start()}
-      <!-- While the window shows tmux, how hard the remote is working: a
-           build is what runs there. Nothing until the first reading, and
-           nothing at all of a machine that cannot be read. -->
-      {#if mode === "tmux"}
-        {#if system}
-          <span title="Processor in use, across {system.cores} cores">
-            cpu {Math.round(system.cpu)}%
-          </span>
-          <span title="Memory in use, not counting what the kernel keeps as cache" data-drop="4">
-            ram {gigabytes(system.memUsed / 1024)}/{gigabytes(system.memTotal / 1024)}G
-          </span>
-          {#if system.gpu}
-            <span title="Graphics card in use, and its memory" data-drop="3">
-              gpu {Math.round(system.gpu.usage)}%{system.gpu.memTotal > 0
-                ? ` ${gigabytes(system.gpu.memUsed)}/${gigabytes(system.gpu.memTotal)}G`
-                : ""}
-            </span>
-            {#if system.gpu.temperature !== null}
-              <span title="Graphics card temperature" data-drop="1">
-                {Math.round(system.gpu.temperature)}°C
-              </span>
-            {/if}
-          {/if}
-          <span title="Load average over the last minute, on {system.cores} cores" data-drop="2">
-            load {system.load.toFixed(2)}
-          </span>
-        {/if}
-      {:else}
-      <!-- Where the window is working, as one capsule: who, and on what.
-           Filled while that is a remote, and in the colour of a fault once
-           the connection to it has dropped. Then the repository the folder
-           is in: its branch, and what in it is not yet where it is going.
-           All of it is for reading; changing any of it is done elsewhere.
-
-           `data-drop` is the order they give way in as the window narrows,
-           lowest first (see `PinBar`), the group having half the bar. What
-           is about the file being edited is not here: each pane says that
-           at its own foot. -->
+      <!-- Where the window is working leads the bar, whichever face shows:
+           it is one connection, and both are on it. -->
       <span
         class="where"
         data-status={remote.status}
@@ -2244,6 +2199,66 @@
         </svg>
         <span class="who">{where.user}{where.user && where.host ? "  " : ""}{where.host}</span>
       </span>
+      <!-- While the window shows tmux, how hard the remote is working: a
+           build is what runs there. Nothing until the first reading, and
+           nothing at all of a machine that cannot be read. The bar is nearly
+           all this group's then (`wide`), and what does not fit gives way
+           from the least to the most worth knowing. -->
+      {#if mode === "tmux"}
+        {#if system}
+          <span title="Processor in use, across {system.cores} cores">
+            cpu {Math.round(system.cpu)}%{system.temperature !== null
+              ? ` ${Math.round(system.temperature)}°C`
+              : ""}
+          </span>
+          <span title="Memory in use, not counting what the kernel keeps as cache" data-drop="9">
+            ram {gigabytes(system.memUsed / 1024)}/{gigabytes(system.memTotal / 1024)}G
+          </span>
+          {#if system.gpu}
+            <span title="Graphics card: in use, its memory, its temperature and what it draws" data-drop="8">
+              gpu {Math.round(system.gpu.usage)}%{system.gpu.memTotal > 0
+                ? ` ${gigabytes(system.gpu.memUsed)}/${gigabytes(system.gpu.memTotal)}G`
+                : ""}{system.gpu.temperature !== null
+                ? ` ${Math.round(system.gpu.temperature)}°C`
+                : ""}{system.gpu.power !== null ? ` ${Math.round(system.gpu.power)}W` : ""}
+            </span>
+          {/if}
+          <span
+            title="Load average over the last 1, 5 and 15 minutes, on {system.cores} cores"
+            data-drop="7"
+          >
+            load {system.load.map((each) => each.toFixed(2)).join(" ")}
+          </span>
+          <span title="Network: arriving and leaving, a second" data-drop="6">
+            net ↓{rate(system.netDown)} ↑{rate(system.netUp)}
+          </span>
+          {#if system.diskTotal > 0}
+            <span title="The disk your home folder is on: used, of all of it" data-drop="5">
+              disk {Math.round(system.diskUsed / 1024 / 1024)}/{Math.round(
+                system.diskTotal / 1024 / 1024,
+              )}G
+            </span>
+          {/if}
+          {#if system.swapTotal > 0}
+            <span title="Swap in use" data-drop="4">
+              swap {gigabytes(system.swapUsed / 1024)}/{gigabytes(system.swapTotal / 1024)}G
+            </span>
+          {/if}
+          <span title="How long the remote has been up" data-drop="3">
+            up {lasted(system.uptime)}
+          </span>
+        {/if}
+      {:else}
+      <!-- Where the window is working, as one capsule: who, and on what.
+           Filled while that is a remote, and in the colour of a fault once
+           the connection to it has dropped. Then the repository the folder
+           is in: its branch, and what in it is not yet where it is going.
+           All of it is for reading; changing any of it is done elsewhere.
+
+           `data-drop` is the order they give way in as the window narrows,
+           lowest first (see `PinBar`), the group having half the bar. What
+           is about the file being edited is not here: each pane says that
+           at its own foot. -->
       <!-- Always all of it, at nought where there is nothing to count or
            no repository to count in, so the bar keeps its shape. -->
       <span class="git" title="Git branch" data-drop="6">

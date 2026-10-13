@@ -27,7 +27,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import type { PaneHandle } from "./pane";
-import { busy, Tmux, type TmuxPane, type TmuxState } from "./tmux.svelte";
+import { busy, jobs, Tmux, type Process, type TmuxPane, type TmuxState } from "./tmux.svelte";
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const asked = (command: string): Call[] => backend.calls.filter((call) => call.command === command);
@@ -48,7 +48,7 @@ const pane = (id: number, more: Partial<TmuxPane> = {}): TmuxPane => ({
 function state(session: number, panes: TmuxPane[] = [pane(0)]): TmuxState {
   return {
     session,
-    sessions: backend.sessions,
+    sessions: backend.sessions.map((each) => ({ ...each, list: [] })),
     windows: [
       {
         id: 7,
@@ -248,9 +248,55 @@ describe("the window's tmux", () => {
 
     tmux.show(8);
     expect(tmux.window?.id).toBe(8);
-    expect(actions().at(-1)).toEqual({ do: "selectWindow", window: 8 });
+    expect(actions().at(-1)).toEqual({ do: "selectWindow", window: 8, session: 3 });
     tmux.cycle(1);
     expect(tmux.window?.id).toBe(7);
+  });
+
+  it("goes to a window of another session by way of its session", async () => {
+    const tmux = await attached();
+    tmux.show(12, 5);
+    expect(actions().at(-1)).toEqual({ do: "selectWindow", window: 12, session: 5 });
+    // Not in front until tmux says so: it is not one of this session's.
+    expect(tmux.window?.id).toBe(7);
+  });
+});
+
+describe("what is running in a window", () => {
+  const process = (pid: number, ppid: number, command: string, cpu = 0, tty = "pts/3"): Process => ({
+    pid,
+    ppid,
+    tty,
+    cpu,
+    command,
+  });
+  const panes = [{ id: 1, pid: 50, tty: "/dev/pts/3" }];
+
+  it("is what was run from each pane's shell, with what that started counted in", () => {
+    const found = jobs(panes, [
+      process(50, 1, "-bash"),
+      process(77, 50, "/usr/bin/make -j8 all", 2),
+      process(78, 77, "cc1plus main.cc", 98),
+      process(79, 77, "sh -c g++ util.cc", 0),
+      process(80, 79, "cc1plus util.cc", 95),
+      process(90, 50, "python3 -m http.server", 1),
+      // Another terminal's, and so another pane's.
+      process(99, 60, "vim notes", 3, "pts/4"),
+    ]);
+    expect(found).toEqual([
+      { pid: 77, pane: 1, command: "make -j8 all", cpu: 195, children: 3 },
+      { pid: 90, pane: 1, command: "python3 -m http.server", cpu: 1, children: 0 },
+    ]);
+  });
+
+  it("is nothing for a shell waiting to be typed at", () => {
+    expect(jobs(panes, [process(50, 1, "-bash")])).toEqual([]);
+    expect(jobs(panes, [])).toEqual([]);
+  });
+
+  it("is the pane's own program where the pane was started on one", () => {
+    const found = jobs(panes, [process(50, 1, "/run/current-system/sw/bin/htop -d 5", 4)]);
+    expect(found).toEqual([{ pid: 50, pane: 1, command: "htop -d 5", cpu: 4, children: 0 }]);
   });
 });
 

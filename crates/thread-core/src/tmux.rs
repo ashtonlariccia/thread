@@ -312,6 +312,34 @@ pub struct SessionInfo {
     pub windows: u32,
     /// How many clients are attached to it, this one included.
     pub attached: u32,
+    /// Its windows, in order. Known only while attached to tmux: asked
+    /// from outside, a session is its name and a count.
+    #[serde(default)]
+    pub list: Vec<WindowBrief>,
+}
+
+/// A window of any session, as the list of sessions shows it: enough to
+/// name it, go to it, and find what is running in it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowBrief {
+    pub id: u32,
+    pub index: u32,
+    pub name: String,
+    /// The window of its session that is in front.
+    pub active: bool,
+    pub panes: Vec<PaneBrief>,
+}
+
+/// A pane, as what is running in it is found: by the process tmux started
+/// in it, and the terminal that process and its children are on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneBrief {
+    pub id: u32,
+    pub pid: u32,
+    /// As the remote names it: `/dev/pts/3`.
+    pub tty: String,
 }
 
 /// A tmux window: a tab, to the page.
@@ -366,10 +394,10 @@ pub struct Divider {
 /// one field that can have anything in it.
 pub const SESSIONS_FORMAT: &str =
     "#{session_id}\t#{session_windows}\t#{session_attached}\t#{session_name}";
-const WINDOWS_FORMAT: &str = "#{window_id}\t#{window_index}\t#{window_active}\t\
+const WINDOWS_FORMAT: &str = "#{session_id}\t#{window_id}\t#{window_index}\t#{window_active}\t\
      #{window_zoomed_flag}\t#{window_visible_layout}\t#{window_name}";
 const PANES_FORMAT: &str =
-    "#{pane_id}\t#{window_id}\t#{pane_active}\t#{pane_dead}\t#{pane_current_command}";
+    "#{pane_id}\t#{window_id}\t#{pane_active}\t#{pane_pid}\t#{pane_tty}\t#{pane_current_command}";
 /// What a pane's terminal has to be told that the text on it does not say.
 const MODES_FORMAT: &str = "#{cursor_x},#{cursor_y},#{alternate_on},#{cursor_flag},\
      #{keypad_cursor_flag},#{keypad_flag},#{mouse_standard_flag},#{mouse_button_flag},\
@@ -389,6 +417,7 @@ pub fn parse_session(line: &str) -> Option<SessionInfo> {
         windows: fields.next()?.parse().ok()?,
         attached: fields.next()?.parse().ok()?,
         name: fields.next()?.to_owned(),
+        list: Vec::new(),
     })
 }
 
@@ -461,10 +490,18 @@ pub enum Action {
     Zoom {
         pane: u32,
     },
+    /// Bring a window to the front: of this session, or of the one named,
+    /// which is then gone to.
     SelectWindow {
         window: u32,
+        #[serde(default)]
+        session: Option<u32>,
     },
-    NewWindow,
+    /// In this session, or in the one named, which is then gone to.
+    NewWindow {
+        #[serde(default)]
+        session: Option<u32>,
+    },
     KillWindow {
         window: u32,
     },
@@ -741,12 +778,12 @@ impl Engine {
         );
         self.send(
             out,
-            &format!("list-windows -F '{WINDOWS_FORMAT}'"),
+            &format!("list-windows -a -F '{WINDOWS_FORMAT}'"),
             Pending::Windows,
         );
         self.send(
             out,
-            &format!("list-panes -s -F '{PANES_FORMAT}'"),
+            &format!("list-panes -a -F '{PANES_FORMAT}'"),
             Pending::Panes,
         );
     }
@@ -1010,22 +1047,28 @@ impl Engine {
         struct Info {
             window: u32,
             active: bool,
+            pid: u32,
+            tty: String,
             command: String,
         }
+        // Every pane there is, whichever session it is in.
         let mut info: HashMap<u32, Info> = HashMap::new();
         for line in panes.lines() {
-            let mut fields = line.splitn(5, '\t');
+            let mut fields = line.splitn(6, '\t');
             let parsed = (|| {
                 let pane = id(fields.next()?, '%')?;
                 let window = id(fields.next()?, '@')?;
                 let active = fields.next()? == "1";
-                let _dead = fields.next()?;
+                let pid = fields.next()?.parse().unwrap_or(0);
+                let tty = fields.next()?.to_owned();
                 let command = fields.next()?.to_owned();
                 Some((
                     pane,
                     Info {
                         window,
                         active,
+                        pid,
+                        tty,
                         command,
                     },
                 ))
@@ -1034,23 +1077,58 @@ impl Engine {
                 info.insert(pane, each);
             }
         }
+        let mut panes_of: HashMap<u32, Vec<PaneBrief>> = HashMap::new();
+        for (pane, each) in &info {
+            panes_of.entry(each.window).or_default().push(PaneBrief {
+                id: *pane,
+                pid: each.pid,
+                tty: each.tty.clone(),
+            });
+        }
+        panes_of
+            .values_mut()
+            .for_each(|panes| panes.sort_unstable_by_key(|pane| pane.id));
 
         self.layouts.clear();
         let mut windows = Vec::new();
+        let mut sessions = refresh.sessions;
+        // The panes of the session attached to: the ones tmux sends the
+        // output of, and so the ones to tell it about.
+        let mut ours: HashSet<u32> = HashSet::new();
         for line in &refresh.windows {
-            let mut fields = line.splitn(6, '\t');
+            let mut fields = line.splitn(7, '\t');
             let parsed = (|| {
+                let session = id(fields.next()?, '$')?;
                 let window = id(fields.next()?, '@')?;
                 let index = fields.next()?.parse().ok()?;
                 let active = fields.next()? == "1";
                 let zoomed = fields.next()? == "1";
                 let layout = Cell::parse(fields.next()?)?;
                 let name = fields.next()?.to_owned();
-                Some((window, index, active, zoomed, layout, name))
+                Some((session, window, index, active, zoomed, layout, name))
             })();
-            let Some((window, index, active, zoomed, layout, name)) = parsed else {
+            let Some((session, window, index, active, zoomed, layout, name)) = parsed else {
                 continue;
             };
+            // Every window is listed under its session; only the windows of
+            // the session attached to are laid out.
+            if let Some(owner) = sessions.iter_mut().find(|each| each.id == session) {
+                owner.list.push(WindowBrief {
+                    id: window,
+                    index,
+                    name: name.clone(),
+                    active,
+                    panes: panes_of.get(&window).cloned().unwrap_or_default(),
+                });
+            }
+            if Some(session) != refresh.session {
+                continue;
+            }
+            ours.extend(
+                info.iter()
+                    .filter(|(_, each)| each.window == window)
+                    .map(|(pane, _)| *pane),
+            );
 
             let mut boxes = Vec::new();
             layout.panes(&mut boxes);
@@ -1094,9 +1172,9 @@ impl Engine {
         // A pane that has gone needs no terminal, and one that is new prints
         // to no one until the page has a terminal for it.
         self.watched.retain(|pane, _| info.contains_key(pane));
-        self.known.retain(|pane| info.contains_key(pane));
-        let mut fresh: Vec<u32> = info
-            .keys()
+        self.known.retain(|pane| ours.contains(pane));
+        let mut fresh: Vec<u32> = ours
+            .iter()
             .filter(|pane| !self.known.contains(pane))
             .copied()
             .collect();
@@ -1114,7 +1192,7 @@ impl Engine {
 
         let state = State {
             session: refresh.session,
-            sessions: refresh.sessions,
+            sessions,
             windows,
         };
         if self.state.as_ref() != Some(&state) {
@@ -1200,10 +1278,20 @@ impl Engine {
             Action::Zoom { pane } => {
                 self.send(out, &format!("resize-pane -Z -t %{pane}"), Pending::Report);
             }
-            Action::SelectWindow { window } => {
+            Action::SelectWindow { window, session } => {
                 self.send(out, &format!("select-window -t @{window}"), Pending::Ignore);
+                self.go_to(session, out);
             }
-            Action::NewWindow => self.send(out, "new-window", Pending::Report),
+            Action::NewWindow { session } => {
+                match session {
+                    Some(session) => {
+                        let command = format!("new-window -t '${session}:'");
+                        self.send(out, &command, Pending::Report);
+                    }
+                    None => self.send(out, "new-window", Pending::Report),
+                }
+                self.go_to(session, out);
+            }
             Action::KillWindow { window } => {
                 self.send(out, &format!("kill-window -t @{window}"), Pending::Report);
             }
@@ -1269,6 +1357,15 @@ impl Engine {
                     self.send(out, &command, Pending::Report);
                 }
             }
+        }
+    }
+
+    /// Go to a session, if one is named and it is not the one attached to.
+    fn go_to(&mut self, session: Option<u32>, out: &mut Out) {
+        let current = self.state.as_ref().and_then(|state| state.session);
+        if let Some(session) = session.filter(|session| Some(*session) != current) {
+            let command = format!("switch-client -t '${session}'");
+            self.send(out, &command, Pending::Report);
         }
     }
 
@@ -1365,9 +1462,14 @@ mod tests {
     const TWO_PANES: &str = "6b8b,100x30,0,0{50x30,0,0,0,49x30,51,0,1}";
     const THREE_PANES: &str = "77dd,100x30,0,0{50x30,0,0,0,49x30,51,0[49x15,51,0,1,49x14,51,16,2]}";
 
+    /// A window of the session that is not attached to, and every pane.
+    const OTHER_WINDOW: &str = "$1\t@5\t0\t1\t0\ta880,100x30,0,0,3\tvim\n";
+    const PANES: &str = "%0\t@0\t0\t100\t/dev/pts/1\tbash\n%1\t@0\t1\t101\t/dev/pts/2\tmake\n\
+                         %2\t@0\t0\t102\t/dev/pts/3\tbash\n%3\t@5\t1\t400\t/dev/pts/9\tvim\n";
+
     /// Answer the two that open an attachment and the four of a refresh.
     fn refreshed(engine: &mut Engine, layout: &str) -> Out {
-        let windows = format!("@0\t0\t1\t0\t{layout}\tbash\n");
+        let windows = format!("$0\t@0\t0\t1\t0\t{layout}\tbash\n{OTHER_WINDOW}");
         answer(
             engine,
             &[
@@ -1376,7 +1478,7 @@ mod tests {
                 "$0\n",
                 "$0\t1\t1\tfirst\n$1\t1\t0\tsecond\n",
                 &windows,
-                "%0\t@0\t0\t0\tbash\n%1\t@0\t1\t0\tmake\n%2\t@0\t0\t0\tbash\n",
+                PANES,
             ],
         )
     }
@@ -1441,6 +1543,20 @@ mod tests {
         };
         assert_eq!(state.session, Some(0));
         assert_eq!(state.sessions[1].name, "second");
+        // Every session's windows are listed under it, with where to look
+        // for what runs in each; only this session's are laid out.
+        assert_eq!(state.windows.len(), 1);
+        assert_eq!(state.sessions[0].list[0].panes.len(), 3);
+        let other = &state.sessions[1].list[0];
+        assert_eq!((other.id, other.name.as_str()), (5, "vim"));
+        assert_eq!(
+            other.panes,
+            [PaneBrief {
+                id: 3,
+                pid: 400,
+                tty: "/dev/pts/9".into()
+            }]
+        );
         let window = &state.windows[0];
         assert_eq!((window.cols, window.rows, window.pane_count), (100, 30, 3));
         assert_eq!(window.panes[1].command, "make");
@@ -1481,7 +1597,7 @@ mod tests {
         let mut out = Out::default();
         engine.feed(b"%window-renamed @0 bash\n", &mut out);
         assert_eq!(said(&out).len(), 4, "asked again");
-        let windows = format!("@0\t0\t1\t0\t{TWO_PANES}\tbash\n");
+        let windows = format!("$0\t@0\t0\t1\t0\t{TWO_PANES}\tbash\n{OTHER_WINDOW}");
         let out = answer(
             &mut engine,
             &[
@@ -1492,7 +1608,7 @@ mod tests {
                 "$0\n",
                 "$0\t1\t1\tfirst\n$1\t1\t0\tsecond\n",
                 &windows,
-                "%0\t@0\t0\t0\tbash\n%1\t@0\t1\t0\tmake\n%2\t@0\t0\t0\tbash\n",
+                PANES,
             ],
         );
         assert!(
@@ -1671,6 +1787,36 @@ mod tests {
         let mut out = Out::default();
         engine.act(Action::KillSession { session: 1 }, &mut out);
         assert_eq!(said(&out), ["kill-session -t '$1'"]);
+    }
+
+    #[test]
+    fn a_window_of_another_session_is_gone_to_with_its_session() {
+        let mut engine = attached();
+        refreshed(&mut engine, TWO_PANES);
+        answer(&mut engine, &["", "", ""]);
+
+        let mut out = Out::default();
+        let here = Action::SelectWindow {
+            window: 0,
+            session: Some(0),
+        };
+        engine.act(here, &mut out);
+        assert_eq!(said(&out), ["select-window -t @0"]);
+
+        let mut out = Out::default();
+        let there = Action::SelectWindow {
+            window: 5,
+            session: Some(1),
+        };
+        engine.act(there, &mut out);
+        assert_eq!(said(&out), ["select-window -t @5", "switch-client -t '$1'"]);
+
+        let mut out = Out::default();
+        engine.act(Action::NewWindow { session: Some(1) }, &mut out);
+        assert_eq!(said(&out), ["new-window -t '$1:'", "switch-client -t '$1'"]);
+        let mut out = Out::default();
+        engine.act(Action::NewWindow { session: None }, &mut out);
+        assert_eq!(said(&out), ["new-window"]);
     }
 
     #[test]
