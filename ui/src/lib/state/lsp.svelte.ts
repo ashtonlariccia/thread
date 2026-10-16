@@ -31,7 +31,7 @@ import {
 import { dirName, segmentsBelow } from "../paths";
 import type { Doc, Documents, DocWatcher } from "./documents.svelte";
 
-/** A server Thread knows how to run, as the backend describes it. */
+/** A server Tide knows how to run, as the backend describes it. */
 export type ServerInfo = {
   id: string;
   name: string;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the standalone Thread executable.
+# Build the standalone Tide executable.
 #
 # This is the binary to double-click. Unlike a debug build, it embeds the UI, so
 # it needs no dev server -- and it runs without a console window.
@@ -20,4 +20,4 @@ fi
 
 echo
 echo "==> standalone executable:"
-echo "    $(pwd)/target/release/thread.exe"
+echo "    $(pwd)/target/release/tide.exe"

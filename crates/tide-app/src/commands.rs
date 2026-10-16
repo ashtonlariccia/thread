@@ -1,0 +1,1656 @@
+//! Tauri command surface: windows, files, remote connections, the config,
+//! terminals, tmux, and the pinned strip.
+//!
+//! This layer owns the windows and the IPC transport. Anything that can be
+//! decided without a window lives in `tide-core`.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalSize, State, WebviewWindow};
+
+use tide_core::connections::{SavedConnection, Store as ConnectionStore};
+use tide_core::lsp;
+use tide_core::remote::{
+    self, ConnectError, DiscoveredKey, Failure, Remote, RemoteStats, RemoteTmux, Target,
+};
+use tide_core::sysinfo;
+use tide_core::terminal::{self, LocalTerminal, Terminal};
+use tide_core::tmux;
+
+use tide_core::{
+    config, document, fsops, git, tree, Appearance, Config, Document, Entry, Eol, Material, Pin,
+    PinStore, Session, Stamp,
+};
+
+/// A window's size at 100% scale. Matches the window in tauri.conf.json.
+const BASE_SIZE: (f64, f64) = (960.0, 600.0);
+const MIN_SIZE: (f64, f64) = (520.0, 360.0);
+
+fn scaled(size: (f64, f64), appearance: &Appearance) -> LogicalSize<f64> {
+    let factor = appearance.scale_factor();
+    LogicalSize::new(size.0 * factor, size.1 * factor)
+}
+
+/// The config, or the defaults if it cannot be read: a config file with a
+/// mistake in it should cost the customisation, not the window.
+fn stored_config() -> Config {
+    config::load().unwrap_or_else(|e| {
+        tracing::warn!(target: "tide::ui", "{e}");
+        Config::default()
+    })
+}
+
+fn stored_appearance() -> Appearance {
+    stored_config().appearance
+}
+
+// --- windows ----------------------------------------------------------------
+
+/// Apply the parts of the appearance that belong to the OS window and the
+/// webview rather than to the page: the zoom and the material.
+///
+/// Acrylic is a property of the window, not of the page inside it, so it cannot
+/// be done from CSS. Both are per-window and do not carry into a new one.
+fn dress(window: &WebviewWindow, appearance: &Appearance) {
+    use tauri::window::{Effect, EffectsBuilder};
+
+    let label = window.label();
+
+    if let Err(e) = window.set_zoom(appearance.scale_factor()) {
+        tracing::warn!(target: "tide::ui", "set_zoom on {label} failed: {e}");
+    }
+
+    let effects = match appearance.material {
+        Material::Acrylic => Some(EffectsBuilder::new().effect(Effect::Acrylic).build()),
+        // `None` clears whatever was applied before, so turning the toggle off
+        // actually removes the blur rather than leaving it stuck on.
+        Material::None => None,
+    };
+    if let Err(e) = window.set_effects(effects) {
+        // Not fatal: the opacity half still works, and an unsupported material
+        // should cost the blur, not the settings dialog.
+        tracing::warn!(target: "tide::ui", "set_effects on {label} failed: {e}");
+    }
+
+    // The handle is a pointer, and goes to the window's own thread as a number.
+    if let Ok(hwnd) = window.hwnd() {
+        let hwnd = hwnd.0 as isize;
+        let _ = window.run_on_main_thread(move || backdrop::keep_lit(hwnd));
+    }
+}
+
+/// Keeping a window's backdrop when the window is not the one in front.
+///
+/// Acrylic is the system's backdrop for a window, and the system draws it
+/// only for a window it takes to be active: a frosted window goes flat the
+/// moment another is clicked. What it goes by is what the window itself says
+/// when told it is being deactivated, so this has every window answer that
+/// as though it were still active. There is no title bar of the system's on
+/// these windows for that to mislead anyone with.
+mod backdrop {
+    use std::ffi::c_void;
+
+    type SubclassProc =
+        unsafe extern "system" fn(*mut c_void, u32, usize, isize, usize, usize) -> isize;
+
+    #[link(name = "comctl32")]
+    extern "system" {
+        fn SetWindowSubclass(hwnd: *mut c_void, proc: SubclassProc, id: usize, data: usize) -> i32;
+        fn DefSubclassProc(hwnd: *mut c_void, message: u32, wparam: usize, lparam: isize) -> isize;
+    }
+
+    const WM_NCACTIVATE: u32 = 0x0086;
+    /// Which of a window's subclasses this one is. Setting it again under
+    /// the same number replaces it, so a window dressed twice has it once.
+    const ID: usize = 0x7468_7264;
+
+    unsafe extern "system" fn proc(
+        hwnd: *mut c_void,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        _id: usize,
+        _data: usize,
+    ) -> isize {
+        // Told it is no longer active: passed on as the opposite. Everything
+        // else about losing the focus happens as it would.
+        let wparam = match message {
+            WM_NCACTIVATE => 1,
+            _ => wparam,
+        };
+        // SAFETY: the arguments are the ones this was called with.
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    /// Have a window keep its backdrop from here on. Called on the window's
+    /// own thread, which is the only one that may.
+    pub fn keep_lit(hwnd: isize) {
+        // SAFETY: the window is this process's own and is open, and `proc`
+        // lives as long as the program does.
+        unsafe { SetWindowSubclass(hwnd as *mut c_void, proc, ID, 0) };
+    }
+}
+
+/// Size, dress and reveal the window declared in tauri.conf.json.
+///
+/// It is declared hidden so the stored scale can be applied first; shown
+/// straight away it would open at 100% and visibly jump.
+pub fn open_main_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let appearance = stored_appearance();
+
+    // Minimum first: at a scale below 100% the configured minimum would
+    // otherwise refuse the smaller size.
+    let _ = window.set_min_size(Some(scaled(MIN_SIZE, &appearance)));
+    let _ = window.set_size(scaled(BASE_SIZE, &appearance));
+    dress(&window, &appearance);
+
+    if let Err(e) = window.show() {
+        tracing::error!(target: "tide::ui", "could not show the main window: {e}");
+    }
+}
+
+/// Open another Tide window (File -> New Window).
+///
+/// A second webview in the *same* process rather than a second process: it
+/// shares the WebView2 host, which keeps the memory cost of an extra window
+/// small. Labels are `win-N`, matched by the `win-*` entry in
+/// `capabilities/default.json` -- without that the new window would have no
+/// permissions and its menus would silently fail.
+///
+/// **Must be `async`.** Synchronous Tauri commands run on the main thread, and
+/// window creation needs that thread to pump the event loop — so building a
+/// window from a sync command deadlocks: `build()` simply never returns, and the
+/// half-created window shows as a blank white pane. Marking it async moves the
+/// work off the main thread.
+#[tauri::command]
+pub async fn new_window(app: AppHandle) -> Result<String, String> {
+    build_window(&app, Vec::new())
+}
+
+/// Open the config file in a window of its own (Appearance -> Open Config File).
+///
+/// A new window rather than the current one, so the file can sit beside the
+/// window whose look it is changing.
+#[tauri::command]
+pub async fn open_config(app: AppHandle) -> Result<String, String> {
+    let path = config::ensure_file().map_err(|e| e.to_string())?;
+    build_window(&app, vec![path.to_string_lossy().into_owned()])
+}
+
+/// Build a window, with `files` waiting for it to open once its page is up.
+fn build_window(app: &AppHandle, files: Vec<String>) -> Result<String, String> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+
+    let label = format!("win-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    // Queued before the window exists, so a page that comes up fast cannot
+    // ask for its files before they are there.
+    if !files.is_empty() {
+        app.state::<PendingFiles>().queue(&label, files);
+    }
+
+    let appearance = stored_appearance();
+    let size = scaled(BASE_SIZE, &appearance);
+    let min = scaled(MIN_SIZE, &appearance);
+
+    let window = tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::default())
+        .title("Tide")
+        .inner_size(size.width, size.height)
+        .min_inner_size(min.width, min.height)
+        .decorations(false)
+        // Matches the window in tauri.conf.json. The page paints its own
+        // background, so an opaque look costs nothing -- but a window built
+        // opaque could never become translucent without a restart.
+        .transparent(true)
+        .build()
+        .map_err(|e| format!("could not open a new window: {e}"))?;
+
+    dress(&window, &appearance);
+
+    tracing::info!("opened window {label}");
+    Ok(label)
+}
+
+/// Quit the application (File -> Exit).
+///
+/// By closing every window rather than exiting the process: each window then
+/// gets to ask about its own unsaved files, and one that is told "Cancel"
+/// stays open. The app exits by itself once the last window has gone.
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    tracing::info!("closing every window on user request");
+    for window in app.webview_windows().values() {
+        let _ = window.close();
+    }
+}
+
+// --- files ------------------------------------------------------------------
+//
+// `async` so the disk is never touched on the main thread: a slow drive or a
+// large file must cost the open, not the window's event loop.
+
+/// Paths a window should open as soon as it is up, by window label.
+///
+/// Held until the window asks, because a window cannot be told anything
+/// before its page has loaded. The main window's are the ones named on the
+/// command line (`tide.exe notes.txt`, `tide.exe .`, or "Open with").
+pub struct PendingFiles(Mutex<HashMap<String, Vec<String>>>);
+
+impl PendingFiles {
+    pub fn from_args() -> Self {
+        let files: Vec<String> = std::env::args_os()
+            .skip(1)
+            // Relative to where the command was run, which the dialogs and the
+            // webview will not remember later.
+            .filter_map(|arg| std::path::absolute(arg).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        Self(Mutex::new(HashMap::from([("main".to_owned(), files)])))
+    }
+
+    fn queue(&self, label: &str, files: Vec<String>) {
+        if let Ok(mut pending) = self.0.lock() {
+            pending.entry(label.to_owned()).or_default().extend(files);
+        }
+    }
+}
+
+/// A path waiting for a window, and which of the two things it is.
+#[derive(serde::Serialize)]
+pub struct StartupPath {
+    path: String,
+    /// A folder opens in the file tree; anything else opens in the editor.
+    dir: bool,
+}
+
+/// Hand a window the paths waiting for it, once.
+#[tauri::command]
+pub fn startup_files(window: WebviewWindow, files: State<'_, PendingFiles>) -> Vec<StartupPath> {
+    files
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.remove(window.label()))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| StartupPath {
+            dir: Path::new(&path).is_dir(),
+            path,
+        })
+        .collect()
+}
+
+// --- file tree --------------------------------------------------------------
+//
+// Every command from here to the config is asked about a path, and answers
+// for whichever machine the window is on: this one, or the remote it is
+// connected to. The window does not say which. It cannot mix them up that
+// way, and nothing in the page has to know there are two.
+
+/// One folder's children, for the tree to show when it is unfolded. What it
+/// leaves out is the config's `files.exclude`.
+#[tauri::command]
+pub async fn read_dir(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+) -> Result<Vec<Entry>, String> {
+    let exclude = stored_config().files.exclude;
+    match remotes.of(&window) {
+        Some(link) => link.remote.list(&path, &exclude).await,
+        None => tree::list(Path::new(&path), &exclude),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// Where each path really is, with any links in it followed, in order;
+/// `None` for one that is not there. For telling whether two spellings are
+/// the one place.
+#[tauri::command]
+pub async fn real_paths(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    paths: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
+    let mut real = Vec::with_capacity(paths.len());
+    match remotes.of(&window) {
+        Some(link) => {
+            for path in &paths {
+                real.push(link.remote.resolve(path).await.ok());
+            }
+        }
+        None => real.extend(paths.iter().map(|path| {
+            std::fs::canonicalize(path)
+                .ok()
+                .map(|found| found.display().to_string())
+        })),
+    }
+    Ok(real)
+}
+
+/// When each folder's contents last changed, in order; `None` where it is gone.
+///
+/// Polled for the folders the tree has unfolded, the same way `file_stamps` is
+/// for open files: a `stat` each, and a folder is only re-read once its stamp
+/// has moved.
+#[tauri::command]
+pub async fn dir_stamps(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    paths: Vec<String>,
+) -> Result<Vec<Option<u64>>, String> {
+    let Some(link) = remotes.of(&window) else {
+        return Ok(paths
+            .iter()
+            .map(|path| tree::dir_stamp(Path::new(path)))
+            .collect());
+    };
+    let mut stamps = Vec::with_capacity(paths.len());
+    for path in &paths {
+        stamps.push(
+            link.remote
+                .dir_stamp(path)
+                .await
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    Ok(stamps)
+}
+
+// The tree's file operations. Each hands back the path it made, spelled as the
+// listing will spell it, so the frontend can go straight to the new entry.
+
+#[tauri::command]
+pub async fn create_file(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    dir: String,
+    name: String,
+) -> Result<String, String> {
+    let path = match remotes.of(&window) {
+        Some(link) => link.remote.create_file(&dir, &name).await,
+        None => fsops::create_file(Path::new(&dir), &name)
+            .map(|path| path.to_string_lossy().into_owned()),
+    }
+    .map_err(|e| e.to_string())?;
+    tracing::info!(target: "tide::files", "CREATED {path}");
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn create_dir(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    dir: String,
+    name: String,
+) -> Result<String, String> {
+    let path = match remotes.of(&window) {
+        Some(link) => link.remote.create_dir(&dir, &name).await,
+        None => fsops::create_dir(Path::new(&dir), &name)
+            .map(|path| path.to_string_lossy().into_owned()),
+    }
+    .map_err(|e| e.to_string())?;
+    tracing::info!(target: "tide::files", "CREATED {path}");
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn rename_path(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+    name: String,
+) -> Result<String, String> {
+    let renamed = match remotes.of(&window) {
+        Some(link) => link.remote.rename(&path, &name).await,
+        None => {
+            fsops::rename(Path::new(&path), &name).map(|path| path.to_string_lossy().into_owned())
+        }
+    }
+    .map_err(|e| e.to_string())?;
+    tracing::info!(target: "tide::files", "RENAMED {path} -> {renamed}");
+    Ok(renamed)
+}
+
+/// Delete a file or folder: to the Recycle Bin here, and for good on a
+/// remote, which has no bin to send it to.
+#[tauri::command]
+pub async fn delete_path(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+) -> Result<(), String> {
+    match remotes.of(&window) {
+        Some(link) => link.remote.delete(&path).await,
+        None => fsops::delete(Path::new(&path)),
+    }
+    .map_err(|e| e.to_string())?;
+    tracing::info!(target: "tide::files", "DELETED {path}");
+    Ok(())
+}
+
+/// Whether `path` is Tide's own config file.
+fn is_config_file(path: &Path) -> bool {
+    let Ok(config) = config::path() else {
+        return false;
+    };
+    // Canonical on both sides: the same file can be spelled with either slash,
+    // any case, or a short 8.3 name.
+    match (std::fs::canonicalize(path), std::fs::canonicalize(config)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+#[tauri::command]
+pub async fn read_file(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+) -> Result<Document, String> {
+    let doc = match remotes.of(&window) {
+        Some(link) => link.remote.read(&path).await,
+        None => document::read(Path::new(&path)),
+    }
+    .map_err(|e| e.to_string())?;
+    tracing::info!(target: "tide::files", "OPENED {path} ({} bytes)", doc.text.len());
+    Ok(doc)
+}
+
+/// `text` is `\n`-separated; `eol` and `bom` are what the file had when it was
+/// opened, and are restored here.
+#[tauri::command]
+pub async fn write_file(
+    app: AppHandle,
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: String,
+    text: String,
+    eol: Eol,
+    bom: bool,
+) -> Result<Option<Stamp>, String> {
+    if let Some(link) = remotes.of(&window) {
+        let stamp = link
+            .remote
+            .write(&path, &text, eol, bom)
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!(target: "tide::files", "SAVED {path} on {}", link.info.label);
+        return Ok(stamp);
+    }
+
+    let stamp = document::write(Path::new(&path), &text, eol, bom).map_err(|e| e.to_string())?;
+    tracing::info!(target: "tide::files", "SAVED {path}");
+
+    // Saving the config file is how it is edited, so that is the moment it
+    // takes effect -- not the next launch.
+    if is_config_file(Path::new(&path)) {
+        match config::load() {
+            Ok(config) => apply_config(&app, &config),
+            // The save itself succeeded; what is in the file just cannot be
+            // used. Keep everything as it is and say what is wrong, since the
+            // person who can fix it is looking at the file right now.
+            Err(e) => {
+                tracing::warn!(target: "tide::ui", "config not applied: {e}");
+                let _ = app.emit("config-error", e.to_string());
+            }
+        }
+    }
+    Ok(stamp)
+}
+
+/// The current stamp of each path, in order; `None` where the file is gone.
+///
+/// The frontend polls this for its open files to notice changes made outside
+/// the editor. One `stat` per file, and no file is read unless its stamp moved.
+#[tauri::command]
+pub async fn file_stamps(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    paths: Vec<String>,
+) -> Result<Vec<Option<Stamp>>, String> {
+    let Some(link) = remotes.of(&window) else {
+        return Ok(paths
+            .iter()
+            .map(|path| document::stamp(Path::new(path)))
+            .collect());
+    };
+    let mut stamps = Vec::with_capacity(paths.len());
+    for path in &paths {
+        stamps.push(link.remote.stamp(path).await.map_err(|e| e.to_string())?);
+    }
+    Ok(stamps)
+}
+
+/// Who is at the keyboard and what this machine is called, for the bottom
+/// bar to show while the window is working here.
+#[derive(serde::Serialize)]
+pub struct Identity {
+    user: String,
+    host: String,
+}
+
+#[tauri::command]
+pub fn identity() -> Identity {
+    let var = |name| std::env::var(name).unwrap_or_default();
+    Identity {
+        user: var("USERNAME"),
+        host: var("COMPUTERNAME"),
+    }
+}
+
+/// The branch the folder is on and what in it is changed, staged or not yet
+/// pushed, or `None` if it is not in a repository. Asked again every second
+/// or so, so that what is done in a terminal shows.
+#[tauri::command]
+pub async fn git_status(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    dir: String,
+) -> Result<Option<git::Status>, String> {
+    Ok(match remotes.of(&window) {
+        Some(link) => link.remote.git_status(&dir).await,
+        // Off the main thread: it runs `git` and waits for it.
+        None => tauri::async_runtime::spawn_blocking(move || git::status(Path::new(&dir)))
+            .await
+            .unwrap_or(None),
+    })
+}
+
+// --- remote -----------------------------------------------------------------
+//
+// A window is on this machine, or connected to one remote. While it is
+// connected, the file commands above and `terminal_open` below act on that
+// remote instead.
+//
+// Passwords come in from the connect dialog and go no further than this
+// process: a saved one is unsealed here, and what the page is told about a
+// connection has no secret in it.
+
+/// What a window is connected to.
+pub struct Link {
+    remote: Remote,
+    info: RemoteInfo,
+    /// What it was made with, kept to save it or to make it again.
+    target: Target,
+    /// Whether terminals on it can be kept in tmux: asked of the remote the
+    /// first time one is opened, and not again.
+    keeps: tokio::sync::OnceCell<bool>,
+}
+
+/// A connection, as the page is told about it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteInfo {
+    /// `user@host`, to name it by.
+    label: String,
+    /// Who the window is signed in as, and where, for the bottom bar.
+    user: String,
+    host: String,
+    /// The folder the server puts us in, where a browse for one starts.
+    home: String,
+    /// Its id, if it is one of the saved connections.
+    saved: Option<String>,
+}
+
+/// Each connected window's link, by window label.
+#[derive(Default)]
+pub struct Remotes(Mutex<HashMap<String, Arc<Link>>>);
+
+impl Remotes {
+    /// The window's link, if it is connected. Cloned out, so nothing waits on
+    /// the network with the lock held.
+    fn of(&self, window: &WebviewWindow) -> Option<Arc<Link>> {
+        self.0.lock().ok()?.get(window.label()).cloned()
+    }
+
+    fn set(&self, label: &str, link: Option<Arc<Link>>) -> Option<Arc<Link>> {
+        let mut links = self.0.lock().ok()?;
+        match link {
+            Some(link) => links.insert(label.to_owned(), link),
+            None => links.remove(label),
+        }
+    }
+
+    /// The window has gone; its connection goes with it, by being dropped.
+    /// In a moment rather than at once: what the window's going has just
+    /// asked of the remote -- that its kept terminals be ended -- is still
+    /// on its way there.
+    pub fn close_window(&self, label: &str) {
+        if let Some(link) = self.set(label, None) {
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(LAST_WORDS).await;
+                link.remote.disconnect().await;
+            });
+        }
+    }
+}
+
+/// How long a connection being closed is left for what was last asked of
+/// it to go out.
+const LAST_WORDS: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// How often a connection is checked for having died under us.
+const LINK_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Connect a window to `target`, in place of anything it was connected to.
+async fn link_window(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    target: Target,
+) -> Result<RemoteInfo, ConnectError> {
+    let remote = Remote::connect(&target).await?;
+
+    let saved = ConnectionStore::load()
+        .ok()
+        .and_then(|store| store.find(&target.host, target.port, &target.username));
+    let info = RemoteInfo {
+        label: target.label(),
+        user: target.username.clone(),
+        host: target.host.clone(),
+        home: remote.home().to_owned(),
+        saved: saved.map(|connection| connection.id),
+    };
+    tracing::info!(target: "tide::remote", "CONNECTED {} to {}", window.label(), info.label);
+
+    let link = Arc::new(Link {
+        remote,
+        info: info.clone(),
+        target,
+        keeps: tokio::sync::OnceCell::new(),
+    });
+    let label = window.label().to_owned();
+    let remotes = app.state::<Remotes>();
+    if let Some(old) = remotes.set(&label, Some(Arc::clone(&link))) {
+        old.remote.disconnect().await;
+    }
+
+    // Nothing tells us when a connection dies, so it is asked. The page is
+    // told once, and only if this is still the connection the window is on:
+    // one that was hung up on purpose has been taken out of the map by then.
+    let app = app.clone();
+    let watched = Arc::downgrade(&link);
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(LINK_CHECK).await;
+            let Some(link) = watched.upgrade() else {
+                return;
+            };
+            if !link.remote.is_closed() {
+                continue;
+            }
+            let current = app
+                .state::<Remotes>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|links| links.get(&label).cloned());
+            if current.is_some_and(|current| Arc::ptr_eq(&current, &link)) {
+                tracing::warn!(target: "tide::remote", "LOST {}", link.info.label);
+                let _ = app.emit_to(&label, "remote-lost", &link.info);
+            }
+            return;
+        }
+    });
+
+    Ok(info)
+}
+
+/// Remote -> Connect: sign in with what was typed into the dialog.
+#[tauri::command]
+pub async fn remote_connect(
+    app: AppHandle,
+    window: WebviewWindow,
+    target: Target,
+) -> Result<RemoteInfo, ConnectError> {
+    link_window(&app, &window, target).await
+}
+
+/// Remote -> Hosts: sign in with what was saved.
+///
+/// `trust_new_key` is the answer to a question about the host's key, should
+/// it have come to one; a saved connection normally needs none.
+#[tauri::command]
+pub async fn remote_connect_saved(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: String,
+    trust_new_key: bool,
+) -> Result<RemoteInfo, ConnectError> {
+    let (saved, auth) = ConnectionStore::load()
+        .and_then(|store| store.credentials(&id))
+        .map_err(|e| ConnectError::new(Failure::Auth, e.to_string()))?;
+    let target = Target {
+        host: saved.host,
+        port: saved.port,
+        username: saved.username,
+        auth,
+        trust_new_key,
+    };
+    link_window(&app, &window, target).await
+}
+
+/// Connect again to what the window was on, after the connection was lost.
+#[tauri::command]
+pub async fn remote_reconnect(
+    app: AppHandle,
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<RemoteInfo, ConnectError> {
+    let link = remotes
+        .of(&window)
+        .ok_or_else(|| ConnectError::new(Failure::Session, "This window is not connected."))?;
+    link_window(&app, &window, link.target.clone()).await
+}
+
+/// What the window is connected to. For a page that has just loaded to ask:
+/// a reload starts the page over, but leaves the connection up.
+#[tauri::command]
+pub fn remote_state(window: WebviewWindow, remotes: State<'_, Remotes>) -> Option<RemoteInfo> {
+    remotes.of(&window).map(|link| link.info.clone())
+}
+
+#[tauri::command]
+pub async fn remote_disconnect(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    tmuxes: State<'_, Tmuxes>,
+    stats: State<'_, Stats>,
+) -> Result<(), String> {
+    tmuxes.close_window(window.label());
+    stats.close_window(window.label());
+    if let Some(link) = remotes.set(window.label(), None) {
+        // The page has just closed its terminals, and the kept ones are
+        // ended by a word to the remote that has to get there first.
+        tokio::time::sleep(LAST_WORDS).await;
+        link.remote.disconnect().await;
+        tracing::info!(target: "tide::remote", "DISCONNECTED {}", link.info.label);
+    }
+    Ok(())
+}
+
+/// Save the connection the window is on, with what it signed in with, so it
+/// can be made again without asking. Returns it as saved.
+#[tauri::command]
+pub async fn remote_save(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<SavedConnection, String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    let target = &link.target;
+
+    let mut store = ConnectionStore::load().map_err(|e| e.to_string())?;
+    let saved = store
+        .upsert(&target.host, target.port, &target.username, &target.auth)
+        .map_err(|e| e.to_string())?;
+    store.save().map_err(|e| e.to_string())?;
+    tracing::info!(target: "tide::remote", "SAVED {}", link.info.label);
+    Ok(saved)
+}
+
+/// The saved connections, for Remote -> Hosts.
+#[tauri::command]
+pub fn remote_known() -> Result<Vec<SavedConnection>, String> {
+    Ok(ConnectionStore::load().map_err(|e| e.to_string())?.list())
+}
+
+/// Forget a saved connection. Returns the ones that are left.
+#[tauri::command]
+pub fn remote_forget(id: String) -> Result<Vec<SavedConnection>, String> {
+    let mut store = ConnectionStore::load().map_err(|e| e.to_string())?;
+    if store.remove(&id) {
+        store.save().map_err(|e| e.to_string())?;
+    }
+    Ok(store.list())
+}
+
+/// The private keys in `~\.ssh`, for the connect dialog to offer.
+#[tauri::command]
+pub async fn remote_keys() -> Vec<DiscoveredKey> {
+    remote::discover_keys()
+}
+
+/// A folder on the remote, for the dialog that stands in for the system's
+/// file picker there.
+#[derive(serde::Serialize)]
+pub struct Browse {
+    /// The folder, as the server spells it.
+    path: String,
+    entries: Vec<Entry>,
+}
+
+/// List a remote folder to browse. `path` may be relative or have `..` in
+/// it; none at all is the home folder. Nothing is left out: this is for
+/// finding things, dotfiles included.
+#[tauri::command]
+pub async fn remote_browse(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    path: Option<String>,
+) -> Result<Browse, String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    let asked = path.unwrap_or_else(|| link.info.home.clone());
+    let path = link
+        .remote
+        .resolve(&asked)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = link
+        .remote
+        .list(&path, &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Browse { path, entries })
+}
+
+// --- config -----------------------------------------------------------------
+//
+// Most of the config is the frontend's to act on: it is handed the whole
+// thing, and told when it changes. The exception is the zoom and the window
+// effect, which only the backend can apply.
+
+/// The config as it stands. Falls back to the defaults if the file has a
+/// mistake in it; the mistake itself is reported when the file is saved.
+#[tauri::command]
+pub fn config() -> Config {
+    stored_config()
+}
+
+/// Resize a window so it shows the same layout at the new scale.
+///
+/// Relative to its current size rather than back to the base size: a window
+/// that was dragged wide stays proportionally wide.
+fn rescale(window: &WebviewWindow, from: &Appearance, to: &Appearance) {
+    // Minimum first, so shrinking is not refused by the old, larger minimum.
+    let _ = window.set_min_size(Some(scaled(MIN_SIZE, to)));
+
+    // A maximised window already fills its monitor; only the zoom changes.
+    if window.is_maximized().unwrap_or(false) {
+        return;
+    }
+
+    let Ok(size) = window.inner_size() else {
+        return;
+    };
+    let ratio = to.scale_factor() / from.scale_factor();
+    let _ = window.set_size(PhysicalSize::new(
+        (f64::from(size.width) * ratio).round() as u32,
+        (f64::from(size.height) * ratio).round() as u32,
+    ));
+}
+
+/// The appearance the windows are wearing right now.
+///
+/// Not the same as what is in the config file: that can be edited by hand,
+/// and rescaling a window needs the scale it is *coming from*, which the file
+/// no longer says once it has been overwritten.
+pub struct Applied(Mutex<Appearance>);
+
+impl Applied {
+    pub fn load() -> Self {
+        Self(Mutex::new(stored_appearance()))
+    }
+}
+
+/// Put a config into effect: its appearance onto every window, and the whole
+/// of it to their pages.
+///
+/// Every window rather than the calling one: the config is global, and a
+/// second window left opaque while the first went frosted would look like a bug.
+fn apply_config(app: &AppHandle, config: &Config) {
+    let appearance = &config.appearance;
+
+    // Swapped and released before any window is touched. Window calls made
+    // off the main thread wait for it, and the main thread may itself be in
+    // here waiting for this lock -- holding it across them would deadlock.
+    let previous = {
+        let applied = app.state::<Applied>();
+        let Ok(mut applied) = applied.0.lock() else {
+            return;
+        };
+        std::mem::replace(&mut *applied, appearance.clone())
+    };
+
+    for window in app.webview_windows().values() {
+        dress(window, appearance);
+        if appearance.scale != previous.scale {
+            rescale(window, &previous, appearance);
+        }
+    }
+
+    // Everything else -- opacity, the editor, the tree, the theme -- is the
+    // page's to act on.
+    let _ = app.emit("config-changed", config);
+
+    tracing::info!(
+        target: "tide::ui",
+        "APPEARANCE opacity={} material={:?} scale={}",
+        appearance.background_opacity,
+        appearance.material,
+        appearance.scale,
+    );
+}
+
+/// Change one setting in the config file and apply it.
+///
+/// This is what the Appearance dialog does with every control: the same
+/// change as editing the key in the file and saving it, made for you.
+///
+/// Returns the config as it now stands. Values are clamped on the way in, so
+/// the dialog must show what came back rather than what it sent.
+#[tauri::command]
+pub fn set_config(
+    app: AppHandle,
+    section: String,
+    key: String,
+    value: serde_json::Value,
+) -> Result<Config, String> {
+    let config = config::set(&section, &key, &value).map_err(|e| e.to_string())?;
+    apply_config(&app, &config);
+    Ok(config)
+}
+
+/// Write, replace or remove a language of the user's own (`[syntax.<name>]`)
+/// and apply it. `previous` is the name it had before, if it was renamed;
+/// no `syntax` removes it.
+#[tauri::command]
+pub fn set_syntax(
+    app: AppHandle,
+    name: String,
+    previous: Option<String>,
+    syntax: Option<config::Syntax>,
+) -> Result<Config, String> {
+    let config = config::set_syntax(&name, previous.as_deref(), syntax.as_ref())
+        .map_err(|e| e.to_string())?;
+    apply_config(&app, &config);
+    Ok(config)
+}
+
+// --- session ----------------------------------------------------------------
+
+/// What was open when Tide was last closed.
+#[tauri::command]
+pub fn session_load() -> Session {
+    tide_core::session::load()
+}
+
+/// Record what is open now, to come back to. Called as things change rather
+/// than at exit, so a crash or a killed process loses nothing either.
+#[tauri::command]
+pub async fn session_save(session: Session) -> Result<(), String> {
+    tide_core::session::save(&session).map_err(|e| e.to_string())
+}
+
+// --- terminal ---------------------------------------------------------------
+//
+// Terminals open as tabs, any number to a window. Each belongs to whatever its
+// window is working on: a shell on this machine today, and one on the remote
+// host once a window can be connected to one. Everything below deals in
+// `dyn Terminal`, so that is a second thing `terminal_open` can make rather
+// than a second set of commands.
+
+/// Every open terminal, by id.
+#[derive(Default)]
+pub struct Terminals(Mutex<HashMap<u64, Open>>);
+
+/// A terminal, with the label of the window it is in.
+type Open = (String, Box<dyn Terminal>);
+
+impl Terminals {
+    /// Take a terminal out. Dropping what comes back is what ends its shell,
+    /// and is left to the caller so that it happens outside the lock.
+    fn take(&self, id: u64) -> Option<Box<dyn Terminal>> {
+        let (_, terminal) = self.0.lock().ok()?.remove(&id)?;
+        Some(terminal)
+    }
+
+    /// Every terminal whose output the page has left undrawn for `long`, with
+    /// how much of it there is: `#3 262144B for 6s`. For the log.
+    pub fn stalled(&self, long: std::time::Duration) -> Vec<String> {
+        let Ok(open) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut stalled: Vec<(u64, String)> = open
+            .iter()
+            .filter_map(|(id, (_, terminal))| {
+                let flow = terminal.flow();
+                let held = flow.held_for().filter(|held| *held >= long)?;
+                let pending = flow.pending();
+                Some((*id, format!("#{id} {pending}B for {}s", held.as_secs())))
+            })
+            .collect();
+        stalled.sort();
+        stalled.into_iter().map(|(_, line)| line).collect()
+    }
+
+    /// The window has gone, or its page has been reloaded and can no longer
+    /// reach them: its shells go too.
+    pub fn close_window(&self, label: &str) {
+        let Ok(mut open) = self.0.lock() else {
+            return;
+        };
+        let ids: Vec<u64> = open
+            .iter()
+            .filter(|(_, (window, _))| window == label)
+            .map(|(id, _)| *id)
+            .collect();
+        let closed: Vec<Box<dyn Terminal>> = ids
+            .iter()
+            .filter_map(|id| open.remove(id))
+            .map(|(_, terminal)| terminal)
+            .collect();
+        drop(open);
+        // Closed, not merely let go of: one kept on a remote would otherwise
+        // run on there with no tab left to end it from.
+        closed.iter().for_each(|terminal| terminal.close());
+        end(closed);
+    }
+
+    fn with(&self, id: u64, act: impl FnOnce(&dyn Terminal)) {
+        if let Ok(open) = self.0.lock() {
+            if let Some((_, terminal)) = open.get(&id) {
+                act(terminal.as_ref());
+            }
+        }
+    }
+}
+
+/// End these terminals, somewhere other than here: ending one is the death
+/// of a tree of processes, and "here" is as often as not the window's thread.
+fn end(terminals: Vec<Box<dyn Terminal>>) {
+    if !terminals.is_empty() {
+        std::thread::spawn(move || drop(terminals));
+    }
+}
+
+/// A terminal that has been opened, as the page is told of it.
+#[derive(serde::Serialize)]
+pub struct Opened {
+    id: u64,
+    /// It is kept in tmux on the remote, and outlives the connection. The
+    /// page has then to leave a program's questions of its terminal to tmux.
+    kept: bool,
+}
+
+/// Start a terminal for this window, in `cwd`. Output arrives on `on_output`
+/// as raw bytes, a frame's worth to a message, and no faster than the page
+/// says it has [drawn](terminal_drawn) it; `on_exit` hears once, when the
+/// shell has ended -- or, with `true`, when it is a kept one that the
+/// connection has gone from under, and is there to be opened again by its
+/// `name` once the connection is back.
+// One argument for each thing the page sends, which is how a command takes them.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn terminal_open(
+    app: AppHandle,
+    window: WebviewWindow,
+    on_output: Channel<InvokeResponseBody>,
+    on_exit: Channel<bool>,
+    name: Option<String>,
+    cwd: Option<String>,
+    shell: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> Result<Opened, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    let label = window.label().to_owned();
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+
+    let on_data = move |chunk: &[u8]| {
+        // A channel that refuses is a page that has gone.
+        let _ = on_output.send(InvokeResponseBody::Raw(chunk.to_vec()));
+    };
+    let ended = {
+        let app = app.clone();
+        move |left: bool| {
+            let holds = app
+                .state::<Terminals>()
+                .take(id)
+                .map_or(0, |terminal| terminal.flow().holds());
+            let _ = on_exit.send(left);
+            tracing::info!(
+                target: "tide::terminal",
+                "{} #{id}, having waited for the screen {holds} times",
+                if left { "LEFT" } else { "ENDED" }
+            );
+        }
+    };
+
+    let config = stored_config().terminal;
+    let link = app.state::<Remotes>().of(&window);
+    // Kept in tmux, where the remote has it and the config has not said no.
+    let kept = match (&link, &name) {
+        (Some(link), Some(_)) if config.persist => {
+            *link.keeps.get_or_init(|| link.remote.prepare_kept()).await
+        }
+        _ => false,
+    };
+
+    // Wherever the window is working: a shell there, not here, when it is
+    // connected to a remote.
+    let spawned: Box<dyn Terminal> = match link {
+        Some(link) if kept => Box::new(
+            link.remote
+                .kept_shell(
+                    (name.as_deref().unwrap_or_default(), cwd.as_deref()),
+                    cols,
+                    rows,
+                    config.scrollback,
+                    on_data,
+                    ended,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        Some(link) => Box::new(
+            link.remote
+                .shell(cwd.as_deref(), cols, rows, on_data, move || ended(false))
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        None => {
+            let options = terminal::Options {
+                // The one asked for, where one was: otherwise the config's.
+                shell: shell.unwrap_or(config.shell),
+                cwd: cwd.map(Into::into),
+                cols,
+                rows,
+            };
+            Box::new(
+                LocalTerminal::spawn(options, on_data, move || ended(false))
+                    .map_err(|e| e.to_string())?,
+            )
+        }
+    };
+
+    tracing::info!(
+        target: "tide::terminal",
+        "OPENED #{id} in {label} {cols}x{rows}{}",
+        if kept { ", kept" } else { "" }
+    );
+    if let Ok(mut open) = app.state::<Terminals>().0.lock() {
+        open.insert(id, (label, spawned));
+    }
+    Ok(Opened { id, kept })
+}
+
+/// End kept terminals whose tabs were closed while the connection was down,
+/// by the names they were opened under.
+#[tauri::command]
+pub async fn terminal_forget(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    names: Vec<String>,
+) -> Result<(), String> {
+    if let Some(link) = remotes.of(&window) {
+        link.remote.forget_kept(&names).await;
+    }
+    Ok(())
+}
+
+/// The shells installed on this machine, to open a terminal with. A window
+/// on a remote has the remote's own login shell and nothing to choose from.
+#[tauri::command]
+pub async fn terminal_shells(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<Vec<terminal::Shell>, String> {
+    Ok(match remotes.of(&window) {
+        Some(_) => Vec::new(),
+        // Off the main thread: it runs `wsl.exe` to ask what there is.
+        None => terminal::shells(),
+    })
+}
+
+/// Open a web address in the browser. For links clicked in a terminal, so
+/// only what is plainly a web address: this is not a way to run things.
+#[tauri::command]
+pub fn open_external(url: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    if !web || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!("{url} is not a web address"));
+    }
+    std::process::Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("could not open {url}: {e}"))
+}
+
+// Not `async`, unlike the rest: these run in the order they were sent, which
+// is the order the keys were pressed. That puts them on the window's own
+// thread, so none does more than queue something or count it.
+
+/// What was typed, or pasted, as the terminal emulator encoded it.
+#[tauri::command]
+pub fn terminal_write(terminals: State<'_, Terminals>, id: u64, data: String) {
+    terminals.with(id, |terminal| terminal.write(data.as_bytes()));
+}
+
+#[tauri::command]
+pub fn terminal_resize(terminals: State<'_, Terminals>, id: u64, cols: u16, rows: u16) {
+    terminals.with(id, |terminal| terminal.resize(cols, rows));
+}
+
+/// The page has drawn `bytes` more of a terminal's output. This is what lets
+/// its shell be read from again once it has printed more than can be drawn.
+#[tauri::command]
+pub fn terminal_drawn(terminals: State<'_, Terminals>, id: u64, bytes: u64) {
+    terminals.with(id, |terminal| terminal.flow().drawn(bytes));
+}
+
+/// End a terminal and everything running in it. Nothing happens if it has
+/// already gone.
+#[tauri::command]
+pub fn terminal_close(terminals: State<'_, Terminals>, id: u64) {
+    let closed: Vec<Box<dyn Terminal>> = terminals.take(id).into_iter().collect();
+    closed.iter().for_each(|terminal| terminal.close());
+    end(closed);
+}
+
+// --- tmux -----------------------------------------------------------------------
+//
+// The other face of a window on a remote: its tmux sessions, drawn as the
+// window's own tabs and panes. One attachment to a window, on the connection
+// the window already has. Ending one detaches and nothing more: the sessions
+// are the remote's, and are there to come back to.
+
+/// Each window's attachment to tmux, by window label, with a number to tell
+/// it from the one before it.
+#[derive(Default)]
+pub struct Tmuxes(Mutex<HashMap<String, (u64, Arc<RemoteTmux>)>>);
+
+impl Tmuxes {
+    fn of(&self, window: &WebviewWindow) -> Option<Arc<RemoteTmux>> {
+        let open = self.0.lock().ok()?;
+        open.get(window.label()).map(|(_, tmux)| Arc::clone(tmux))
+    }
+
+    /// The window has gone, or its page has been reloaded, or it has left
+    /// the remote: detach.
+    pub fn close_window(&self, label: &str) {
+        let closed = self.0.lock().ok().and_then(|mut open| open.remove(label));
+        drop(closed);
+    }
+
+    /// An attachment has ended by itself. Only if it is still the window's:
+    /// the window may have attached again since.
+    fn ended(&self, label: &str, id: u64) {
+        if let Ok(mut open) = self.0.lock() {
+            if open.get(label).is_some_and(|(current, _)| *current == id) {
+                open.remove(label);
+            }
+        }
+    }
+}
+
+/// The tmux sessions on the remote this window is connected to.
+#[tauri::command]
+pub async fn tmux_sessions(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<tmux::Listing, String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    link.remote.tmux_sessions().await.map_err(|e| e.to_string())
+}
+
+/// Attach this window to a tmux session: `session` if one is named, and a
+/// new one, called `name` if that is not empty, otherwise.
+///
+/// Everything arrives on `on_event`, in order: what there is as JSON, and
+/// what a pane printed as raw bytes, the pane's number in the first four.
+/// Its last message says the attachment has ended.
+#[tauri::command]
+pub async fn tmux_open(
+    app: AppHandle,
+    window: WebviewWindow,
+    on_event: Channel<InvokeResponseBody>,
+    session: Option<u32>,
+    name: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    let link = app
+        .state::<Remotes>()
+        .of(&window)
+        .ok_or("This window is not connected.")?;
+    let label = window.label().to_owned();
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let start = match session {
+        Some(session) => tmux::Start::Attach(session),
+        None => tmux::Start::New(name.unwrap_or_default()),
+    };
+
+    let json = |value: serde_json::Value| InvokeResponseBody::Json(value.to_string());
+    let heard = {
+        let on_event = on_event.clone();
+        move |event: tmux::Event| {
+            // A channel that refuses is a page that has gone.
+            let _ = on_event.send(match event {
+                tmux::Event::Output { pane, data } => {
+                    let mut bytes = Vec::with_capacity(4 + data.len());
+                    bytes.extend_from_slice(&pane.to_le_bytes());
+                    bytes.extend_from_slice(&data);
+                    InvokeResponseBody::Raw(bytes)
+                }
+                tmux::Event::State(state) => {
+                    json(serde_json::json!({ "type": "state", "state": state }))
+                }
+                tmux::Event::Sizes(panes) => {
+                    json(serde_json::json!({ "type": "sizes", "panes": panes }))
+                }
+                tmux::Event::Error(message) => {
+                    json(serde_json::json!({ "type": "error", "message": message }))
+                }
+            });
+        }
+    };
+    let ended = {
+        let (app, label) = (app.clone(), label.clone());
+        move |ended: tmux::Ended| {
+            app.state::<Tmuxes>().ended(&label, id);
+            tracing::info!(
+                target: "tide::tmux",
+                "ENDED #{id} in {label}: {}",
+                ended.reason.as_deref().unwrap_or("detached")
+            );
+            let _ = on_event.send(json(serde_json::json!({ "type": "exit", "ended": ended })));
+        }
+    };
+
+    let history = stored_config().terminal.scrollback;
+    let attached = link
+        .remote
+        .tmux(start, cols, rows, history, heard, ended)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!(target: "tide::tmux", "OPENED #{id} in {label} {cols}x{rows}");
+    let replaced = app
+        .state::<Tmuxes>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut open| open.insert(label, (id, Arc::new(attached))));
+    drop(replaced);
+    Ok(())
+}
+
+// Not `async`, as a terminal's are not: what is typed arrives in the order
+// it was typed, and none of these does more than queue something.
+
+/// Something the page asks of tmux: keys for a pane, a split, a new window.
+#[tauri::command]
+pub fn tmux_do(window: WebviewWindow, tmuxes: State<'_, Tmuxes>, action: tmux::Action) {
+    if let Some(attached) = tmuxes.of(&window) {
+        attached.act(action);
+    }
+}
+
+/// The page has drawn `bytes` more of what the panes printed.
+#[tauri::command]
+pub fn tmux_drawn(window: WebviewWindow, tmuxes: State<'_, Tmuxes>, bytes: u64) {
+    if let Some(attached) = tmuxes.of(&window) {
+        attached.flow().drawn(bytes);
+    }
+}
+
+/// Detach this window from tmux. The sessions carry on.
+#[tauri::command]
+pub fn tmux_close(window: WebviewWindow, tmuxes: State<'_, Tmuxes>) {
+    tmuxes.close_window(window.label());
+}
+
+// --- how busy the remote is -----------------------------------------------------
+//
+// For the bottom bar, while the window shows tmux: a build is what is run
+// there, and how hard the machine is working is what there is to say of one.
+
+/// Each window's watch on its remote, by window label.
+#[derive(Default)]
+pub struct Stats(Mutex<HashMap<String, RemoteStats>>);
+
+impl Stats {
+    /// Stop watching for a window: it has gone, or turned away, or left the remote.
+    pub fn close_window(&self, label: &str) {
+        let closed = self.0.lock().ok().and_then(|mut open| open.remove(label));
+        drop(closed);
+    }
+}
+
+/// Start saying how busy this window's remote is, every couple of seconds,
+/// in place of any watch the window already had.
+#[tauri::command]
+pub async fn sysinfo_start(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    stats: State<'_, Stats>,
+    on_sample: Channel<sysinfo::Sample>,
+) -> Result<(), String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    let watch = link
+        .remote
+        .watch_system(move |sample| {
+            // A channel that refuses is a page that has gone.
+            let _ = on_sample.send(sample);
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let replaced = stats
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut open| open.insert(window.label().to_owned(), watch));
+    drop(replaced);
+    Ok(())
+}
+
+/// Send a signal to something running in a tmux pane's shell on this
+/// window's remote: `INT`, `TERM` or `KILL`. `shell` is the pane's shell.
+#[tauri::command]
+pub async fn remote_signal(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+    pid: u32,
+    shell: u32,
+    signal: String,
+) -> Result<(), String> {
+    let link = remotes.of(&window).ok_or("This window is not connected.")?;
+    tracing::info!(target: "tide::tmux", "SIGNAL {signal} to {pid} on {}", link.info.label);
+    link.remote
+        .signal(pid, shell, &signal)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn sysinfo_stop(window: WebviewWindow, stats: State<'_, Stats>) {
+    stats.close_window(window.label());
+}
+
+// --- language servers ---------------------------------------------------------
+//
+// Each one is a program wherever its window is working -- this machine, or
+// the remote it is connected to -- started when the window first opens a file
+// in a language the server knows, and ended with the window.
+// Messages go through here whole and unread: what they say is between the
+// page and the server.
+
+/// Every running language server, by id, with the label of its window.
+#[derive(Default)]
+pub struct Servers(Mutex<HashMap<u64, Running>>);
+
+/// A server, with the label of the window it is for.
+type Running = (String, Arc<dyn lsp::Serving>);
+
+impl Servers {
+    /// Take a server out. Dropping what comes back is what ends it, and is
+    /// left to the caller so that it happens outside the lock.
+    fn take(&self, id: u64) -> Option<Arc<dyn lsp::Serving>> {
+        let (_, server) = self.0.lock().ok()?.remove(&id)?;
+        Some(server)
+    }
+
+    /// The window has gone, or its page has been reloaded and can no longer
+    /// reach them: its servers go too.
+    pub fn close_window(&self, label: &str) {
+        let Ok(mut open) = self.0.lock() else {
+            return;
+        };
+        let ids: Vec<u64> = open
+            .iter()
+            .filter(|(_, (window, _))| window == label)
+            .map(|(id, _)| *id)
+            .collect();
+        let closed: Vec<_> = ids.iter().filter_map(|id| open.remove(id)).collect();
+        drop(open);
+        drop(closed);
+    }
+}
+
+/// The language servers Tide knows of, and which of them are installed
+/// where this window is working: here, or on its remote.
+#[tauri::command]
+pub async fn lsp_catalog(
+    window: WebviewWindow,
+    remotes: State<'_, Remotes>,
+) -> Result<Vec<lsp::Info>, String> {
+    Ok(match remotes.of(&window) {
+        Some(link) => link.remote.servers().await,
+        // Off the main thread: it looks along the whole of PATH for each one.
+        None => lsp::catalog(),
+    })
+}
+
+/// Start a language server for this window, in `cwd`. Each message it sends
+/// arrives on `on_message`; `on_exit` hears once, when it has ended.
+#[tauri::command]
+pub async fn lsp_start(
+    app: AppHandle,
+    window: WebviewWindow,
+    server: String,
+    cwd: Option<String>,
+    on_message: Channel<String>,
+    on_exit: Channel<()>,
+) -> Result<u64, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let ended = {
+        let app = app.clone();
+        move || {
+            drop(app.state::<Servers>().take(id));
+            let _ = on_exit.send(());
+            tracing::info!(target: "tide::lsp", "ENDED #{id}");
+        }
+    };
+    let heard = move |message: &str| {
+        // A channel that refuses is a page that has gone.
+        let _ = on_message.send(message.to_owned());
+    };
+    // Where the files are: the paths a window on a remote has open are the
+    // remote's, and a server here could make nothing of them.
+    let spawned: Arc<dyn lsp::Serving> = match app.state::<Remotes>().of(&window) {
+        Some(link) => Arc::new(
+            link.remote
+                .serve(&server, cwd.as_deref(), heard, ended)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        None => Arc::new(
+            lsp::Server::spawn(&server, cwd.as_deref().map(Path::new), heard, ended)
+                .map_err(|e| e.to_string())?,
+        ),
+    };
+
+    tracing::info!(target: "tide::lsp", "STARTED #{id} {server} in {}", window.label());
+    if let Ok(mut open) = app.state::<Servers>().0.lock() {
+        open.insert(id, (window.label().to_owned(), spawned));
+    }
+    Ok(id)
+}
+
+/// One message for a server, as JSON. Not `async`: they are written in the
+/// order they were sent.
+#[tauri::command]
+pub fn lsp_send(servers: State<'_, Servers>, id: u64, message: String) {
+    // Written outside the lock, which a server slow to read would otherwise
+    // hold against every other one.
+    let server = servers
+        .0
+        .lock()
+        .ok()
+        .and_then(|open| open.get(&id).map(|(_, server)| server.clone()));
+    if let Some(server) = server {
+        server.send(&message);
+    }
+}
+
+/// End a language server. Nothing happens if it has already gone.
+#[tauri::command]
+pub fn lsp_stop(servers: State<'_, Servers>, id: u64) {
+    drop(servers.take(id));
+}
+
+// --- pins -------------------------------------------------------------------
+//
+// The strip along the bottom of the window. Every command returns the whole
+// strip, so the UI never has to guess what changed.
+
+#[tauri::command]
+pub fn pins() -> Result<Vec<Pin>, String> {
+    Ok(PinStore::load().map_err(|e| e.to_string())?.list())
+}
+
+/// Pinning something already pinned is not an error — it refreshes the stored
+/// label and leaves the strip's length alone.
+#[tauri::command]
+pub fn add_pin(pin: Pin) -> Result<Vec<Pin>, String> {
+    let mut store = PinStore::load().map_err(|e| e.to_string())?;
+    let added = store.add(pin.clone());
+    store.save().map_err(|e| e.to_string())?;
+
+    if added {
+        tracing::info!(target: "tide::pins", "PINNED {} {}", pin.kind, pin.target);
+    }
+    Ok(store.list())
+}
+
+/// Drop a pin at a new position on the strip (drag to reorder).
+///
+/// `index` counts in the list as it will be *after* the move, which is what the
+/// drag already knows: the gap it was released over.
+#[tauri::command]
+pub fn move_pin(kind: String, target: String, index: usize) -> Result<Vec<Pin>, String> {
+    let mut store = PinStore::load().map_err(|e| e.to_string())?;
+    if store.move_to(&kind, &target, index) {
+        store.save().map_err(|e| e.to_string())?;
+        tracing::info!(target: "tide::pins", "PIN_MOVED {kind} {target} -> {index}");
+    }
+    Ok(store.list())
+}
+
+#[tauri::command]
+pub fn remove_pin(kind: String, target: String) -> Result<Vec<Pin>, String> {
+    let mut store = PinStore::load().map_err(|e| e.to_string())?;
+    if store.remove(&kind, &target) {
+        store.save().map_err(|e| e.to_string())?;
+        tracing::info!(target: "tide::pins", "UNPINNED {kind} {target}");
+    }
+    Ok(store.list())
+}

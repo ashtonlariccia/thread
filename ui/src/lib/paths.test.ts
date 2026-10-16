@@ -4,8 +4,8 @@ import { baseName, dirName, samePath, segmentsBelow } from "./paths";
 
 describe("dirName", () => {
   it("drops the last component, with either slash", () => {
-    expect(dirName("C:\\src\\thread\\main.rs")).toBe("C:\\src\\thread");
-    expect(dirName("C:/src/thread/main.rs")).toBe("C:/src/thread");
+    expect(dirName("C:\\src\\tide\\main.rs")).toBe("C:\\src\\tide");
+    expect(dirName("C:/src/tide/main.rs")).toBe("C:/src/tide");
   });
 
   it("keeps the slash of a drive root", () => {
@@ -51,8 +51,8 @@ describe("segmentsBelow", () => {
 
 describe("baseName", () => {
   it("takes the last component with either slash", () => {
-    expect(baseName("C:\\src\\thread\\main.rs")).toBe("main.rs");
-    expect(baseName("C:/src/thread/main.rs")).toBe("main.rs");
+    expect(baseName("C:\\src\\tide\\main.rs")).toBe("main.rs");
+    expect(baseName("C:/src/tide/main.rs")).toBe("main.rs");
     expect(baseName("C:\\src/mixed\\main.rs")).toBe("main.rs");
   });
 

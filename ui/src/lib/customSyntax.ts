@@ -1,6 +1,6 @@
 /**
  * Languages of the user's own: a tokeniser built from a description in the
- * config (`[syntax.<name>]`) rather than from a grammar shipped with Thread.
+ * config (`[syntax.<name>]`) rather than from a grammar shipped with Tide.
  *
  * The description is lists of words and a few delimiters, which is what most
  * of a language's colouring comes down to, and regular expressions for the

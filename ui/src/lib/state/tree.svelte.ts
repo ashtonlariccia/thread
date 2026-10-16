@@ -103,7 +103,7 @@ export class Tree {
    * that is already open is unfolded rather than added twice.
    */
   async open(path: string, { quiet = false } = {}) {
-    // `C:\src\thread\` and `C:\src\thread` are the same folder, and only one
+    // `C:\src\tide\` and `C:\src\tide` are the same folder, and only one
     // of them has a last component to name it by.
     const trimmed = path.length > 3 ? path.replace(/[\\/]+$/, "") : path;
 
@@ -116,7 +116,7 @@ export class Tree {
     const error = await this.#load(trimmed);
     if (error !== null) {
       this.#forget(trimmed);
-      if (!quiet) void message(error, { title: "Thread", kind: "error" });
+      if (!quiet) void message(error, { title: "Tide", kind: "error" });
       return;
     }
     this.#open[trimmed] = true;

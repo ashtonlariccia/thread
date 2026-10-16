@@ -97,6 +97,6 @@
     animation-timing-function: ease-in-out !important;
   }
   .term :global(.xterm-cursor.xterm-cursor-blink.xterm-cursor-underline) {
-    animation-name: thread-underline-fade !important;
+    animation-name: tide-underline-fade !important;
   }
 </style>

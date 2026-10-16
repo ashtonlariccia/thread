@@ -1,0 +1,1017 @@
+//! Terminals: a shell on this machine, and the seam a remote one will fit.
+//!
+//! A local terminal is a shell behind a Windows pseudoconsole (ConPTY), driven
+//! through the OS API directly. That is a few hundred lines against a
+//! dependency that would pull in a dozen crates to do the same calls.
+//!
+//! The window knows a terminal only as a [`Terminal`]: something to write to
+//! and resize, that ends when it is dropped. A shell on a remote host is a
+//! second implementation of that, not a change to anything that uses it.
+
+use std::ffi::{c_void, OsStr};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::System::Console::{
+    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
+};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
+use windows::Win32::System::Threading::{
+    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, ResumeThread,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
+};
+
+use crate::{Error, Result};
+
+/// A running terminal, wherever its shell is. Dropping it ends the shell.
+///
+/// None of these waits on the shell, or on anything else: they are called
+/// from the window's own thread.
+pub trait Terminal: Send {
+    /// Send input. Returns once it is queued, not once the shell has read it.
+    fn write(&self, data: &[u8]);
+    /// Returns once it is queued, behind whatever input was sent before it.
+    fn resize(&self, cols: u16, rows: u16);
+    /// How much of its output is still on its way to the screen.
+    fn flow(&self) -> &Flow;
+    /// Its tab has been closed. For most, dropping it is all there is to
+    /// that; one that would otherwise outlive being dropped ends here.
+    fn close(&self) {}
+}
+
+/// Output on its way to the screen that makes the shell wait for the screen.
+const HIGH_WATER: u64 = 256 * 1024;
+/// How far that has to fall before the shell is read from again.
+const LOW_WATER: u64 = 64 * 1024;
+/// The least time between two pieces of output: about half a frame. What
+/// arrives inside it goes over as one piece, which is what keeps a flood from
+/// being ten thousand messages a second to the window.
+pub(crate) const FRAME: Duration = Duration::from_millis(8);
+
+/// The output of one terminal that has been sent and not yet drawn.
+///
+/// A program can print faster than a screen can draw. Nothing in between
+/// says so by itself: the output queues on the window, without limit, until
+/// the window is doing nothing else. So whatever reads the shell counts what
+/// it [`sent`](Flow::sent), the screen says what it has
+/// [`drawn`](Flow::drawn), and past [`HIGH_WATER`] the reading stops. A shell
+/// that is not being read from fills its pipe and waits, as it would behind
+/// any slow terminal.
+#[derive(Default)]
+pub struct Flow {
+    level: Mutex<Level>,
+    eased: Condvar,
+    /// The same news as `eased`, for a reader that is a task and not a thread.
+    eased_async: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct Level {
+    pending: u64,
+    /// Since when the reader has been waiting, if it is.
+    held: Option<Instant>,
+    /// How many times it has had to. For the log.
+    holds: u64,
+    /// The terminal has gone: nothing is drawing, and nothing should wait.
+    released: bool,
+}
+
+impl Flow {
+    /// The reader handed this much on.
+    pub fn sent(&self, bytes: usize) {
+        if let Ok(mut level) = self.level.lock() {
+            level.pending += bytes as u64;
+        }
+    }
+
+    /// The screen has drawn this much more.
+    pub fn drawn(&self, bytes: u64) {
+        let Ok(mut level) = self.level.lock() else {
+            return;
+        };
+        level.pending = level.pending.saturating_sub(bytes);
+        if level.held.is_some() && level.pending <= LOW_WATER {
+            level.held = None;
+            drop(level);
+            self.wake();
+        }
+    }
+
+    /// Nothing waits from here on. For a terminal that is closing, whose
+    /// reader has still to see the end of the output and say so.
+    pub fn release(&self) {
+        if let Ok(mut level) = self.level.lock() {
+            level.released = true;
+            level.held = None;
+        }
+        self.wake();
+    }
+
+    /// Block for as long as the screen is too far behind.
+    pub fn wait(&self) {
+        let Ok(mut level) = self.level.lock() else {
+            return;
+        };
+        level.check();
+        while level.held.is_some() {
+            match self.eased.wait(level) {
+                Ok(next) => level = next,
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// [`Flow::wait`], for a task.
+    pub async fn ready(&self) {
+        loop {
+            // Listening before looking, so that being let go between the two
+            // is not missed.
+            let eased = self.eased_async.notified();
+            tokio::pin!(eased);
+            eased.as_mut().enable();
+            if !self.holding() {
+                return;
+            }
+            eased.await;
+        }
+    }
+
+    /// Whether the reader is to wait, starting to if it is time.
+    fn holding(&self) -> bool {
+        self.level.lock().is_ok_and(|mut level| {
+            level.check();
+            level.held.is_some()
+        })
+    }
+
+    /// What has been sent and not drawn, in bytes.
+    pub fn pending(&self) -> u64 {
+        self.level.lock().map_or(0, |level| level.pending)
+    }
+
+    /// How long the shell has been kept waiting for the screen, if it is.
+    pub fn held_for(&self) -> Option<Duration> {
+        let held = self.level.lock().ok()?.held?;
+        Some(held.elapsed())
+    }
+
+    /// How many times the shell has been made to wait.
+    pub fn holds(&self) -> u64 {
+        self.level.lock().map_or(0, |level| level.holds)
+    }
+
+    fn wake(&self) {
+        self.eased.notify_all();
+        self.eased_async.notify_waiters();
+    }
+}
+
+impl Level {
+    /// Start holding, if the screen has fallen far enough behind.
+    fn check(&mut self) {
+        if self.held.is_none() && !self.released && self.pending >= HIGH_WATER {
+            self.held = Some(Instant::now());
+            self.holds += 1;
+        }
+    }
+}
+
+/// How to start a local shell.
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// The command line to run. Empty means [`default_shell`].
+    pub shell: String,
+    /// Where the shell starts. A folder that is not there falls back to home.
+    pub cwd: Option<PathBuf>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// The command line for the shell to use when the config names none:
+/// PowerShell 7 where it is installed, Windows PowerShell otherwise.
+pub fn default_shell() -> String {
+    let dir = |var: &str, fallback: &str| {
+        std::env::var_os(var)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(fallback))
+    };
+    let system = dir("SystemRoot", r"C:\Windows").join("System32");
+
+    let on_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join("pwsh.exe"));
+
+    std::iter::once(dir("ProgramFiles", r"C:\Program Files").join(r"PowerShell\7\pwsh.exe"))
+        .chain(on_path)
+        .chain([system.join(r"WindowsPowerShell\v1.0\powershell.exe")])
+        .find(|candidate| candidate.is_file())
+        .map(|shell| format!("\"{}\" -NoLogo", shell.display()))
+        .unwrap_or_else(|| system.join("cmd.exe").display().to_string())
+}
+
+/// A shell there is to run: what to call it, and the command line that runs it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Shell {
+    pub name: String,
+    pub command: String,
+}
+
+/// The shells installed on this machine, for choosing between: both
+/// PowerShells, the command prompt, Git's bash, and each WSL distribution.
+pub fn shells() -> Vec<Shell> {
+    let dir = |var: &str, fallback: &str| {
+        std::env::var_os(var)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(fallback))
+    };
+    let system = dir("SystemRoot", r"C:\Windows").join("System32");
+    let programs = dir("ProgramFiles", r"C:\Program Files");
+    let quoted = |path: &Path, rest: &str| format!("\"{}\"{rest}", path.display());
+
+    let pwsh = std::iter::once(programs.join(r"PowerShell\7\pwsh.exe"))
+        .chain(crate::lsp::locate("pwsh"))
+        .find(|candidate| candidate.is_file());
+    let candidates = [
+        ("PowerShell", pwsh, " -NoLogo"),
+        (
+            "Windows PowerShell",
+            Some(system.join(r"WindowsPowerShell\v1.0\powershell.exe")),
+            " -NoLogo",
+        ),
+        ("Command Prompt", Some(system.join("cmd.exe")), ""),
+        (
+            "Git Bash",
+            Some(programs.join(r"Git\bin\bash.exe")),
+            " --login -i",
+        ),
+    ];
+
+    let mut found: Vec<Shell> = candidates
+        .into_iter()
+        .filter_map(|(name, path, rest)| {
+            let path = path.filter(|path| path.is_file())?;
+            Some(Shell {
+                name: name.into(),
+                command: quoted(&path, rest),
+            })
+        })
+        .collect();
+
+    let wsl = system.join("wsl.exe");
+    if wsl.is_file() {
+        found.extend(distributions(&wsl).into_iter().map(|distro| Shell {
+            command: quoted(&wsl, &format!(" -d {distro}")),
+            name: format!("WSL: {distro}"),
+        }));
+    }
+    found
+}
+
+/// The WSL distributions installed, as `wsl.exe` lists them.
+fn distributions(wsl: &Path) -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    /// No console window for the moment it takes to ask.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let Ok(output) = std::process::Command::new(wsl)
+        .args(["--list", "--quiet"])
+        .stdin(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    distribution_names(&output.stdout)
+}
+
+/// The names in what `wsl.exe --list --quiet` prints, which is UTF-16: one
+/// to a line. Names with anything in them a command line would trip on are
+/// left out rather than quoted and hoped for.
+fn distribution_names(listing: &[u8]) -> Vec<String> {
+    let units: Vec<u16> = listing
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
+        .lines()
+        .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\0'))
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A shell on this machine, behind a pseudoconsole.
+pub struct LocalTerminal {
+    /// Input is queued for a thread that owns the pipe; see [`LocalTerminal::spawn`].
+    input: mpsc::Sender<Input>,
+    flow: Arc<Flow>,
+    process: Arc<OwnedHandle>,
+    /// Closing this kills whatever the shell started and left running.
+    _job: Option<OwnedHandle>,
+}
+
+/// What is queued for the shell: what was typed, and the size of the screen
+/// it is typed at. One queue, so that each takes effect in the order sent.
+enum Input {
+    Data(Vec<u8>),
+    Resize { cols: u16, rows: u16 },
+}
+
+impl LocalTerminal {
+    /// Start a shell, handing its output to `on_data` as it arrives.
+    ///
+    /// `on_exit` runs once, after the last of the output, when the shell has
+    /// ended -- by itself or by this being dropped.
+    pub fn spawn<D, E>(options: Options, mut on_data: D, on_exit: E) -> Result<Self>
+    where
+        D: FnMut(&[u8]) + Send + 'static,
+        E: FnOnce() + Send + 'static,
+    {
+        let (input_read, input_write) = pipe(0)?;
+        // Room for what is printed while the screen is being waited for, so
+        // that a short wait is not one the program feels.
+        let (output_read, output_write) = pipe(READ)?;
+
+        // SAFETY: both handles are live pipe ends for the duration of the call.
+        let console = unsafe {
+            CreatePseudoConsole(
+                size(options.cols, options.rows),
+                raw(&input_read),
+                raw(&output_write),
+                0,
+            )
+        }
+        .map(|hpc| Arc::new(Console(Mutex::new(Some(hpc)))))
+        .map_err(os)?;
+        // The pseudoconsole has its own copies of these now. Ours must go, or
+        // the output pipe never reports the end when the console closes.
+        drop((input_read, output_write));
+
+        let (process, job) = launch(&options, &console)?;
+        let process = Arc::new(process);
+
+        // The console host writes a few kilobytes at a time, and a message to
+        // the window for each would be thousands a second under a flood. So
+        // what is handed to `on_data` is what arrived in a frame, or a full
+        // buffer of it. After a quiet spell the frame is long over: what was
+        // typed is echoed the moment it arrives, and only what follows on its
+        // heels is held back to go together.
+        let flow = Arc::new(Flow::default());
+        let mut output = File::from(output_read);
+        thread::spawn({
+            let flow = Arc::clone(&flow);
+            move || {
+                let mut buf = vec![0u8; READ as usize];
+                let mut sent: Option<Instant> = None;
+                loop {
+                    flow.wait();
+                    let Ok(mut n @ 1..) = output.read(&mut buf) else {
+                        break;
+                    };
+                    let rest = sent.and_then(|at| FRAME.checked_sub(at.elapsed()));
+                    let began = Instant::now();
+                    while n < buf.len() && rest.is_some_and(|rest| began.elapsed() < rest) {
+                        // Only ever a read of what is already there: one that
+                        // waited would sit on what has been gathered so far.
+                        match waiting(&output) {
+                            Some(0) => thread::sleep(Duration::from_millis(1)),
+                            Some(_) => match output.read(&mut buf[n..]) {
+                                Ok(more @ 1..) => n += more,
+                                _ => break,
+                            },
+                            None => break,
+                        }
+                    }
+                    flow.sent(n);
+                    on_data(&buf[..n]);
+                    sent = Some(Instant::now());
+                }
+                on_exit();
+            }
+        });
+
+        // The end is the *process* ending, not the output pipe: the
+        // pseudoconsole holds that open for as long as it lives, so a shell
+        // that ran `exit` would otherwise look exactly like one that hung.
+        // Closing the console here is what ends the read above.
+        thread::spawn({
+            let (console, process) = (Arc::clone(&console), Arc::clone(&process));
+            move || {
+                // SAFETY: the handle is kept alive by the `Arc` held here.
+                unsafe { WaitForSingleObject(raw(&process), INFINITE) };
+                console.close();
+            }
+        });
+
+        // Writes are queued rather than made by the caller: a program that has
+        // stopped reading its input fills the pipe, and the write that then
+        // blocks would otherwise be on the window's own thread. A new size
+        // goes the same way, being a call into the console host.
+        let (input, queued) = mpsc::channel::<Input>();
+        let mut pipe = File::from(input_write);
+        thread::spawn({
+            let console = Arc::clone(&console);
+            move || {
+                let mut next = queued.recv().ok();
+                while let Some(input) = next.take() {
+                    match input {
+                        Input::Resize { cols, rows } => console.resize(cols, rows),
+                        Input::Data(mut data) => {
+                            // A paste arrives in pieces; whatever is waiting
+                            // goes together, up to a change of size.
+                            while let Ok(more) = queued.try_recv() {
+                                match more {
+                                    Input::Data(more) => data.extend_from_slice(&more),
+                                    resize => {
+                                        next = Some(resize);
+                                        break;
+                                    }
+                                }
+                            }
+                            if pipe.write_all(&data).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    if next.is_none() {
+                        next = queued.recv().ok();
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            input,
+            flow,
+            process,
+            _job: job,
+        })
+    }
+}
+
+impl Terminal for LocalTerminal {
+    fn write(&self, data: &[u8]) {
+        // Refused only once the shell has gone, which is not worth reporting.
+        let _ = self.input.send(Input::Data(data.to_vec()));
+    }
+
+    fn resize(&self, cols: u16, rows: u16) {
+        let _ = self.input.send(Input::Resize { cols, rows });
+    }
+
+    fn flow(&self) -> &Flow {
+        &self.flow
+    }
+}
+
+impl Drop for LocalTerminal {
+    fn drop(&mut self) {
+        // Its tab has gone, so nothing is left to say the output was drawn.
+        self.flow.release();
+        // The shell here; what it started goes when the job closes after this.
+        // SAFETY: the handle is owned by `self`.
+        let _ = unsafe { TerminateProcess(raw(&self.process), 1) };
+    }
+}
+
+/// The pseudoconsole, closed once and never used after.
+struct Console(Mutex<Option<HPCON>>);
+
+impl Console {
+    fn resize(&self, cols: u16, rows: u16) {
+        if let Ok(guard) = self.0.lock() {
+            if let Some(hpc) = *guard {
+                // SAFETY: `hpc` is open for as long as it is in the mutex.
+                let _ = unsafe { ResizePseudoConsole(hpc, size(cols, rows)) };
+            }
+        }
+    }
+
+    fn close(&self) {
+        let hpc = self.0.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(hpc) = hpc {
+            // SAFETY: taken out of the mutex, so this is the only close.
+            unsafe { ClosePseudoConsole(hpc) };
+        }
+    }
+}
+
+impl Drop for Console {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Start the shell attached to `console`, inside a job of its own.
+fn launch(options: &Options, console: &Console) -> Result<(OwnedHandle, Option<OwnedHandle>)> {
+    let hpc = console
+        .0
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+        .ok_or_else(|| Error::Other(anyhow::anyhow!("the console closed before the shell ran")))?;
+
+    // The attribute list is an opaque block whose size is asked for first; the
+    // sizing call fails by design. `usize`s so the block is pointer-aligned.
+    let mut bytes = 0usize;
+    // SAFETY: a null list with a size out-pointer is the documented sizing form.
+    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut bytes) };
+    let mut block = vec![0usize; bytes.div_ceil(size_of::<usize>())];
+    let attributes = LPPROC_THREAD_ATTRIBUTE_LIST(block.as_mut_ptr().cast());
+
+    // SAFETY: `block` is at least `bytes` long and outlives the list.
+    unsafe { InitializeProcThreadAttributeList(Some(attributes), 1, None, &mut bytes) }
+        .map_err(os)?;
+    // SAFETY: for this attribute the value is the console handle itself.
+    let attached = unsafe {
+        UpdateProcThreadAttribute(
+            attributes,
+            0,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+            Some(hpc.0 as *const c_void),
+            size_of::<HPCON>(),
+            None,
+            None,
+        )
+    };
+
+    let startup = STARTUPINFOEXW {
+        StartupInfo: STARTUPINFOW {
+            cb: size_of::<STARTUPINFOEXW>() as u32,
+            // Explicitly no standard handles. Left unsaid, a Tide started
+            // from a console or with its output redirected hands *those* to
+            // the shell, which then talks to them instead of the pseudoconsole.
+            dwFlags: STARTF_USESTDHANDLES,
+            hStdInput: INVALID_HANDLE_VALUE,
+            hStdOutput: INVALID_HANDLE_VALUE,
+            hStdError: INVALID_HANDLE_VALUE,
+            ..Default::default()
+        },
+        lpAttributeList: attributes,
+    };
+
+    let shell = match options.shell.trim() {
+        "" => default_shell(),
+        shell => shell.to_owned(),
+    };
+    // CreateProcess may write to the command line it is given.
+    let mut command = wide(OsStr::new(&shell));
+    let cwd = wide(start_dir(options.cwd.as_deref()).as_os_str());
+    let environment = environment();
+    let mut info = PROCESS_INFORMATION::default();
+
+    let created = attached.and_then(|()| {
+        // SAFETY: every pointer is to a NUL-terminated buffer or a struct
+        // that lives until the call returns.
+        unsafe {
+            CreateProcessW(
+                PCWSTR::null(),
+                Some(PWSTR(command.as_mut_ptr())),
+                None,
+                None,
+                false,
+                // Suspended, so it is in its job before it can start anything
+                // that would otherwise be left outside it.
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+                Some(environment.as_ptr().cast()),
+                PCWSTR(cwd.as_ptr()),
+                &startup.StartupInfo,
+                &mut info,
+            )
+        }
+    });
+    // SAFETY: initialised above, and not used again.
+    unsafe { DeleteProcThreadAttributeList(attributes) };
+    created.map_err(|e| Error::Other(anyhow::anyhow!("could not start `{shell}`: {e}")))?;
+
+    // SAFETY: CreateProcess succeeded, so both are handles this now owns.
+    let (process, main_thread) = unsafe {
+        (
+            OwnedHandle::from_raw_handle(info.hProcess.0),
+            OwnedHandle::from_raw_handle(info.hThread.0),
+        )
+    };
+
+    let job = job_for(&process)
+        .inspect_err(|e| {
+            tracing::warn!("the shell is not in a job; what it starts may outlive it: {e}")
+        })
+        .ok();
+    // SAFETY: the thread handle is owned here and still open.
+    unsafe { ResumeThread(raw(&main_thread)) };
+
+    Ok((process, job))
+}
+
+/// A job holding `process` that kills everything in it when closed.
+///
+/// Ending a shell does not end what the shell started: a build or a server it
+/// launched would carry on with nothing left to stop it from. In a job, the
+/// whole tree goes with the terminal.
+pub(crate) fn job_for(process: &OwnedHandle) -> Result<OwnedHandle> {
+    // SAFETY: no attributes and no name is the documented default form.
+    let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(os)?;
+    // SAFETY: just created, and owned from here.
+    let job = unsafe { OwnedHandle::from_raw_handle(job.0) };
+
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `limits` is the struct this information class takes.
+    unsafe {
+        SetInformationJobObject(
+            raw(&job),
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    }
+    .map_err(os)?;
+    // SAFETY: both handles are open.
+    unsafe { AssignProcessToJobObject(raw(&job), raw(process)) }.map_err(os)?;
+    Ok(job)
+}
+
+/// The folder asked for if it is there, and home if not: a shell that will not
+/// start because a folder was deleted is no use to anyone.
+fn start_dir(cwd: Option<&Path>) -> PathBuf {
+    cwd.filter(|dir| dir.is_dir())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(r"C:\"))
+}
+
+/// This process's environment, as the block CreateProcess takes, plus the one
+/// thing a program cannot work out by asking: that 24-bit colour is drawn.
+/// Without it a colourscheme falls back to its 256-colour approximation.
+fn environment() -> Vec<u16> {
+    let mut block = Vec::new();
+    for (key, value) in std::env::vars_os() {
+        if key.eq_ignore_ascii_case("COLORTERM") {
+            continue;
+        }
+        block.extend(key.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    block.extend("COLORTERM=truecolor\0".encode_utf16());
+    block.push(0);
+    block
+}
+
+/// The most of the shell's output handed over as one piece, in bytes.
+const READ: u32 = 64 * 1024;
+
+/// How much is in a pipe to be read without waiting, or `None` if it has closed.
+fn waiting(pipe: &File) -> Option<u32> {
+    let mut bytes = 0u32;
+    // SAFETY: the handle is open, and only the count is asked for.
+    unsafe {
+        PeekNamedPipe(
+            HANDLE(pipe.as_raw_handle()),
+            None,
+            0,
+            None,
+            Some(&mut bytes),
+            None,
+        )
+    }
+    .ok()?;
+    Some(bytes)
+}
+
+/// A pipe that holds `size` bytes; none asked for is the system's default.
+fn pipe(size: u32) -> Result<(OwnedHandle, OwnedHandle)> {
+    let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
+    // SAFETY: both out-pointers are to locals.
+    unsafe { CreatePipe(&mut read, &mut write, None, size) }.map_err(os)?;
+    // SAFETY: CreatePipe succeeded, so both are handles this now owns.
+    Ok(unsafe {
+        (
+            OwnedHandle::from_raw_handle(read.0),
+            OwnedHandle::from_raw_handle(write.0),
+        )
+    })
+}
+
+fn raw(handle: &OwnedHandle) -> HANDLE {
+    HANDLE(handle.as_raw_handle())
+}
+
+fn size(cols: u16, rows: u16) -> COORD {
+    // A console of no size is refused; one beyond an i16 cannot be said.
+    let fit = |n: u16| n.clamp(1, i16::MAX as u16) as i16;
+    COORD {
+        X: fit(cols),
+        Y: fit(rows),
+    }
+}
+
+fn wide(text: &OsStr) -> Vec<u16> {
+    text.encode_wide().chain([0]).collect()
+}
+
+fn os(error: windows::core::Error) -> Error {
+    Error::Io(error.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// Type `line` at a `cmd.exe` and wait for `done` to say it has finished.
+    ///
+    /// A pseudoconsole opens by asking where the cursor is (`ESC[6n`) and may
+    /// wait for the answer, which is the terminal emulator's to give; here the
+    /// test has to play that part.
+    fn run(line: &str, done: impl Fn(&str, bool) -> bool) -> String {
+        let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let exited = Arc::new(AtomicBool::new(false));
+
+        let terminal = LocalTerminal::spawn(
+            Options {
+                shell: "cmd.exe".into(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+            },
+            {
+                let seen = Arc::clone(&seen);
+                move |chunk| seen.lock().unwrap().extend_from_slice(chunk)
+            },
+            {
+                let exited = Arc::clone(&exited);
+                move || exited.store(true, Ordering::SeqCst)
+            },
+        )
+        .expect("spawn cmd.exe");
+
+        let start = Instant::now();
+        let (mut answered, mut typed) = (false, false);
+        loop {
+            let text = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+            if !answered && text.contains("\x1b[6n") {
+                terminal.write(b"\x1b[1;1R");
+                answered = true;
+            }
+            // Not held up forever by a console that never asks.
+            if !typed && (answered || start.elapsed() > Duration::from_secs(3)) {
+                terminal.write(format!("{line}\r\n").as_bytes());
+                typed = true;
+            }
+            if done(&text, exited.load(Ordering::SeqCst)) {
+                return text;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "timed out; the output was:\n{text:?}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn a_command_goes_in_and_its_output_comes_back() {
+        // Twice: once as the console echoes what was typed, once as the output.
+        run("echo tide-terminal-ok", |text, _| {
+            text.matches("tide-terminal-ok").count() >= 2
+        });
+    }
+
+    /// `exit` has to end the terminal by itself, or its tab would sit there
+    /// on a shell that has gone.
+    #[test]
+    fn exit_ends_the_terminal() {
+        run("exit", |_, exited| exited);
+    }
+
+    #[test]
+    fn dropping_a_terminal_ends_its_shell() {
+        let exited = Arc::new(AtomicBool::new(false));
+        let terminal = LocalTerminal::spawn(
+            Options {
+                shell: "cmd.exe".into(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+            },
+            |_| {},
+            {
+                let exited = Arc::clone(&exited);
+                move || exited.store(true, Ordering::SeqCst)
+            },
+        )
+        .expect("spawn cmd.exe");
+        drop(terminal);
+
+        let start = Instant::now();
+        while !exited.load(Ordering::SeqCst) {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "the shell outlived its terminal"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// What brought the window down: output printed faster than it is drawn
+    /// has to stop at the shell, not pile up on the way to the screen.
+    #[test]
+    fn a_flood_waits_for_the_screen_and_goes_on_once_it_is_drawn() {
+        let seen = Arc::new(AtomicU64::new(0));
+        let asked = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+        let terminal = LocalTerminal::spawn(
+            Options {
+                shell: "cmd.exe".into(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+            },
+            {
+                let (seen, asked) = (Arc::clone(&seen), Arc::clone(&asked));
+                move |chunk| {
+                    if chunk.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                        asked.store(true, Ordering::SeqCst);
+                    }
+                    seen.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+                }
+            },
+            {
+                let exited = Arc::clone(&exited);
+                move || exited.store(true, Ordering::SeqCst)
+            },
+        )
+        .expect("spawn cmd.exe");
+
+        // The console's opening question, answered or given up on; see `run`.
+        let start = Instant::now();
+        while !asked.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        terminal.write(b"\x1b[1;1R");
+        let line = "0123456789".repeat(7);
+        terminal.write(format!("(for /L %i in (1,1,40000) do @echo {line}) & exit\r\n").as_bytes());
+
+        // Nothing is drawn, so it has to stop -- and stay stopped.
+        let start = Instant::now();
+        while terminal.flow().held_for().is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "never held; {} bytes were let through",
+                seen.load(Ordering::SeqCst)
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        thread::sleep(Duration::from_millis(500));
+        let stopped_at = seen.load(Ordering::SeqCst);
+        assert!(
+            stopped_at < HIGH_WATER + u64::from(READ),
+            "{stopped_at} bytes got past a screen that drew none of them"
+        );
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(seen.load(Ordering::SeqCst), stopped_at, "still reading");
+        assert!(!exited.load(Ordering::SeqCst));
+
+        // Drawn as fast as it comes, it runs to the end.
+        let start = Instant::now();
+        let mut drawn = 0;
+        while !exited.load(Ordering::SeqCst) {
+            let now = seen.load(Ordering::SeqCst);
+            terminal.flow().drawn(now - drawn);
+            drawn = now;
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "the flood never finished"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(terminal.flow().holds() >= 1);
+    }
+
+    #[test]
+    fn the_screen_is_waited_for_from_the_high_mark_down_to_the_low_one() {
+        let flow = Flow::default();
+        flow.sent(HIGH_WATER as usize - 1);
+        flow.wait();
+        assert!(flow.held_for().is_none(), "held below the mark");
+
+        flow.sent(1);
+        let flow = Arc::new(flow);
+        let waiter = thread::spawn({
+            let flow = Arc::clone(&flow);
+            move || flow.wait()
+        });
+        while flow.held_for().is_none() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Not let go by the first thing drawn: it would be held again at once.
+        flow.drawn(1);
+        thread::sleep(Duration::from_millis(50));
+        assert!(!waiter.is_finished());
+
+        flow.drawn(HIGH_WATER - LOW_WATER);
+        waiter.join().unwrap();
+        assert_eq!((flow.pending(), flow.holds()), (LOW_WATER - 1, 1));
+    }
+
+    #[test]
+    fn a_terminal_that_has_gone_keeps_nothing_waiting() {
+        let flow = Arc::new(Flow::default());
+        flow.sent(HIGH_WATER as usize * 2);
+        let waiter = thread::spawn({
+            let flow = Arc::clone(&flow);
+            move || flow.wait()
+        });
+        while flow.held_for().is_none() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        flow.release();
+        waiter.join().unwrap();
+        // Nor again, for what is read after.
+        flow.wait();
+    }
+
+    #[test]
+    fn a_shell_that_does_not_exist_is_an_error_naming_it() {
+        let error = LocalTerminal::spawn(
+            Options {
+                shell: "no-such-shell-tide.exe".into(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+            },
+            |_| {},
+            || {},
+        )
+        .err()
+        .expect("nothing to start")
+        .to_string();
+        assert!(error.contains("no-such-shell-tide.exe"), "got {error}");
+    }
+
+    #[test]
+    fn a_folder_that_has_gone_falls_back_to_one_that_exists() {
+        assert!(start_dir(Some(Path::new(r"Z:\no\such\folder"))).is_dir());
+    }
+
+    #[test]
+    fn distributions_are_read_out_of_utf16_and_odd_names_left_out() {
+        let listing: Vec<u8> = "Void\r\nmain\r\n\r\nodd name\r\nUbuntu-24.04\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            distribution_names(&listing),
+            ["Void", "main", "Ubuntu-24.04"]
+        );
+    }
+
+    #[test]
+    fn the_shells_there_are_to_choose_from_are_all_installed() {
+        let found = shells();
+        // Every Windows has these two.
+        assert!(found.iter().any(|shell| shell.name == "Command Prompt"));
+        assert!(found.iter().any(|shell| shell.name == "Windows PowerShell"));
+        for shell in &found {
+            let program = shell.command.split('"').nth(1).expect("a quoted path");
+            assert!(Path::new(program).is_file(), "{} is not there", shell.name);
+        }
+    }
+
+    #[test]
+    fn the_default_shell_is_one_that_is_installed() {
+        let shell = default_shell();
+        let program = shell
+            .strip_prefix('"')
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or(&shell);
+        assert!(Path::new(program).is_file(), "got {shell}");
+    }
+}

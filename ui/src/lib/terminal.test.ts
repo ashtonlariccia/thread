@@ -8,7 +8,7 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
 import { openRequest } from "./terminal";
 
-describe("the thread command's request", () => {
+describe("the tide command's request", () => {
   it("says what to open and where", () => {
     expect(openRequest("file;/home/me/a.c")).toEqual({ kind: "file", path: "/home/me/a.c" });
     expect(openRequest("dir;/srv/my app")).toEqual({ kind: "dir", path: "/srv/my app" });

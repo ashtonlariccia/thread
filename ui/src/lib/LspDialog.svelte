@@ -4,7 +4,7 @@
    * working on (this one, or its remote), and which are switched on.
    *
    * Switching one on writes it into `[lsp] enabled` in the config, the same
-   * as adding it there by hand. Thread installs nothing, and lists nothing
+   * as adding it there by hand. Tide installs nothing, and lists nothing
    * the machine does not have.
    */
   import Dialog from "./Dialog.svelte";
@@ -109,7 +109,7 @@
   <p class="dlg-note">
     These are the language servers found on the PATH of {host ?? "this machine"}, which is
     where they run. One that is switched on starts with the first file in one of its languages,
-    and gives completion as you type and its errors at the end of the line they are on. Thread
+    and gives completion as you type and its errors at the end of the line they are on. Tide
     installs none itself.
   </p>
 

@@ -151,7 +151,7 @@ const chrome = EditorView.theme(
     // extension's block live in layers of this class -- in favour of the one
     // caret drawn by `caretLayer` below, which can be either shape.
     ".cm-cursorLayer": { display: "none !important" },
-    ".cm-threadCaret": {
+    ".cm-tideCaret": {
       position: "absolute",
       width: "2px",
       borderRadius: "1px",
@@ -165,13 +165,13 @@ const chrome = EditorView.theme(
     // wears is what starts the cycle over each time it moves (see
     // `CaretMarker`), so a caret in motion is always solid and it is only one
     // left alone that starts to fade.
-    "@keyframes thread-caret-a": CARET_BLINK,
-    "@keyframes thread-caret-b": CARET_BLINK,
-    "&.cm-focused .cm-threadCaret": {
-      animation: "thread-caret-a 1.25s ease-in-out infinite",
+    "@keyframes tide-caret-a": CARET_BLINK,
+    "@keyframes tide-caret-b": CARET_BLINK,
+    "&.cm-focused .cm-tideCaret": {
+      animation: "tide-caret-a 1.25s ease-in-out infinite",
     },
-    "&.cm-focused .cm-threadCaret.cm-threadCaret-again": {
-      animationName: "thread-caret-b",
+    "&.cm-focused .cm-tideCaret.cm-tideCaret-again": {
+      animationName: "tide-caret-b",
     },
     // The vim extension marks the scroller while a block cursor is called
     // for: normal, visual and replace modes. The shape follows from that
@@ -179,7 +179,7 @@ const chrome = EditorView.theme(
     // `width` is the whole of the box-to-beam animation.
     // A pixel wider than the character on each side, and rounded: a block
     // exactly the cell's width crowds the letter it is on.
-    ".cm-vimMode .cm-threadCaret": {
+    ".cm-vimMode .cm-tideCaret": {
       width: "calc(var(--caret-cell) + 2px)",
       marginLeft: "-1px",
       borderRadius: "1.5px",
@@ -187,8 +187,8 @@ const chrome = EditorView.theme(
     },
     // No caret in an editor that is not being typed into; a faint block in
     // vim's modes, where it also marks the place commands will act on.
-    "&:not(.cm-focused) .cm-threadCaret": { opacity: "0" },
-    "&:not(.cm-focused) .cm-vimMode .cm-threadCaret": { opacity: "0.45" },
+    "&:not(.cm-focused) .cm-tideCaret": { opacity: "0" },
+    "&:not(.cm-focused) .cm-vimMode .cm-tideCaret": { opacity: "0.45" },
 
     // Vim's command line and messages, in the window's colours and font
     // rather than the extension's own. `!important` where the extension sets
@@ -217,7 +217,7 @@ const chrome = EditorView.theme(
 /**
  * One caret, at one cursor. It carries the position and the width of a
  * character cell; whether it is drawn as a beam or as a block that wide is the
- * stylesheet's business (see `.cm-threadCaret` above).
+ * stylesheet's business (see `.cm-tideCaret` above).
  */
 class CaretMarker implements LayerMarker {
   constructor(
@@ -238,7 +238,7 @@ class CaretMarker implements LayerMarker {
 
   draw() {
     const el = document.createElement("div");
-    el.className = "cm-threadCaret";
+    el.className = "cm-tideCaret";
     this.place(el);
     return el;
   }
@@ -248,7 +248,7 @@ class CaretMarker implements LayerMarker {
   update(el: HTMLElement) {
     this.place(el);
     // It moved, so its fade starts over from fully there.
-    el.classList.toggle("cm-threadCaret-again");
+    el.classList.toggle("cm-tideCaret-again");
     return true;
   }
 
@@ -261,7 +261,7 @@ class CaretMarker implements LayerMarker {
 }
 
 /**
- * The caret, drawn by Thread rather than by CodeMirror or the vim extension.
+ * The caret, drawn by Tide rather than by CodeMirror or the vim extension.
  *
  * Those two each draw their own — a beam and a block — as different elements
  * in different layers, so there is nothing to animate between them: one
@@ -274,7 +274,7 @@ class CaretMarker implements LayerMarker {
  */
 const caretLayer = layer({
   above: false,
-  class: "cm-threadCaretLayer",
+  class: "cm-tideCaretLayer",
   update: (update) =>
     update.docChanged ||
     update.selectionSet ||
@@ -366,7 +366,7 @@ function lookExtension(look: EditorLook): Extension {
       // beam and block is always eased. Position is eased only for a smooth
       // caret: short, and fast at the start -- long enough to see where it
       // went, not long enough to lag behind typing.
-      ".cm-threadCaret": {
+      ".cm-tideCaret": {
         transition: [
           "width 110ms cubic-bezier(0.2, 0.9, 0.3, 1)",
           "margin-left 110ms cubic-bezier(0.2, 0.9, 0.3, 1)",

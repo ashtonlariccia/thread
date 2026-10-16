@@ -266,7 +266,7 @@
         if (pending.kind === "file") await docs.open(created);
       }
     } catch (e) {
-      void message(String(e), { title: "Thread", kind: "error" });
+      void message(String(e), { title: "Tide", kind: "error" });
     }
   }
 
@@ -313,7 +313,7 @@
       // deleted from outside marks it unsaved.
       void docs.checkDisk();
     } catch (e) {
-      void message(String(e), { title: "Thread", kind: "error" });
+      void message(String(e), { title: "Tide", kind: "error" });
     }
   }
 
@@ -339,6 +339,12 @@
   type TerminalTab = {
     key: number;
     name: string;
+    /**
+     * A name no other terminal has, for a remote that keeps terminals to
+     * keep this one under: what it is come back to by when the connection
+     * has dropped and returned.
+     */
+    session: string;
     /**
      * Where the shell was last sent: null for the home folder it starts in,
      * and after that wherever Jump Terminal Here has taken it. What is typed
@@ -421,6 +427,7 @@
     terminals.push({
       key,
       name: shell?.name ?? (number === 1 ? "Terminal" : `Terminal ${number}`),
+      session: `t-${crypto.randomUUID().slice(0, 13)}`,
       // Always the home folder, which is what the backend makes of none.
       cwd: null,
       shell: shell?.command ?? null,
@@ -441,7 +448,7 @@
   function followLink(link: Link, cwd: string | null) {
     if ("url" in link) {
       invoke("open_external", { url: link.url }).catch((e) =>
-        message(String(e), { title: "Thread", kind: "error" }),
+        message(String(e), { title: "Tide", kind: "error" }),
       );
     } else void docs.openAt(resolveLink(link.path, cwd), link.line, link.col);
   }
@@ -508,7 +515,7 @@
   }
 
   /**
-   * The `thread` command, run in a terminal: open a file in a tab or a
+   * The `tide` command, run in a terminal: open a file in a tab or a
    * folder in the tree, or with `-c` close whichever of the two a path is.
    */
   function fromTerminal(kind: OpenKind, path: string) {
@@ -518,7 +525,7 @@
   }
 
   /**
-   * `thread -c`: close whatever a path is. An open folder, with the files
+   * `tide -c`: close whatever a path is. An open folder, with the files
    * open from inside it, as from the menu; a file's tab; or a folder inside
    * an open one, which is its files' tabs closed and the folder folded away.
    * Anything unsaved is asked about first, whichever it is.
@@ -703,7 +710,7 @@
           note: changed
             ? `It was ${error.expectedFingerprint}, and is now ${error.fingerprint}.`
             : `Its key's fingerprint is ${error.fingerprint}. Trusting it remembers the key, ` +
-              "and Thread will refuse to connect if it ever changes.",
+              "and Tide will refuse to connect if it ever changes.",
           confirm: changed ? "Trust the New Key" : "Trust and Connect",
           danger: changed,
         });
@@ -778,9 +785,9 @@
 
     const save = await confirm({
       title: "Save this connection?",
-      message: `Keep ${info.label}, so Thread can connect to it again without asking.`,
+      message: `Keep ${info.label}, so Tide can connect to it again without asking.`,
       note:
-        "A saved connection is listed under Remote → Hosts, and Thread reopens it, " +
+        "A saved connection is listed under Remote → Hosts, and Tide reopens it, " +
         "with what you had open on it, the next time it starts. What you signed in with is " +
         "stored encrypted for your Windows account. Not saved, it ends when this window closes.",
       confirm: "Save",
@@ -793,7 +800,7 @@
       if (remote.info) remote.info = { ...remote.info, saved: saved.id };
       await remote.refreshKnown();
     } catch (e) {
-      void message(String(e), { title: "Thread", kind: "error" });
+      void message(String(e), { title: "Tide", kind: "error" });
     }
   }
 
@@ -880,7 +887,7 @@
   // connection either way: a window is on one remote, whichever face shows.
 
   type Mode = "ide" | "tmux";
-  const MODE_KEY = "thread.mode";
+  const MODE_KEY = "tide.mode";
 
   let mode = $state<Mode>("ide");
   /** Whether the tmux face has been turned to at all: it is not built before. */
@@ -921,12 +928,13 @@
     untrack(() => tmux.link(status));
   });
 
-  // A dropped connection is made again without being asked, once tmux has
-  // been in use: sessions that outlive the connection are the point of it.
-  // Quietly, and for as long as it takes; Reconnect, in the command list,
-  // is still there to be told why it is not working.
+  // A dropped connection is made again without being asked: what outlives
+  // it -- a tmux session, and each of the editor's own terminals on a remote
+  // that keeps them -- is waiting to be gone back to. Quietly, and for as
+  // long as it takes; Reconnect, in the command list, is still there to be
+  // told why it is not working.
   $effect(() => {
-    if (remote.status !== "lost" || !tmuxOpened) return;
+    if (remote.status !== "lost") return;
     let trying = false;
     const again = async () => {
       if (trying || remote.status !== "lost") return;
@@ -1859,7 +1867,7 @@
   // A few things to do by name, the one last done first. Made each time it
   // is looked at, so what is not possible just now is listed as such.
 
-  const RECENT_KEY = "thread.commands.recent";
+  const RECENT_KEY = "tide.commands.recent";
 
   /** The commands that have been run, by title, the latest first. */
   let recent = $state<string[]>(readRecent());
@@ -1952,7 +1960,7 @@
       // Not needed until a file is open, so not paid for before the window is up.
       loadIcons();
 
-      // `thread.exe some-file`, `thread.exe .`, or "Open with" from Explorer.
+      // `tide.exe some-file`, `tide.exe .`, or "Open with" from Explorer.
       const startup = await invoke<{ path: string; dir: boolean }[]>("startup_files").catch(
         () => [],
       );
@@ -2152,6 +2160,8 @@
             bind:this={terminalViews[terminal.key]}
             active={front}
             focused={front && layout.focused === leaf?.id}
+            name={terminal.session}
+            online={remote.status === "local" || remote.status === "connected"}
             cwd={terminal.cwd}
             shell={terminal.shell}
             look={terminalLook}

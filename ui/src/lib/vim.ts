@@ -5,7 +5,7 @@
  * key handling, and nobody who has it off should pay for it.
  *
  * The extension brings the motions, operators, registers, macros, visual
- * modes and the `:` command line. What is added here is the join to Thread:
+ * modes and the `:` command line. What is added here is the join to Tide:
  * the ex commands that mean something outside the buffer (`:w`, `:q`), and
  * reporting the mode so the bottom bar can show it.
  */
@@ -123,10 +123,10 @@ export function loadVim(next: VimHooks): Promise<VimApi> {
     Vim.defineEx("bnext", "bn", later(() => hooks?.cycle(1)));
     Vim.defineEx("bprevious", "bp", later(() => hooks?.cycle(-1)));
     // `gt` and `gT`, which are vim's own keys for the same.
-    Vim.defineAction("threadTabNext", later(() => hooks?.cycle(1)));
-    Vim.defineAction("threadTabPrevious", later(() => hooks?.cycle(-1)));
-    Vim.mapCommand("gt", "action", "threadTabNext", {}, { context: "normal" });
-    Vim.mapCommand("gT", "action", "threadTabPrevious", {}, { context: "normal" });
+    Vim.defineAction("tideTabNext", later(() => hooks?.cycle(1)));
+    Vim.defineAction("tideTabPrevious", later(() => hooks?.cycle(-1)));
+    Vim.mapCommand("gt", "action", "tideTabNext", {}, { context: "normal" });
+    Vim.mapCommand("gT", "action", "tideTabPrevious", {}, { context: "normal" });
 
     // Windows, which here are panes. `:sp` is a split with one pane above
     // the other, and `:vsp` one with them side by side.

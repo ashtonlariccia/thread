@@ -1,5 +1,5 @@
 /**
- * The Language Server Protocol, as much of it as Thread speaks: starting a
+ * The Language Server Protocol, as much of it as Tide speaks: starting a
  * server, telling it what is in the open files, asking it what could be
  * typed next, and hearing what it finds wrong.
  *
@@ -213,7 +213,7 @@ export class LspClient {
     try {
       const result = await client.request<{ capabilities?: Capabilities }>("initialize", {
         processId: null,
-        clientInfo: { name: "Thread" },
+        clientInfo: { name: "Tide" },
         rootUri: root === null ? null : toUri(root),
         workspaceFolders:
           root === null ? null : [{ uri: toUri(root), name: root.split(/[\\/]/).at(-1) ?? root }],
@@ -313,7 +313,7 @@ export class LspClient {
     } else if (method === "client/registerCapability" || method === "window/workDoneProgress/create") {
       this.#send({ id, result: null });
     } else {
-      this.#send({ id, error: { code: -32601, message: `${method} is not something Thread does` } });
+      this.#send({ id, error: { code: -32601, message: `${method} is not something Tide does` } });
     }
   }
 

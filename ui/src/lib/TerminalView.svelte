@@ -16,6 +16,13 @@
     active: boolean;
     /** Whether it is being shown in the pane the keyboard is in. */
     focused: boolean;
+    /** Its own name, which a remote that keeps terminals keeps it under. Read once. */
+    name: string;
+    /**
+     * Whether there is a connection to wherever the window is working. A
+     * terminal left running on a remote goes back to it when there is again.
+     */
+    online: boolean;
     /** Where the shell starts. Read once, when it does. */
     cwd: string | null;
     /** The command line of the shell to run; null for the config's. Read once. */
@@ -26,7 +33,7 @@
     renderer: TerminalRenderer;
     /** The shell ended by itself. */
     onexit: () => void;
-    /** The `thread` command was run in it, on a file or a folder. */
+    /** The `tide` command was run in it, on a file or a folder. */
     onopen: (kind: OpenKind, path: string) => void;
     /** A path or a web address in its output was Ctrl+clicked. */
     onlink: (link: Link) => void;
@@ -35,6 +42,8 @@
   let {
     active,
     focused,
+    name,
+    online,
     cwd,
     shell,
     look,
@@ -73,6 +82,7 @@
     void import("./terminal").then(({ openTerminal }) => {
       if (gone) return;
       handle = openTerminal(host, {
+        name,
         cwd,
         shell,
         ...look,
@@ -99,6 +109,12 @@
 
   $effect(() => {
     handle?.restyle(look);
+  });
+
+  // The connection coming back is what a terminal left on the remote was
+  // waiting for.
+  $effect(() => {
+    if (online) handle?.resume();
   });
 
   // The right button is the clipboard, as it is in a console window: it
@@ -156,9 +172,9 @@
     animation-timing-function: ease-in-out !important;
   }
   .term :global(.xterm-cursor.xterm-cursor-blink.xterm-cursor-underline) {
-    animation-name: thread-underline-fade !important;
+    animation-name: tide-underline-fade !important;
   }
-  @keyframes -global-thread-underline-fade {
+  @keyframes -global-tide-underline-fade {
     50% {
       border-bottom-color: transparent;
     }

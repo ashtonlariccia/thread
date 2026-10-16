@@ -3,7 +3,7 @@
 node_modules/
 
 # Tauri codegen
-crates/thread-app/gen/
+crates/tide-app/gen/
 
 .env
 .env.*

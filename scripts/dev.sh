@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch Thread in dev mode (Vite HMR + Tauri).
+# Launch Tide in dev mode (Vite HMR + Tauri).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

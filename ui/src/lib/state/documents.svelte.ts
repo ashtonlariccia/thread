@@ -70,7 +70,7 @@ export type DocWatcher = {
 };
 
 function report(error: unknown) {
-  void message(String(error), { title: "Thread", kind: "error" });
+  void message(String(error), { title: "Tide", kind: "error" });
 }
 
 function sameStamp(a: Stamp | null, b: Stamp | null): boolean {
@@ -412,7 +412,7 @@ export class Documents {
   }
 
   /**
-   * A file or folder was renamed on disk from inside Thread. Open files that
+   * A file or folder was renamed on disk from inside Tide. Open files that
    * were at the old path, or under it, carry on at the new one — same buffer,
    * same unsaved edits, same undo history.
    */

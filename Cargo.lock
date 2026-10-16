@@ -4707,7 +4707,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "thread-app"
+name = "thread_local"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
+name = "tide-app"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -4716,14 +4725,14 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
- "thread-core",
+ "tide-core",
  "tokio",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "thread-core"
+name = "tide-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4741,15 +4750,6 @@ dependencies = [
  "tracing",
  "trash",
  "windows",
-]
-
-[[package]]
-name = "thread_local"
-version = "1.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]

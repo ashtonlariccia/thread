@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/thread-core", "crates/thread-app"]
+members = ["crates/tide-core", "crates/tide-app"]
 
 [workspace.package]
 version = "0.1.0"

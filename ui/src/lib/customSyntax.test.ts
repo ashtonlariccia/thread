@@ -155,7 +155,7 @@ describe("a language described in the config", () => {
 });
 
 describe("a file extension claimed by a language of the user's own", () => {
-  it("is that language, ahead of what Thread would have said", () => {
+  it("is that language, ahead of what Tide would have said", () => {
     setCustomLanguages({ Mylang: ["my", "rs"] });
     expect(languageOf("a.my")).toBe("Mylang");
     expect(languageOf("main.RS")).toBe("Mylang");

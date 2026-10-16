@@ -1,10 +1,10 @@
-// Import a VS Code file-icon theme into Thread.
+// Import a VS Code file-icon theme into Tide.
 //
 //   node scripts/import-icons.mjs [path-to-theme-extension]
 //
 // Defaults to the Material Icon Theme (Charcoal) fork under ~/.vscode. Copies
 // every SVG the dark theme can resolve to into ui/public/icons, and boils the
-// theme's JSON down to the lookups Thread actually does. The result is
+// theme's JSON down to the lookups Tide actually does. The result is
 // committed, so this only needs re-running when the pack changes.
 import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";

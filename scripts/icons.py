@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Rasterise the icon masters into the icon set Tauri bundles.
 
-One master feeds this: icons/icon.svg, the Material Icon Theme's chromatic
-icon. It is drawn on a 16-unit grid, so it needs no separate small-size
-drawing.
+One master feeds this: icons/icon.svg. It is drawn on a coarse grid, so it
+needs no separate small-size drawing.
 
 SVG is rendered by headless Chrome (or Edge) because it is the only rasteriser
 a stock Windows box is sure to have; everything after that is Pillow.
@@ -19,7 +18,7 @@ from pathlib import Path
 
 from PIL import Image
 
-ICONS = Path(__file__).resolve().parent.parent / "crates" / "thread-app" / "icons"
+ICONS = Path(__file__).resolve().parent.parent / "crates" / "tide-app" / "icons"
 
 # The master is rendered once at 2048 and downsampled. Rendering each target
 # size directly would be sharper in principle, but Chrome's own downscaling is

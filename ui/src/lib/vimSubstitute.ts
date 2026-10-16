@@ -11,7 +11,7 @@
  * It keys off the prompt's DOM, not the extension's internals, so it does not
  * need the extension loaded to be imported. The prompt is looked for by where
  * it lives: the extension's own panel, or the element marked `data-vim-line`
- * that Thread moves it to in the bottom bar.
+ * that Tide moves it to in the bottom bar.
  */
 import { type Extension, StateEffect, StateField, type Text } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";

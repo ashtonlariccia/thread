@@ -48,8 +48,8 @@ describe("where a path from a terminal leads", () => {
   });
 
   it("is from the terminal's folder otherwise, in that folder's slashes", () => {
-    expect(resolveLink("src/main.rs", "C:\\work\\thread")).toBe("C:\\work\\thread\\src\\main.rs");
-    expect(resolveLink("./src/main.rs", "/home/me/thread/")).toBe("/home/me/thread/src/main.rs");
+    expect(resolveLink("src/main.rs", "C:\\work\\tide")).toBe("C:\\work\\tide\\src\\main.rs");
+    expect(resolveLink("./src/main.rs", "/home/me/tide/")).toBe("/home/me/tide/src/main.rs");
   });
 
   it("is left as it is with no folder to start from", () => {

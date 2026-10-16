@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tide's app icon: two notched brackets with a slash struck through them,
+  after the shape of the Zig logo.
+
+  It is drawn on a 32-unit grid with nothing thinner than two units, so the
+  one master serves every size. scripts/icons.sh renders it into the PNG/ICO
+  set.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path fill="#cba6f7" d="M1 6h13.5l-1.75 5H6v10h3.25L7.500 26H1zM31 26H17.500l1.750-5H26V11h-3.250l1.750-5H31zM7.925 30.500 16.500 6l7.575-4.500L15.500 26z"/></svg>

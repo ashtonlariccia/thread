@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * Edit → LSPs → Languages: languages of the user's own, for file
-   * extensions Thread has no grammar for.
+   * extensions Tide has no grammar for.
    *
    * A language is lists of words and a few delimiters, with regular
    * expressions for whatever those cannot say. It is edited here against a
@@ -423,7 +423,7 @@
     <div class="empty">
       <p>No languages of your own yet.</p>
       <p class="note">
-        Define one to colour files Thread has no grammar for: name it, give it its file
+        Define one to colour files Tide has no grammar for: name it, give it its file
         extensions, and fill in its keywords, types and comments.
       </p>
       <button class="btn primary" onclick={create}>New Language</button>

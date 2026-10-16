@@ -40,6 +40,12 @@ const ACK_EVERY = 32 * 1024;
 export type TerminalOptions = TerminalLook & {
   /** What draws it. Read once, when it opens. */
   renderer: TerminalRenderer;
+  /**
+   * A name of its own, for as long as its tab is open. On a remote that
+   * keeps terminals it is the name it is kept under, and so what it is come
+   * back to by after the connection has dropped.
+   */
+  name: string;
   /** Where the shell starts; null leaves it to the backend. */
   cwd: string | null;
   scrollback: number;
@@ -54,13 +60,13 @@ export type TerminalOptions = TerminalLook & {
 };
 
 /**
- * What the `thread` command can ask for: a file opened in a tab, a folder
+ * What the `tide` command can ask for: a file opened in a tab, a folder
  * opened in the tree, or whichever of those a path is, closed.
  */
 export type OpenKind = "file" | "dir" | "close";
 
 /**
- * The escape sequence the `thread` command asks with (`scripts/thread-remote.sh`):
+ * The escape sequence the `tide` command asks with (`scripts/tide-remote.sh`):
  * `OSC 7717 ; file|dir|close ; <absolute path> BEL`. A number nothing else uses.
  */
 const OPEN_OSC = 7717;
@@ -85,9 +91,21 @@ export type TerminalHandle = {
   /** Type `text` at the shell, as if at the keyboard. */
   send: (text: string) => void;
   restyle: (look: TerminalLook) => void;
+  /**
+   * The connection is back. A terminal that was left on the remote when it
+   * dropped is opened again; any other has nothing to do.
+   */
+  resume: () => void;
   /** End the shell and everything running in it. */
   dispose: () => void;
 };
+
+/**
+ * Kept terminals whose tabs were closed while the connection was down, by
+ * name: there was no one to tell that they were to end. They are told the
+ * next time anything is opened, which is the next time there is a connection.
+ */
+const forgotten: string[] = [];
 
 /**
  * The window's own colours, read from where they are defined. The sixteen
@@ -189,6 +207,42 @@ export function followLinks(term: Terminal, onlink: (link: Link) => void) {
   });
 }
 
+/**
+ * Leave a program's questions unanswered.
+ *
+ * A program asking its terminal something -- where the cursor is, what kind
+ * of terminal it is, what colour the background is -- is asking tmux, and
+ * tmux has answered by the time the question arrives here with the rest of
+ * what the pane printed. An answer from xterm as well would be typed into
+ * the pane as so much garbage after the prompt.
+ */
+export function staySilent(term: Terminal) {
+  const quiet = () => true;
+  const parser = term.parser;
+  // Device status and cursor position, plain and DEC's.
+  parser.registerCsiHandler({ final: "n" }, quiet);
+  parser.registerCsiHandler({ prefix: "?", final: "n" }, quiet);
+  // What kind of terminal this is, three ways.
+  parser.registerCsiHandler({ final: "c" }, quiet);
+  parser.registerCsiHandler({ prefix: ">", final: "c" }, quiet);
+  parser.registerCsiHandler({ prefix: "=", final: "c" }, quiet);
+  parser.registerCsiHandler({ prefix: ">", final: "q" }, quiet);
+  // Whether a mode is set, and what a setting is.
+  parser.registerCsiHandler({ intermediates: "$", final: "p" }, quiet);
+  parser.registerCsiHandler({ prefix: "?", intermediates: "$", final: "p" }, quiet);
+  parser.registerDcsHandler({ intermediates: "$", final: "q" }, quiet);
+  parser.registerDcsHandler({ intermediates: "+", final: "q" }, quiet);
+  // The window's size, in three units.
+  parser.registerCsiHandler({ final: "t" }, (params) => {
+    const what = params[0];
+    return what === 14 || what === 16 || what === 18 || what === 19;
+  });
+  // A colour asked for is a question; a colour given is not, and is taken.
+  for (const code of [4, 10, 11, 12]) {
+    parser.registerOscHandler(code, (data) => data.split(";").includes("?"));
+  }
+}
+
 export function openTerminal(host: HTMLElement, options: TerminalOptions): TerminalHandle {
   const term = new Terminal({
     fontFamily: options.fontFamily,
@@ -230,7 +284,7 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     );
   }
 
-  // `thread some-file`, typed at the shell: the command has no way to
+  // `tide some-file`, typed at the shell: the command has no way to
   // reach this window but through the terminal it is run in, so it says
   // what it wants on the screen, in a sequence only this reads.
   term.parser.registerOscHandler(OPEN_OSC, (data) => {
@@ -239,18 +293,29 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     return true;
   });
 
-  /** Set once the shell is running; what `dispose` has to end. */
+  /** Set while the shell is running; what `dispose` has to end. */
   let id: number | null = null;
+  /**
+   * Kept on the remote, and the connection has gone from under it: it is
+   * still running there, and this is waiting to be told it can go back.
+   */
+  let waiting = false;
+  /** Whether it has been told to leave a program's questions to tmux. */
+  let silent = false;
+  /** Counts the times it has been opened, so what an old one says late is not heard. */
+  let opening = 0;
 
   const copy = clipboardKeys(term);
 
   // Held until the shell has an id to address it by. xterm answers the
   // console's opening questions the moment they arrive, which can be before
   // `terminal_open` has come back with one.
-  const early: string[] = [];
+  let early: string[] = [];
   term.onData((data) => {
-    if (id === null) early.push(data);
-    else void invoke("terminal_write", { id, data });
+    if (id !== null) void invoke("terminal_write", { id, data });
+    // Typed at a terminal that is out of reach, it is not kept to be sprung
+    // on whatever is running there when the connection comes back.
+    else if (!waiting) early.push(data);
   });
   term.onResize(({ cols, rows }) => {
     if (id !== null) void invoke("terminal_resize", { id, cols, rows });
@@ -264,46 +329,85 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     drawn = 0;
   };
 
-  const onOutput = new Channel<ArrayBuffer>();
-  onOutput.onmessage = (bytes) => {
-    const size = bytes.byteLength;
-    // xterm takes what it is given and works through it in its own time;
-    // the callback is when this piece has been.
-    term.write(new Uint8Array(bytes), () => {
-      drawn += size;
-      acknowledge();
-    });
-  };
-  const onExit = new Channel<null>();
-  onExit.onmessage = () => {
-    if (!disposed) options.onexit();
-  };
+  /** Start the shell, or go back to the one that was left running. */
+  function open() {
+    const attempt = ++opening;
+    const again = waiting;
 
-  invoke<number>("terminal_open", {
-    onOutput,
-    onExit,
-    cwd: options.cwd,
-    shell: options.shell,
-    cols: term.cols,
-    rows: term.rows,
-  }).then(
-    (opened) => {
-      if (disposed) {
-        void invoke("terminal_close", { id: opened });
+    const onOutput = new Channel<ArrayBuffer>();
+    onOutput.onmessage = (bytes) => {
+      if (attempt !== opening) return;
+      const size = bytes.byteLength;
+      // xterm takes what it is given and works through it in its own time;
+      // the callback is when this piece has been.
+      term.write(new Uint8Array(bytes), () => {
+        drawn += size;
+        acknowledge();
+      });
+    };
+    const onExit = new Channel<boolean>();
+    onExit.onmessage = (left) => {
+      if (disposed || attempt !== opening) return;
+      id = null;
+      drawn = 0;
+      if (!left) {
+        options.onexit();
         return;
       }
-      id = opened;
-      if (early.length > 0) void invoke("terminal_write", { id, data: early.join("") });
-      // What was drawn before there was an id to say so by.
-      acknowledge();
-      // The window may have been resized while the shell was starting.
-      void invoke("terminal_resize", { id, cols: term.cols, rows: term.rows });
-    },
-    (e) => {
-      // Left on screen rather than closed, so there is something to read.
-      if (!disposed) term.write(`\x1b[31m${String(e).replaceAll("\n", "\r\n")}\x1b[0m\r\n`);
-    },
-  );
+      // Still running on the remote. The tab stays, with what was on it,
+      // and says so; `resume` is what brings it back.
+      waiting = true;
+      // The connection may be back already, by the time this was heard: one
+      // try before long, in case no one is left to say so. If it is not
+      // back, the try comes to nothing and it goes on waiting.
+      setTimeout(() => {
+        if (waiting && !disposed) open();
+      }, 1500);
+      term.write("\r\n\x1b[2m[connection lost \u2014 still running on the remote]\x1b[0m\r\n");
+    };
+
+    invoke<{ id: number; kept: boolean }>("terminal_open", {
+      onOutput,
+      onExit,
+      name: options.name,
+      cwd: options.cwd,
+      shell: options.shell,
+      cols: term.cols,
+      rows: term.rows,
+    }).then(
+      (opened) => {
+        if (disposed || attempt !== opening) {
+          void invoke("terminal_close", { id: opened.id });
+          return;
+        }
+        id = opened.id;
+        waiting = false;
+        // A kept terminal is tmux's pane: what a program asks of its
+        // terminal, tmux has answered (see `staySilent`).
+        if (opened.kept && !silent) {
+          silent = true;
+          staySilent(term);
+        }
+        if (early.length > 0) void invoke("terminal_write", { id, data: early.join("") });
+        early = [];
+        // What was drawn before there was an id to say so by.
+        acknowledge();
+        // The window may have been resized while the shell was starting.
+        void invoke("terminal_resize", { id, cols: term.cols, rows: term.rows });
+        // There is a connection, so there is someone to tell.
+        if (forgotten.length > 0) void invoke("terminal_forget", { names: forgotten.splice(0) });
+      },
+      (e) => {
+        if (disposed || attempt !== opening) return;
+        // Going back to one that was left: not yet, then. It is still
+        // waiting, and will be told again.
+        if (again) return;
+        // Left on screen rather than closed, so there is something to read.
+        term.write(`\x1b[31m${String(e).replaceAll("\n", "\r\n")}\x1b[0m\r\n`);
+      },
+    );
+  }
+  open();
 
   // Debounced: a drag reports every pixel, and each new size is a redraw of
   // the whole screen for the program on the other end.
@@ -337,11 +441,16 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
       term.options.cursorStyle = look.cursor;
       refit();
     },
+    resume: () => {
+      if (waiting && !disposed) open();
+    },
     dispose: () => {
       disposed = true;
       clearTimeout(resizeTimer);
       observer.disconnect();
       if (id !== null) void invoke("terminal_close", { id });
+      // Out of reach, it cannot be told to end; it is remembered until it can.
+      else if (waiting) forgotten.push(options.name);
       term.dispose();
     },
   };
