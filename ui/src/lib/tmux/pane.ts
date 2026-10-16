@@ -15,7 +15,8 @@ import type { Link } from "../links";
 import {
   clipboardKeys,
   followLinks,
-  theme,
+  staySilent,
+  themed,
   type TerminalLook,
   type TerminalRenderer,
 } from "../terminal";
@@ -65,42 +66,6 @@ function accelerate(term: Terminal, gone: () => boolean) {
   );
 }
 
-/**
- * Leave a program's questions unanswered.
- *
- * A program asking its terminal something -- where the cursor is, what kind
- * of terminal it is, what colour the background is -- is asking tmux, and
- * tmux has answered by the time the question arrives here with the rest of
- * what the pane printed. An answer from xterm as well would be typed into
- * the pane as so much garbage after the prompt.
- */
-function staySilent(term: Terminal) {
-  const quiet = () => true;
-  const parser = term.parser;
-  // Device status and cursor position, plain and DEC's.
-  parser.registerCsiHandler({ final: "n" }, quiet);
-  parser.registerCsiHandler({ prefix: "?", final: "n" }, quiet);
-  // What kind of terminal this is, three ways.
-  parser.registerCsiHandler({ final: "c" }, quiet);
-  parser.registerCsiHandler({ prefix: ">", final: "c" }, quiet);
-  parser.registerCsiHandler({ prefix: "=", final: "c" }, quiet);
-  parser.registerCsiHandler({ prefix: ">", final: "q" }, quiet);
-  // Whether a mode is set, and what a setting is.
-  parser.registerCsiHandler({ intermediates: "$", final: "p" }, quiet);
-  parser.registerCsiHandler({ prefix: "?", intermediates: "$", final: "p" }, quiet);
-  parser.registerDcsHandler({ intermediates: "$", final: "q" }, quiet);
-  parser.registerDcsHandler({ intermediates: "+", final: "q" }, quiet);
-  // The window's size, in three units.
-  parser.registerCsiHandler({ final: "t" }, (params) => {
-    const what = params[0];
-    return what === 14 || what === 16 || what === 18 || what === 19;
-  });
-  // A colour asked for is a question; a colour given is not, and is taken.
-  for (const code of [4, 10, 11, 12]) {
-    parser.registerOscHandler(code, (data) => data.split(";").includes("?"));
-  }
-}
-
 export function openPane(host: HTMLElement, options: PaneOptions): PaneHandle {
   const term = new Terminal({
     cols: options.cols,
@@ -117,8 +82,8 @@ export function openPane(host: HTMLElement, options: PaneOptions): PaneHandle {
     // shows: at its usual width that is two columns of text, and at this,
     // most of one.
     overviewRuler: { width: SCROLLBAR },
-    theme: { ...theme(), overviewRulerBorder: "#00000000" },
   });
+  const unthemed = themed(term, { overviewRulerBorder: "#00000000" });
   followLinks(term, options.onlink);
   staySilent(term);
   term.open(host);
@@ -155,6 +120,7 @@ export function openPane(host: HTMLElement, options: PaneOptions): PaneHandle {
     },
     dispose: () => {
       disposed = true;
+      unthemed();
       term.dispose();
     },
   };

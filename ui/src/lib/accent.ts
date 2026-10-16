@@ -7,20 +7,6 @@
  * moves every one of them together.
  */
 
-/** Catppuccin's accents, as starting points; any colour can be chosen. */
-export const ACCENT_PRESETS: { name: string; color: string }[] = [
-  { name: "Mauve", color: "#cba6f7" },
-  { name: "Lavender", color: "#b4befe" },
-  { name: "Blue", color: "#89b4fa" },
-  { name: "Sapphire", color: "#74c7ec" },
-  { name: "Teal", color: "#94e2d5" },
-  { name: "Green", color: "#a6e3a1" },
-  { name: "Yellow", color: "#f9e2af" },
-  { name: "Peach", color: "#fab387" },
-  { name: "Red", color: "#f38ba8" },
-  { name: "Pink", color: "#f5c2e7" },
-];
-
 /** Whether text is a colour as the config stores one: `#rrggbb`. */
 export function isHexColor(text: string): boolean {
   return /^#[0-9a-f]{6}$/i.test(text);

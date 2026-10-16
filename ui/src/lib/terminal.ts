@@ -19,6 +19,7 @@ import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
 import { findLinks, type Link } from "./links";
+import { THEME_EVENT } from "./themes";
 
 export type TerminalLook = {
   fontFamily: string;
@@ -107,11 +108,14 @@ export type TerminalHandle = {
  */
 const forgotten: string[] = [];
 
-/**
- * The window's own colours, read from where they are defined. The sixteen
- * below are Catppuccin's, with its blue-greys swapped for the neutral ones
- * the rest of this window uses.
- */
+/** xterm's names for the sixteen colours, in the order of `--ansi-0` to `--ansi-15`. */
+const ANSI = [
+  "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+  "brightBlack", "brightRed", "brightGreen", "brightYellow",
+  "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+] as const;
+
+/** The window's own colours, read from where the theme defines them. */
 export function theme(): ITheme {
   const style = getComputedStyle(document.documentElement);
   const color = (name: string) => style.getPropertyValue(name).trim();
@@ -123,24 +127,34 @@ export function theme(): ITheme {
     cursor: color("--caret"),
     cursorAccent: color("--accent-ink"),
     selectionBackground: color("--selection"),
-    black: "#454545",
-    red: "#f38ba8",
-    green: "#a6e3a1",
-    yellow: "#f9e2af",
-    blue: "#89b4fa",
-    magenta: "#cba6f7",
-    cyan: "#94e2d5",
-    white: "#bababa",
-    // What a shell dims its suggestions with, so it has to stay readable.
-    brightBlack: "#7a7a7a",
-    brightRed: "#f38ba8",
-    brightGreen: "#a6e3a1",
-    brightYellow: "#f9e2af",
-    brightBlue: "#89b4fa",
-    brightMagenta: "#cba6f7",
-    brightCyan: "#94e2d5",
-    brightWhite: "#d8d8d8",
+    ...Object.fromEntries(ANSI.map((name, i) => [name, color(`--ansi-${i}`)])),
   };
+}
+
+/** Every terminal open, with what it adds to the theme, so a change of theme reaches it. */
+const open = new Map<Terminal, Partial<ITheme>>();
+let listening = false;
+
+/**
+ * Dress a terminal in the theme, now and whenever it changes. Gives back what
+ * lets it go, for when it is disposed.
+ */
+export function themed(term: Terminal, extra: Partial<ITheme> = {}): () => void {
+  term.options.theme = { ...theme(), ...extra };
+  if (!listening) {
+    // A frame later, so that the accent, which is put into effect after the
+    // theme, has been too: the cursor's ink is made from it.
+    window.addEventListener(THEME_EVENT, () => requestAnimationFrame(retheme));
+    listening = true;
+  }
+  open.set(term, extra);
+  return () => open.delete(term);
+}
+
+/** Put the theme now in effect onto every terminal that is open. */
+function retheme() {
+  const current = theme();
+  for (const [term, extra] of open) term.options.theme = { ...current, ...extra };
 }
 
 /**
@@ -254,8 +268,8 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
     // No hollow box while the editor has the keyboard: one caret at a time.
     cursorInactiveStyle: "none",
     allowTransparency: true,
-    theme: theme(),
   });
+  const unthemed = themed(term);
   const fit = new FitAddon();
   term.loadAddon(fit);
 
@@ -451,6 +465,7 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
       if (id !== null) void invoke("terminal_close", { id });
       // Out of reach, it cannot be told to end; it is remembered until it can.
       else if (waiting) forgotten.push(options.name);
+      unthemed();
       term.dispose();
     },
   };

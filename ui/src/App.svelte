@@ -26,6 +26,7 @@
   import UnsavedDialog from "./lib/UnsavedDialog.svelte";
 
   import { applyAccent } from "./lib/accent";
+  import { applyTheme } from "./lib/themes";
   import { item, SEP, type ContextMenuState } from "./lib/contextMenu";
   import { runEdit, setEditor, type EditCommand } from "./lib/edit";
   import { iconUrl } from "./lib/icons";
@@ -1811,10 +1812,12 @@
     document.documentElement.style.setProperty("--bg-alpha", String(config.alpha));
   });
 
-  // The accent, likewise: one colour in the config, and every highlight in
-  // the window follows it.
+  // The theme, and then the accent: one colour in the config, and every
+  // highlight in the window follows it.
   $effect(() => {
-    applyAccent(config.current.theme.accent);
+    const { syntax, mode, accent } = config.current.theme;
+    applyTheme(syntax, mode);
+    applyAccent(accent);
   });
 
   // The editor's share of the config: the font, the gutter, and each open

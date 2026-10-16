@@ -23,7 +23,7 @@
     type SyntaxPattern,
   } from "./customSyntax";
   import type { ConfigStore } from "./state/config.svelte";
-  import { syntaxTheme } from "./themes";
+  import { paletteOf, syntaxTheme } from "./themes";
 
   type Props = { config: ConfigStore };
   let { config }: Props = $props();
@@ -49,12 +49,16 @@
   };
 
   /** The word lists, each with the colour its words will be. */
-  const LISTS = [
-    { key: "keywords", label: "Keywords", colour: "#cba6f7", hint: "if else while return" },
-    { key: "types", label: "Types", colour: "#f9e2af", hint: "int string bool" },
-    { key: "constants", label: "Constants", colour: "#fab387", hint: "true false nil" },
-    { key: "functions", label: "Functions", colour: "#89b4fa", hint: "print len" },
-  ] as const;
+  const LISTS = $derived.by(() => {
+    const { syntax, mode } = config.current.theme;
+    const colours = paletteOf(syntax, mode).syntax;
+    return [
+      { key: "keywords", label: "Keywords", colour: colours.keyword, hint: "if else while return" },
+      { key: "types", label: "Types", colour: colours.type, hint: "int string bool" },
+      { key: "constants", label: "Constants", colour: colours.constant, hint: "true false nil" },
+      { key: "functions", label: "Functions", colour: colours.func, hint: "print len" },
+    ] as const;
+  });
 
   const saved = $derived(config.current.syntax);
   const names = $derived(Object.keys(saved));
@@ -219,7 +223,7 @@
         doc: sample,
         extensions: [
           language.of([]),
-          syntaxHighlighting(syntaxTheme(theme.syntax)),
+          syntaxHighlighting(syntaxTheme(theme.syntax, theme.mode)),
           EditorView.lineWrapping,
           EditorView.updateListener.of((update) => {
             if (update.transactions.some((tr) => tr.isUserEvent("input") || tr.isUserEvent("delete"))) {
@@ -623,7 +627,7 @@
     cursor: pointer;
   }
   .drop:hover {
-    background: #f38ba81f;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
     color: var(--danger);
   }
 

@@ -260,7 +260,7 @@
     align-self: stretch;
     flex: none;
     width: 14px;
-    background: linear-gradient(#ffffff14, #ffffff14) 6.5px 0 / 1px 100% no-repeat;
+    background: linear-gradient(var(--guide), var(--guide)) 6.5px 0 / 1px 100% no-repeat;
   }
 
   .chevron {

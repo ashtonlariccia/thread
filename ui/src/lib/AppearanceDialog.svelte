@@ -1,10 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
 
-  import { ACCENT_PRESETS, applyAccent, isHexColor } from "./accent";
+  import { applyAccent, isHexColor } from "./accent";
   import Dialog from "./Dialog.svelte";
-  import type { ConfigStore, EditorConfig, TerminalCursor } from "./state/config.svelte";
-  import { THEME_NAMES } from "./themes";
+  import type { ConfigStore, EditorConfig, TerminalCursor, ThemeMode } from "./state/config.svelte";
+  import { carryAccent, paletteOf, THEME_NAMES, THEMES } from "./themes";
 
   type Props = {
     open: boolean;
@@ -30,9 +30,25 @@
   }
 
   const accent = $derived(config.current.theme.accent);
+  const mode = $derived(config.current.theme.mode);
+  /** The accents the theme in effect offers. */
+  const presets = $derived(paletteOf(config.current.theme.syntax, mode).accents);
 
   function setAccent(color: string) {
     void config.set("theme", "accent", color.toLowerCase());
+  }
+
+  /**
+   * Another theme, or the other variant of this one. An accent that was one
+   * of the old variant's own goes with it, to the one in its place in the
+   * new: Mocha's mauve on a light window is Latte's.
+   */
+  async function setTheme(syntax: string, to: ThemeMode) {
+    const { theme } = config.current;
+    const carried = carryAccent(theme.accent, paletteOf(theme.syntax, theme.mode), paletteOf(syntax, to));
+    if (syntax !== theme.syntax) await config.set("theme", "syntax", syntax);
+    if (to !== theme.mode) await config.set("theme", "mode", to);
+    if (carried !== theme.accent) setAccent(carried);
   }
 
   /** A colour typed as hex. Anything else puts back the one in effect. */
@@ -344,6 +360,34 @@
 
     <h3>Theme</h3>
     <div class="grid">
+      <span class="label-ish" id="ap-mode">Mode</span>
+      <div class="segmented" role="radiogroup" aria-labelledby="ap-mode">
+        {#each [["dark", "Dark"], ["light", "Light"]] as const as [value, label] (value)}
+          <button
+            role="radio"
+            aria-checked={mode === value}
+            class:chosen={mode === value}
+            onclick={() => void setTheme(config.current.theme.syntax, value)}>{label}</button
+          >
+        {/each}
+      </div>
+
+      <label for="ap-syntax">Colours</label>
+      <select
+        id="ap-syntax"
+        value={config.current.theme.syntax}
+        onchange={(e) => void setTheme(e.currentTarget.value, mode)}
+      >
+        {#each THEMES as theme (theme.name)}
+          <option value={theme.name}>{theme.label}</option>
+        {/each}
+        <!-- A name typed into the file that is not a theme: shown, so the box
+             does not claim a theme that is not the one in the file. -->
+        {#if !THEME_NAMES.includes(config.current.theme.syntax)}
+          <option value={config.current.theme.syntax}>{config.current.theme.syntax} (unknown)</option>
+        {/if}
+      </select>
+
       <label for="ap-accent">Accent</label>
       <div class="accent">
         <div class="row">
@@ -371,7 +415,7 @@
           />
         </div>
         <div class="swatches">
-          {#each ACCENT_PRESETS as preset (preset.color)}
+          {#each presets as preset (preset.color)}
             <button
               class="swatch"
               class:chosen={preset.color === accent}
@@ -384,22 +428,6 @@
           {/each}
         </div>
       </div>
-
-      <label for="ap-syntax">Syntax colours</label>
-      <select
-        id="ap-syntax"
-        value={config.current.theme.syntax}
-        onchange={(e) => void config.set("theme", "syntax", e.currentTarget.value)}
-      >
-        {#each THEME_NAMES as name (name)}
-          <option value={name}>{name}</option>
-        {/each}
-        <!-- A name typed into the file that is not a theme: shown, so the box
-             does not claim a theme that is not the one in the file. -->
-        {#if !THEME_NAMES.includes(config.current.theme.syntax)}
-          <option value={config.current.theme.syntax}>{config.current.theme.syntax} (unknown)</option>
-        {/if}
-      </select>
     </div>
   </div>
 
@@ -519,6 +547,38 @@
   input.hex {
     width: 6rem;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Two buttons joined into one control, the chosen one filled. */
+  .segmented {
+    display: flex;
+    justify-self: start;
+    padding: 2px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-input);
+    border-radius: 5px;
+  }
+  .segmented button {
+    padding: 0.2rem 0.85rem;
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: var(--fg-dim);
+    font-family: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .segmented button:hover {
+    background: var(--hover);
+    color: var(--fg);
+  }
+  .segmented button.chosen {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+  .segmented button:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 1px;
   }
 
   .swatches {

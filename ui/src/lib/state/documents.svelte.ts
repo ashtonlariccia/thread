@@ -189,7 +189,7 @@ export class Documents {
       smoothCaret: config.editor.smooth_caret,
       autoClose: config.editor.auto_close,
     });
-    this.editor.setHighlightStyle(syntaxTheme(config.theme.syntax));
+    this.editor.setHighlightStyle(syntaxTheme(config.theme.syntax, config.theme.mode));
     this.#setVim(config.vim.enabled);
     // Before the files are dressed: what language each is can depend on it.
     setCustomSyntax(config.syntax);

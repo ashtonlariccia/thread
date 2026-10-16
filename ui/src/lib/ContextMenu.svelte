@@ -127,7 +127,7 @@
 
   /* For the entries that cannot be undone. */
   .ctx-item.danger:hover {
-    background: #f38ba81f;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
     color: var(--danger);
   }
 

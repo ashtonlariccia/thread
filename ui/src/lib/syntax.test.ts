@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { languageOf, PLAIN_TEXT } from "./languages";
 import { hasSyntax, loadSyntax } from "./syntax";
-import { DEFAULT_THEME, syntaxTheme, THEME_NAMES } from "./themes";
+import { carryAccent, DEFAULT_THEME, paletteOf, syntaxTheme, THEME_NAMES, THEMES } from "./themes";
 
 describe("grammars", () => {
   it("exist for the languages people actually open", () => {
@@ -38,5 +38,27 @@ describe("syntax themes", () => {
 
   it("fall back to the default for a name that is not a theme", () => {
     expect(syntaxTheme("no-such-theme")).toBe(syntaxTheme(DEFAULT_THEME));
+  });
+});
+
+describe("colour themes", () => {
+  it("each have a dark and a light, made up differently", () => {
+    for (const theme of THEMES) {
+      expect(syntaxTheme(theme.name, "light"), theme.name).not.toBe(syntaxTheme(theme.name, "dark"));
+      expect(theme.light.accents.length, theme.name).toBeGreaterThan(0);
+      expect(theme.dark.accents.length, theme.name).toBeGreaterThan(0);
+    }
+  });
+
+  it("are dark unless asked to be light", () => {
+    expect(paletteOf("gruvbox", "nonsense")).toBe(paletteOf("gruvbox", "dark"));
+  });
+
+  it("carry a preset accent across, and leave a chosen one alone", () => {
+    const mocha = paletteOf("catppuccin", "dark");
+    const latte = paletteOf("catppuccin", "light");
+    expect(carryAccent("#cba6f7", mocha, latte)).toBe("#8839ef");
+    expect(carryAccent("#CBA6F7", mocha, paletteOf("gruvbox", "dark"))).toBe("#fe8019");
+    expect(carryAccent("#123456", mocha, latte)).toBe("#123456");
   });
 });

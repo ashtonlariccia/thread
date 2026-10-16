@@ -605,7 +605,7 @@
   }
 
   .ctl.close:hover {
-    background: #f38ba8;
+    background: var(--danger);
     color: var(--accent-ink);
   }
 
@@ -696,7 +696,7 @@
     visibility: visible;
   }
   .forget:hover {
-    background: #f38ba81f;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
     color: var(--danger);
   }
 

@@ -145,7 +145,7 @@ const chrome = EditorView.theme(
     // reckoning, and a number that can be selected can be copied.
     ".cm-gutter, .cm-gutterElement": { userSelect: "none", WebkitUserSelect: "none" },
     ".cm-lineNumbers .cm-gutterElement": { padding: "0 10px 0 14px" },
-    ".cm-activeLine": { backgroundColor: "#ffffff0a" },
+    ".cm-activeLine": { backgroundColor: "var(--active-line)" },
     ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--fg-dim)" },
     // Both stock carets are switched off -- CodeMirror's beam and the vim
     // extension's block live in layers of this class -- in favour of the one

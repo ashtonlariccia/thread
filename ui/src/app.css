@@ -1,6 +1,7 @@
-/* Catppuccin Charcoal.
+/* Catppuccin Charcoal, the default theme in its dark variant.
    Taken from the VSCode theme of the same name. Accent is Mocha Mauve
-   (#cba6f7). */
+   (#cba6f7). The colours below are what the window wears until the config
+   has been read; the theme in it then replaces them (see `themes/`). */
 
 :root {
   /* How solid the window is, 0-1, written by the appearance settings. The
@@ -14,7 +15,8 @@
      which is what makes them a single seamless frame -- and what keeps the
      inset around the viewport the same colour as the chrome instead of a
      black moat showing the empty window through. */
-  --bg-chrome: rgb(45 45 45 / var(--bg-alpha));
+  --chrome-rgb: 45 45 45;
+  --bg-chrome: rgb(var(--chrome-rgb) / var(--bg-alpha));
 
   /* The viewport is the chrome *darkened*, not a second surface stacked on
      it. A wash keeps the window one opacity: a `--bg-alpha` layer over a
@@ -54,6 +56,13 @@
   --hover: #ffffff16;
   --hover-strong: #cba6f733;
 
+  /* Faint washes over whatever is under them: the line being edited, the
+     tree's indent guides, and a field that is part of a see-through panel. */
+  --active-line: rgb(255 255 255 / 0.04);
+  --guide: rgb(255 255 255 / 0.08);
+  --field-wash: rgb(255 255 255 / 0.07);
+  --field-wash-border: rgb(255 255 255 / 0.12);
+
   /* The editor's caret and selection: neutral greys, and opaque, so they read
      the same over any syntax colour and at any window opacity. The block is
      drawn *behind* the character it is on, which is why it can be solid. */
@@ -66,6 +75,24 @@
   /* A `:s` being typed: what it will match, and what it will put there. */
   --preview-match: #f38ba83d;
   --preview-replace: #a6e3a140;
+
+  /* The terminal's sixteen colours. */
+  --ansi-0: #454545;
+  --ansi-1: #f38ba8;
+  --ansi-2: #a6e3a1;
+  --ansi-3: #f9e2af;
+  --ansi-4: #89b4fa;
+  --ansi-5: #cba6f7;
+  --ansi-6: #94e2d5;
+  --ansi-7: #bababa;
+  --ansi-8: #7a7a7a;
+  --ansi-9: #f38ba8;
+  --ansi-10: #a6e3a1;
+  --ansi-11: #f9e2af;
+  --ansi-12: #89b4fa;
+  --ansi-13: #cba6f7;
+  --ansi-14: #94e2d5;
+  --ansi-15: #d8d8d8;
 
   /* Chips float inside their bar rather than touching its edges. */
   --chip-radius: 5px;

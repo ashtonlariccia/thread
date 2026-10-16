@@ -1,79 +1,123 @@
 /**
- * Catppuccin, as a syntax palette.
+ * Catppuccin: Mocha for the dark, Latte for the light.
  *
- * Two VS Code themes go into it. The *colours* are the ones Catppuccin
- * Charcoal gives each kind of token. The *font styles* — what is italic and
- * what is bold — are Monokai Pro Charcoal's, which italicises the words that
- * declare things (`fn`, `let`, `pub`), primitive types, macros and attributes,
- * and leaves function and type names upright.
- *
- * VS Code themes address TextMate scopes and CodeMirror addresses the tags
- * below, and the two do not line up one to one. Where a scope has no tag (a
- * function's parameters, Rust lifetimes) the token falls back to the nearest
- * thing that does.
+ * The code's colours are the ones Catppuccin Charcoal gives each kind of
+ * token. The window around them is not Catppuccin's blue-greys but neutral
+ * ones, as Charcoal has it, in both variants.
  */
-import { HighlightStyle } from "@codemirror/language";
-import { tags as t } from "@lezer/highlight";
+import type { ColorTheme } from "./palette";
 
-const mauve = "#cba6f7";
-const red = "#f38ba8";
-const peach = "#fab387";
-const yellow = "#f9e2af";
-const green = "#a6e3a1";
-const teal = "#94e2d5";
-const sky = "#89dceb";
-const sapphire = "#74c7ec";
-const blue = "#89b4fa";
-const lavender = "#b4befe";
-const comment = "#7a7a7a";
-const punctuation = "#a0a0a0";
-
-export const catppuccin = HighlightStyle.define([
-  { tag: t.comment, color: comment, fontStyle: "italic" },
-
-  { tag: [t.string, t.special(t.string)], color: green },
-  { tag: t.docString, color: green, fontStyle: "italic" },
-  { tag: t.regexp, color: peach },
-  { tag: t.escape, color: teal },
-
-  { tag: [t.number, t.bool, t.null, t.atom, t.constant(t.variableName)], color: peach },
-
-  { tag: [t.keyword, t.operatorKeyword], color: mauve },
-  // The words that declare and qualify: Monokai's `storage` scopes.
-  { tag: [t.definitionKeyword, t.modifier], color: mauve, fontStyle: "italic" },
-  { tag: t.operator, color: teal },
-
-  { tag: t.standard(t.typeName), color: sapphire, fontStyle: "italic" },
-  { tag: [t.typeName, t.className, t.namespace], color: yellow },
-
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], color: blue },
-  { tag: [t.macroName, t.standard(t.function(t.variableName))], color: sapphire, fontStyle: "italic" },
-
-  { tag: t.propertyName, color: lavender },
-  { tag: t.self, color: red, fontStyle: "italic" },
-  { tag: t.labelName, color: yellow },
-
-  // Markup: the element, then what is said about it.
-  { tag: t.tagName, color: mauve },
-  { tag: t.attributeName, color: peach, fontStyle: "italic" },
-
-  // Decorators and attributes, and the preprocessor's own little language.
-  { tag: [t.meta, t.annotation], color: peach, fontStyle: "italic" },
-  { tag: t.processingInstruction, color: sky },
-
-  { tag: [t.punctuation, t.bracket, t.separator], color: punctuation },
-
-  { tag: t.invalid, color: red },
-  { tag: t.deleted, color: red },
-  { tag: t.inserted, color: green },
-  { tag: t.changed, color: yellow },
-
-  // Prose.
-  { tag: t.heading, color: mauve, fontWeight: "bold" },
-  { tag: t.strong, color: peach, fontWeight: "bold" },
-  { tag: t.emphasis, color: yellow, fontStyle: "italic" },
-  { tag: t.strikethrough, textDecoration: "line-through" },
-  { tag: [t.link, t.url], color: blue },
-  { tag: t.quote, color: green, fontStyle: "italic" },
-  { tag: t.monospace, color: teal },
-]);
+export const catppuccin: ColorTheme = {
+  name: "catppuccin",
+  label: "Catppuccin",
+  dark: {
+    chrome: "45 45 45",
+    wash: "rgb(0 0 0 / 0.2)",
+    menu: "#2a2a2a",
+    input: "#2f2f2f",
+    border: "#383838",
+    borderInput: "#4a4a4a",
+    fg: "#d8d8d8",
+    fgDim: "#a3a3a3",
+    fgFaint: "#5c5c5c",
+    caret: "#a8a8a8",
+    // Dark enough that the dimmest text there is -- a comment, itself grey --
+    // still reads on top of it.
+    caretBlock: "#585858",
+    selection: "#444444",
+    danger: "#f38ba8",
+    ok: "#a6e3a1",
+    syntax: {
+      keyword: "#cba6f7",
+      string: "#a6e3a1",
+      constant: "#fab387",
+      type: "#f9e2af",
+      func: "#89b4fa",
+      builtin: "#74c7ec",
+      property: "#b4befe",
+      operator: "#94e2d5",
+      special: "#89dceb",
+      self: "#f38ba8",
+      comment: "#7a7a7a",
+      punctuation: "#a0a0a0",
+    },
+    ansi: {
+      black: "#454545",
+      red: "#f38ba8",
+      green: "#a6e3a1",
+      yellow: "#f9e2af",
+      blue: "#89b4fa",
+      magenta: "#cba6f7",
+      cyan: "#94e2d5",
+      white: "#bababa",
+      brightBlack: "#7a7a7a",
+      brightWhite: "#d8d8d8",
+    },
+    accents: [
+      { name: "Mauve", color: "#cba6f7" },
+      { name: "Lavender", color: "#b4befe" },
+      { name: "Blue", color: "#89b4fa" },
+      { name: "Sapphire", color: "#74c7ec" },
+      { name: "Teal", color: "#94e2d5" },
+      { name: "Green", color: "#a6e3a1" },
+      { name: "Yellow", color: "#f9e2af" },
+      { name: "Peach", color: "#fab387" },
+      { name: "Red", color: "#f38ba8" },
+      { name: "Pink", color: "#f5c2e7" },
+    ],
+  },
+  light: {
+    chrome: "236 236 236",
+    wash: "rgb(255 255 255 / 0.55)",
+    menu: "#f8f8f8",
+    input: "#ffffff",
+    border: "#d9d9d9",
+    borderInput: "#c4c4c4",
+    fg: "#2b2b2b",
+    fgDim: "#5e5e5e",
+    fgFaint: "#a3a3a3",
+    caret: "#555555",
+    caretBlock: "#cdcdcd",
+    selection: "#d6d6d6",
+    danger: "#d20f39",
+    ok: "#40a02b",
+    syntax: {
+      keyword: "#8839ef",
+      string: "#40a02b",
+      constant: "#fe640b",
+      type: "#df8e1d",
+      func: "#1e66f5",
+      builtin: "#209fb5",
+      property: "#7287fd",
+      operator: "#179299",
+      special: "#04a5e5",
+      self: "#d20f39",
+      comment: "#8c8c8c",
+      punctuation: "#6e6e6e",
+    },
+    ansi: {
+      black: "#4a4a4a",
+      red: "#d20f39",
+      green: "#40a02b",
+      yellow: "#df8e1d",
+      blue: "#1e66f5",
+      magenta: "#8839ef",
+      cyan: "#179299",
+      white: "#9a9a9a",
+      brightBlack: "#7a7a7a",
+      brightWhite: "#bdbdbd",
+    },
+    accents: [
+      { name: "Mauve", color: "#8839ef" },
+      { name: "Lavender", color: "#7287fd" },
+      { name: "Blue", color: "#1e66f5" },
+      { name: "Sapphire", color: "#209fb5" },
+      { name: "Teal", color: "#179299" },
+      { name: "Green", color: "#40a02b" },
+      { name: "Yellow", color: "#df8e1d" },
+      { name: "Peach", color: "#fe640b" },
+      { name: "Red", color: "#d20f39" },
+      { name: "Pink", color: "#ea76cb" },
+    ],
+  },
+};

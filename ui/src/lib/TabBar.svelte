@@ -413,7 +413,7 @@
     height: 16px;
   }
   .close:hover {
-    background: #f38ba81f;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
     color: var(--danger);
   }
 

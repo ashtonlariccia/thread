@@ -75,8 +75,11 @@ exclude = [".*"]
 files_first = false
 
 [theme]
-# Colours for syntax highlighting. Available: "catppuccin".
+# The colour theme: the window, the code and the terminal. Available:
+# "catppuccin", "gruvbox", "tokyo-night", "rose-pine", "one", "solarized".
 syntax = "catppuccin"
+# Which of the theme's two variants: "dark" or "light".
+mode = "dark"
 # The colour things are highlighted with: the active tab, the selected row,
 # a focused field, the buttons that go ahead. Six hex digits.
 accent = "#cba6f7"
@@ -314,12 +317,23 @@ impl Default for Files {
     }
 }
 
+/// A theme's dark variant or its light one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Dark,
+    Light,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Theme {
-    /// The name of the syntax-highlighting palette. The palettes themselves
-    /// belong to the frontend; a name it does not know falls back to the default.
+    /// The name of the colour theme. The themes themselves belong to the
+    /// frontend; a name it does not know falls back to the default.
     pub syntax: String,
+    /// Which of the theme's variants is worn.
+    pub mode: Mode,
     /// What the window highlights with, as `#rrggbb`.
     pub accent: String,
 }
@@ -328,6 +342,7 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             syntax: "catppuccin".into(),
+            mode: Mode::Dark,
             accent: "#cba6f7".into(),
         }
     }
@@ -1061,6 +1076,7 @@ mod tests {
                 .insert_spaces
         );
         assert_eq!(set("theme", "syntax", "other".into()).theme.syntax, "other");
+        assert_eq!(set("theme", "mode", "light".into()).theme.mode, Mode::Light);
         assert!(!set("vim", "enabled", false.into()).vim.enabled);
         assert_eq!(
             set("files", "exclude", serde_json::json!([".*", "target"]))

@@ -14,6 +14,8 @@ import type { SyntaxDef } from "../customSyntax";
 
 export type Material = "none" | "acrylic";
 
+export type ThemeMode = "dark" | "light";
+
 export type Appearance = {
   /** Percent. 100 is opaque; the window only goes translucent below it. */
   background_opacity: number;
@@ -46,8 +48,11 @@ export type Config = {
   palette: { background_opacity: number; material: Material };
   editor: EditorConfig;
   files: { exclude: string[]; files_first: boolean };
-  /** `accent` is the highlight colour, as `#rrggbb`. */
-  theme: { syntax: string; accent: string };
+  /**
+   * `syntax` names the colour theme, `mode` picks its dark or its light, and
+   * `accent` is the highlight colour, as `#rrggbb`.
+   */
+  theme: { syntax: string; mode: ThemeMode; accent: string };
   vim: { enabled: boolean };
   /** `shell` is a command line; empty leaves the choice to the backend. */
   terminal: {
@@ -56,6 +61,8 @@ export type Config = {
     font_size: number;
     cursor: TerminalCursor;
     renderer: "dom" | "webgl";
+    /** Keep a remote's terminals in tmux, so that they outlive the connection. */
+    persist: boolean;
   };
   /** `enabled` is the language servers that are switched on, by id. */
   lsp: { enabled: string[] };
@@ -83,9 +90,9 @@ export const DEFAULTS: Config = {
     auto_close: true,
   },
   files: { exclude: [".*"], files_first: false },
-  theme: { syntax: "catppuccin", accent: "#cba6f7" },
+  theme: { syntax: "catppuccin", mode: "dark", accent: "#cba6f7" },
   vim: { enabled: true },
-  terminal: { shell: "", scrollback: 2000, font_size: 14, cursor: "block", renderer: "dom" },
+  terminal: { shell: "", scrollback: 2000, font_size: 14, cursor: "block", renderer: "dom", persist: true },
   lsp: { enabled: [] },
   language: {},
   syntax: {},

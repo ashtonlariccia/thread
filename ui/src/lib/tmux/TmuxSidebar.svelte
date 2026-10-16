@@ -739,7 +739,7 @@
     cursor: default;
   }
   .tool.danger:hover {
-    background: #f38ba81f;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
     color: var(--danger);
   }
   /* There on the row the pointer is on, and nowhere else: a column of

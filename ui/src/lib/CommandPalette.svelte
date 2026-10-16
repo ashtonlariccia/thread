@@ -179,7 +179,7 @@
     display: flex;
     flex-direction: column;
     /* The menus' own colour, as solid as the config says. */
-    background: rgb(42 42 42 / var(--palette-alpha, 1));
+    background: rgb(from var(--bg-menu) r g b / var(--palette-alpha, 1));
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: 0 18px 48px #000c;
@@ -196,8 +196,8 @@
     padding: 0.4rem 0.55rem;
     /* A wash rather than the fields' usual solid: it is part of a panel
        that is meant to be seen through. */
-    background: #ffffff12;
-    border: 1px solid #ffffff1f;
+    background: var(--field-wash);
+    border: 1px solid var(--field-wash-border);
     border-radius: 5px;
     color: var(--fg);
     font-family: inherit;
