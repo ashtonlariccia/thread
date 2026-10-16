@@ -431,11 +431,6 @@
     </div>
   </div>
 
-  <p class="dlg-note">
-    Each setting is a key in the config file and is saved as you change it. Per-language
-    overrides are only in the file.
-  </p>
-
   <div class="dlg-actions">
     <button class="btn ghost config" onclick={openConfig}>Open Config File</button>
     <button class="btn ghost" onclick={() => void config.reset()}>Reset</button>
