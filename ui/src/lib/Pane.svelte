@@ -37,6 +37,7 @@
     onmove: (key: number, to: number, index: number) => void;
     oncontext: (event: MouseEvent, key: number) => void;
     onsplit: (dir: SplitDir) => void;
+    onlock: () => void;
     onclosepane: () => void;
     /** Right-click in the editor. App owns the menu, so only one is ever open. */
     oneditorcontext: (event: MouseEvent) => void;
@@ -57,6 +58,7 @@
     onmove,
     oncontext,
     onsplit,
+    onlock,
     onclosepane,
     oneditorcontext,
   }: Props = $props();
@@ -102,11 +104,13 @@
       {tabs}
       activeKey={leaf.active}
       {closable}
+      locked={leaf.locked ?? false}
       {onselect}
       {onclose}
       {onmove}
       {oncontext}
       {onsplit}
+      {onlock}
       {onclosepane}
     />
   {/if}

@@ -22,6 +22,8 @@
     activeKey: number | null;
     /** Whether there is another pane, and so a point in closing this one. */
     closable: boolean;
+    /** Whether the pane is shut to new tabs. */
+    locked: boolean;
     onselect: (key: number) => void;
     onclose: (key: number) => void;
     /**
@@ -33,6 +35,7 @@
     oncontext: (event: MouseEvent, key: number) => void;
     /** The tab in front, to another pane beside this one (`row`) or below it (`column`). */
     onsplit: (dir: SplitDir) => void;
+    onlock: () => void;
     onclosepane: () => void;
   };
 
@@ -42,11 +45,13 @@
     tabs,
     activeKey,
     closable,
+    locked,
     onselect,
     onclose,
     onmove,
     oncontext,
     onsplit,
+    onlock,
     onclosepane,
   }: Props = $props();
 
@@ -266,7 +271,25 @@
 
   <!-- The pane's own controls, at the end of its strip. A split takes the
        tab in front with it; with only the one tab, it is `:vsp` and `:sp`. -->
-  <div class="controls">
+  <div class="controls" class:locked>
+    <button
+      class="ctl lock"
+      class:on={locked}
+      title={locked ? "Unlock pane: new tabs may open here again" : "Lock pane: new tabs open in another pane"}
+      aria-label={locked ? "Unlock pane" : "Lock pane"}
+      aria-pressed={locked}
+      onclick={onlock}
+    >
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+        <rect x="2.5" y="5.5" width="7" height="5" rx="1.2" fill={locked ? "currentColor" : "none"} stroke="currentColor" />
+        <path
+          d={locked ? "M4 5.5 V4 a2 2 0 0 1 4 0 V5.5" : "M4 5.5 V4 a2 2 0 0 1 3.9 -0.6"}
+          fill="none"
+          stroke="currentColor"
+          stroke-linecap="round"
+        />
+      </svg>
+    </button>
     <button class="ctl" title="Move tab to a split on the right" aria-label="Split right" onclick={() => onsplit("row")}>
       <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
         <rect x="1" y="1.5" width="10" height="9" rx="1.6" fill="none" stroke="currentColor" />
@@ -457,8 +480,19 @@
     transition: opacity 90ms ease;
   }
   .bar:hover .controls,
-  .controls:focus-within {
+  .controls:focus-within,
+  .controls.locked {
     opacity: 1;
+  }
+  /* Locked, the rest stay faint and the lock alone says so. */
+  .controls.locked .ctl:not(.lock) {
+    opacity: 0.35;
+  }
+  .bar:hover .controls.locked .ctl {
+    opacity: 1;
+  }
+  .lock.on {
+    color: var(--accent);
   }
   .ctl {
     width: 20px;

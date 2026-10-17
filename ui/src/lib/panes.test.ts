@@ -157,6 +157,13 @@ describe("a saved layout", () => {
     expect(back.kind).toBe("leaf");
   });
 
+  it("keeps a pane locked", () => {
+    const saved = freeze({ ...leaf(1, [1]), locked: true }, name);
+    expect(saved).toEqual({ tabs: ["a.rs"], active: "a.rs", locked: true });
+    const back = revive(saved, keyed, () => 1) as Leaf;
+    expect(back.locked).toBe(true);
+  });
+
   it("is nothing at all when it is not a layout", () => {
     expect(revive("nonsense", keyed, () => 1)).toBeNull();
     expect(revive({ dir: "diagonal", children: [] }, keyed, () => 1)).toBeNull();

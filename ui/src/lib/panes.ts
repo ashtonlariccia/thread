@@ -18,6 +18,8 @@ export type Leaf = {
   active: number | null;
   /** The tab that was showing before `active`, to go back to. */
   last: number | null;
+  /** Shut to new tabs: what is opened goes to another pane instead. */
+  locked?: boolean;
 };
 
 export type Split = {
@@ -227,7 +229,7 @@ export function neighbour(root: Node, id: number, towards: Direction): number | 
 
 /** A layout with its tabs named by something that outlives the window. */
 export type SavedNode =
-  | { tabs: string[]; active: string | null }
+  | { tabs: string[]; active: string | null; locked?: boolean }
   | { dir: SplitDir; sizes: number[]; children: SavedNode[] };
 
 /** The tree with each tab named by `name`; tabs it has no name for are left out. */
@@ -242,6 +244,7 @@ export function freeze(node: Node, name: (key: number) => string | null): SavedN
   return {
     tabs: node.tabs.flatMap((key) => name(key) ?? []),
     active: node.active === null ? null : name(node.active),
+    ...(node.locked ? { locked: true } : {}),
   };
 }
 
@@ -270,6 +273,7 @@ export function revive(
       tabs,
       active: active !== null && tabs.includes(active) ? active : tabs[0],
       last: null,
+      ...(node.locked === true ? { locked: true } : {}),
     };
   }
 

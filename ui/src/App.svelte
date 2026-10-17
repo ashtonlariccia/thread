@@ -2137,6 +2137,7 @@
           onmove={(key, to, index) => moveTab(key, leaf.id, to, index)}
           oncontext={(event, key) => onTabContextMenu(event, key, leaf.id)}
           onsplit={(dir) => splitOff(dir, leaf.id)}
+          onlock={() => layout.toggleLock(leaf.id)}
           onclosepane={() => closePane(leaf.id)}
           oneditorcontext={(event) => onEditorContextMenu(event, leaf.id)}
         />

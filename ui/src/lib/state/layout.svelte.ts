@@ -74,15 +74,35 @@ export class Layout {
   /**
    * Bring a tab to the front. In `pane` if one is named; otherwise wherever
    * it already is, the focused pane for preference; and failing that as a
-   * new tab in the focused pane.
+   * new tab in the focused pane, or, that being locked, in one that is not.
    */
   open(key: number, pane?: number) {
     const named = pane === undefined ? null : this.leaf(pane);
     const leaf =
-      named ?? (this.current.tabs.includes(key) ? this.current : this.holding(key)[0]) ?? this.current;
+      named ?? (this.current.tabs.includes(key) ? this.current : this.holding(key)[0]) ?? this.#unlocked();
     if (!leaf.tabs.includes(key)) leaf.tabs.push(key);
     this.#activate(leaf, key);
     this.focused = leaf.id;
+  }
+
+  /**
+   * Where a new tab goes: the focused pane, unless it is locked; then the
+   * first pane that is not. With every pane locked, a new one beside it.
+   */
+  #unlocked(): Leaf {
+    const current = this.current;
+    if (!current.locked) return current;
+    const open = this.leaves.find((leaf) => !leaf.locked);
+    if (open) return open;
+    const fresh = this.#leaf();
+    this.root = split(this.root, current.id, "row", fresh, this.#ids++);
+    return this.leaf(fresh.id)!;
+  }
+
+  /** Shut a pane to new tabs, or open it again. */
+  toggleLock(id: number) {
+    const leaf = this.leaf(id);
+    if (leaf) leaf.locked = !leaf.locked;
   }
 
   /** Take a tab out of one pane. A pane left with none goes with it. */
