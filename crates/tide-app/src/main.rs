@@ -212,7 +212,9 @@ fn main() {
         .manage(commands::Servers::default())
         .manage(commands::Tmuxes::default())
         .manage(commands::Stats::default())
-        // However a window goes, its shells and its connection go with it.
+        // However a window goes, its shells and its connection go with it:
+        // all but the main window's kept terminals, which its session has
+        // written down to go back to.
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window
@@ -223,7 +225,7 @@ fn main() {
                     .close_window(window.label());
                 window
                     .state::<commands::Terminals>()
-                    .close_window(window.label());
+                    .close_window(window.label(), window.label() == "main");
                 window
                     .state::<commands::Remotes>()
                     .close_window(window.label());
@@ -238,7 +240,7 @@ fn main() {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                 webview
                     .state::<commands::Terminals>()
-                    .close_window(webview.label());
+                    .close_window(webview.label(), webview.label() == "main");
                 webview
                     .state::<commands::Servers>()
                     .close_window(webview.label());

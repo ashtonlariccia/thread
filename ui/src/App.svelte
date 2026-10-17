@@ -335,7 +335,9 @@
   // A terminal is a tab like a file is, and there can be several. Each is a
   // shell for whatever this window is working on. None exists until one is
   // asked for, and closing its tab ends it: there is no hidden state in
-  // between, so a window with no terminal tab is running no shell.
+  // between, so a window with no terminal tab is running no shell. The one
+  // exception is a remote that keeps them in tmux: there the window closing
+  // leaves them running, and its session brings their tabs back.
 
   type TerminalTab = {
     key: number;
@@ -420,15 +422,16 @@
    * Start a terminal, as a tab that is not yet in any pane. In the shell
    * given, and named for it; with none, the config's.
    */
-  function makeTerminal(shell?: Shell): number {
+  function makeTerminal(shell?: Shell, saved?: SavedTerminal): number {
     // Numbered from the top again once the last one has gone.
     if (terminals.length === 0) nextTerminalNumber = 1;
     const number = nextTerminalNumber++;
     const key = nextTerminalKey--;
     terminals.push({
       key,
-      name: shell?.name ?? (number === 1 ? "Terminal" : `Terminal ${number}`),
-      session: `t-${crypto.randomUUID().slice(0, 13)}`,
+      name: saved?.name ?? shell?.name ?? (number === 1 ? "Terminal" : `Terminal ${number}`),
+      // A saved one goes back to the session it was kept in.
+      session: saved?.session ?? `t-${crypto.randomUUID().slice(0, 13)}`,
       // Always the home folder, which is what the backend makes of none.
       cwd: null,
       shell: shell?.command ?? null,
@@ -582,7 +585,11 @@
     active: string | null;
     /** How the stage was split, and which files were in which pane; null for one pane. */
     layout: SavedNode | null;
+    /** The terminals kept on a remote, to go back to. None on this machine. */
+    terminals?: SavedTerminal[];
   };
+  /** One of those terminals: the name it is kept under, and what its tab says. */
+  type SavedTerminal = { session: string; name: string };
   const NOTHING: Workspace = { folders: [], unfolded: [], files: [], active: null, layout: null };
 
   /** What was open on this machine, put away while the window is on a remote. */
@@ -602,6 +609,23 @@
   /** The path a tab is known by once the window has gone: a saved file's. */
   const pathOf = (key: number) => (isTerminal(key) ? null : (docs.find(key)?.path ?? null));
 
+  /** How a terminal's tab is named in a saved layout, which is otherwise paths. */
+  const TERMINAL_TAB = "terminal:";
+
+  /**
+   * Whether the terminals are written down: only on a remote that may keep
+   * them. A shell on this machine ends with the window, and there is nothing
+   * to go back to.
+   */
+  const savesTerminals = () => remote.remote && config.current.terminal.persist;
+
+  /** What a tab is known by in a saved layout: a file's path, or a kept terminal's name. */
+  function tabName(key: number): string | null {
+    if (!isTerminal(key)) return pathOf(key);
+    const terminal = savesTerminals() ? terminals.find((t) => t.key === key) : undefined;
+    return terminal ? TERMINAL_TAB + terminal.session : null;
+  }
+
   function captureWorkspace(): Workspace {
     return {
       folders: tree.roots.map((root) => root.path),
@@ -611,7 +635,10 @@
       files: [...new Set(layout.leaves.flatMap((leaf) => leaf.tabs.flatMap((key) => pathOf(key) ?? [])))],
       active: docs.active?.path ?? null,
       // One pane is what a window has anyway, and needs no writing down.
-      layout: layout.leaves.length > 1 ? layout.save(pathOf) : null,
+      layout: layout.leaves.length > 1 ? layout.save(tabName) : null,
+      terminals: savesTerminals()
+        ? terminals.map(({ session, name }) => ({ session, name }))
+        : [],
     };
   }
 
@@ -621,9 +648,23 @@
     await tree.restore(workspace.folders, workspace.unfolded);
     for (const path of workspace.files) await docs.open(path, { quiet: true });
 
+    // Kept terminals, into the pane there is until the layout says otherwise.
+    // Each is opened by the name it was kept under, which goes back to it.
+    if (savesTerminals()) {
+      for (const saved of workspace.terminals ?? []) {
+        if (terminals.some((t) => t.session === saved.session)) continue;
+        const pane = layout.current;
+        const key = makeTerminal(undefined, saved);
+        pane.tabs.push(key);
+        pane.active ??= key;
+      }
+    }
+
     if (workspace.layout) {
-      const keyOf = (path: string) =>
-        docs.list.find((doc) => doc.path !== null && samePath(doc.path, path))?.key ?? null;
+      const keyOf = (name: string) =>
+        name.startsWith(TERMINAL_TAB)
+          ? (terminals.find((t) => TERMINAL_TAB + t.session === name)?.key ?? null)
+          : (docs.list.find((doc) => doc.path !== null && samePath(doc.path, name))?.key ?? null);
       const before = layout.leaves.map((leaf) => ({ id: leaf.id, tabs: [...leaf.tabs] }));
       if (layout.restore(workspace.layout, keyOf, before.flatMap((leaf) => leaf.tabs))) {
         // The panes they were opened into have gone; each file's state
@@ -2168,6 +2209,7 @@
             online={remote.status === "local" || remote.status === "connected"}
             cwd={terminal.cwd}
             shell={terminal.shell}
+            keep={() => terminals.map((t) => t.session)}
             look={terminalLook}
             scrollback={config.current.terminal.scrollback}
             renderer={config.current.terminal.renderer}

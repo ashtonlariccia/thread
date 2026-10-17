@@ -27,6 +27,8 @@
     cwd: string | null;
     /** The command line of the shell to run; null for the config's. Read once. */
     shell: string | null;
+    /** The names of all the window's terminals, for a remote to leave alone. */
+    keep: () => string[];
     look: TerminalLook;
     scrollback: number;
     /** What draws it. Read once. */
@@ -46,6 +48,7 @@
     online,
     cwd,
     shell,
+    keep,
     look,
     scrollback,
     renderer,
@@ -85,6 +88,7 @@
         name,
         cwd,
         shell,
+        keep,
         ...look,
         scrollback,
         renderer,

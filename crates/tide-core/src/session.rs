@@ -27,6 +27,19 @@ pub struct Workspace {
     /// for the one pane a window starts with. The frontend's to read: it is
     /// kept here as it was given.
     pub layout: Option<serde_json::Value>,
+    /// The terminals that were open, kept in tmux on the remote, to be gone
+    /// back to. Never any on this machine: a shell here ends with the window.
+    pub terminals: Vec<SavedTerminal>,
+}
+
+/// One of the editor's terminals, as it is written down.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedTerminal {
+    /// The name it is kept under on the remote.
+    pub session: String,
+    /// What its tab says.
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,6 +125,10 @@ mod tests {
                 Workspace {
                     folders: vec!["/srv/app".into()],
                     files: vec!["/srv/app/main.py".into()],
+                    terminals: vec![SavedTerminal {
+                        session: "t-abc".into(),
+                        name: "Terminal".into(),
+                    }],
                     ..Default::default()
                 },
             )]),

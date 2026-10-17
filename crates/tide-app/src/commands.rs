@@ -1029,8 +1029,10 @@ impl Terminals {
     }
 
     /// The window has gone, or its page has been reloaded and can no longer
-    /// reach them: its shells go too.
-    pub fn close_window(&self, label: &str) {
+    /// reach them: its shells go too. With `keep`, those kept on a remote are
+    /// only let go of, for the next page to go back to: its session has them
+    /// written down.
+    pub fn close_window(&self, label: &str, keep: bool) {
         let Ok(mut open) = self.0.lock() else {
             return;
         };
@@ -1045,9 +1047,11 @@ impl Terminals {
             .map(|(_, terminal)| terminal)
             .collect();
         drop(open);
-        // Closed, not merely let go of: one kept on a remote would otherwise
+        // Otherwise closed, not merely let go of: one kept on a remote would
         // run on there with no tab left to end it from.
-        closed.iter().for_each(|terminal| terminal.close());
+        if !keep {
+            closed.iter().for_each(|terminal| terminal.close());
+        }
         end(closed);
     }
 
@@ -1082,7 +1086,8 @@ pub struct Opened {
 /// says it has [drawn](terminal_drawn) it; `on_exit` hears once, when the
 /// shell has ended -- or, with `true`, when it is a kept one that the
 /// connection has gone from under, and is there to be opened again by its
-/// `name` once the connection is back.
+/// `name` once the connection is back. `keep` is every terminal the window
+/// has, which the housekeeping a connection starts with leaves alone.
 // One argument for each thing the page sends, which is how a command takes them.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -1096,6 +1101,7 @@ pub async fn terminal_open(
     shell: Option<String>,
     cols: u16,
     rows: u16,
+    keep: Option<Vec<String>>,
 ) -> Result<Opened, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -1128,7 +1134,11 @@ pub async fn terminal_open(
     // Kept in tmux, where the remote has it and the config has not said no.
     let kept = match (&link, &name) {
         (Some(link), Some(_)) if config.persist => {
-            *link.keeps.get_or_init(|| link.remote.prepare_kept()).await
+            let keep = keep.unwrap_or_default();
+            *link
+                .keeps
+                .get_or_init(|| link.remote.prepare_kept(&keep))
+                .await
         }
         _ => false,
     };

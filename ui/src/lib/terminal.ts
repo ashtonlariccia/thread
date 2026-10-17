@@ -54,6 +54,12 @@ export type TerminalOptions = TerminalLook & {
   onexit: () => void;
   /** The command line of the shell to run; null leaves the choice to the config. */
   shell: string | null;
+  /**
+   * The names of every terminal the window has, this one's included: kept
+   * ones that a remote's housekeeping is to leave alone, however long they
+   * have sat there untouched.
+   */
+  keep: () => string[];
   /** A path or a web address in the output was Ctrl+clicked. */
   onlink: (link: Link) => void;
   /** Something run in the terminal asked for a file or a folder to be opened, or closed. */
@@ -388,6 +394,7 @@ export function openTerminal(host: HTMLElement, options: TerminalOptions): Termi
       shell: options.shell,
       cols: term.cols,
       rows: term.rows,
+      keep: options.keep(),
     }).then(
       (opened) => {
         if (disposed || attempt !== opening) {

@@ -1103,7 +1103,7 @@ async fn a_kept_terminal_outlives_the_connection_and_ends_with_its_tab() {
     let left = |heard: &Arc<Mutex<Heard>>| heard.lock().unwrap().left;
 
     let (_root, remote) = connected().await;
-    assert!(remote.prepare_kept().await, "the remote has tmux");
+    assert!(remote.prepare_kept(&[]).await, "the remote has tmux");
 
     // Opened, in the folder asked for, and typed into.
     let (terminal, heard) = open(&remote, "t-kept1").await;

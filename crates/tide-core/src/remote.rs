@@ -823,17 +823,26 @@ impl Remote {
     /// Whether terminals can be kept on this remote: whether it has tmux.
     /// Asked once for a connection, and the moment for a little housekeeping:
     /// a kept terminal that nothing has been attached to, and that has done
-    /// nothing, for half a day was left by a window that never came back.
-    pub async fn prepare_kept(&self) -> bool {
+    /// nothing, for a week was left by a window that never came back. Those
+    /// named in `keep` are a window's, still to be gone back to however long
+    /// they were left: a shell no one has typed in for a day is no orphan.
+    pub async fn prepare_kept(&self, keep: &[String]) -> bool {
         /// Marks an answer, among whatever else a login shell prints.
         const FOUND: &str = "tide-tmux:found";
         /// How long a terminal may be left alone, in seconds.
-        const LEFT: u32 = 12 * 60 * 60;
+        const LEFT: u32 = 7 * 24 * 60 * 60;
         let socket = tmux::KEPT_SOCKET;
+        let keep = keep
+            .iter()
+            .map(|name| tmux::kept_name(name))
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
         let script = format!(
             "command -v tmux >/dev/null 2>&1 || exit 0; echo {FOUND}; now=$(date +%s); \
              tmux -L {socket} list-sessions -F '#{{session_name}} #{{session_attached}} \
              #{{session_activity}}' 2>/dev/null | while read -r n a t; do \
+             case \" {keep} \" in *\" $n \"*) continue;; esac; \
              if [ \"$a\" = 0 ] && [ $((now - t)) -gt {LEFT} ]; then \
              tmux -L {socket} kill-session -t \"=$n\"; fi; done"
         );
