@@ -143,6 +143,7 @@ enabled = []
 # types = ["int", "string"]
 # constants = ["true", "false", "nil"]
 # functions = ["print", "len"]
+# properties = ["length", "name"]
 # # Anything the lists cannot say, as regular expressions tried at the start
 # # of each token. `as` is one of: keyword, type, constant, function, builtin,
 # # operator, string, comment, number, property. With a group in one, only
@@ -471,6 +472,7 @@ pub struct Syntax {
     pub types: Vec<String>,
     pub constants: Vec<String>,
     pub functions: Vec<String>,
+    pub properties: Vec<String>,
     pub patterns: Vec<SyntaxPattern>,
 }
 
@@ -523,6 +525,7 @@ impl Syntax {
         self.types = words(self.types);
         self.constants = words(self.constants);
         self.functions = words(self.functions);
+        self.properties = words(self.properties);
         self.patterns.retain(|p| !p.pattern.is_empty());
         self
     }
@@ -714,6 +717,7 @@ fn syntax_table(syntax: &Syntax) -> toml_edit::Table {
         ("types", &syntax.types),
         ("constants", &syntax.constants),
         ("functions", &syntax.functions),
+        ("properties", &syntax.properties),
     ] {
         if !words.is_empty() {
             table[key] = list(words);
@@ -1146,6 +1150,7 @@ mod tests {
             strings: vec!["\"".into()],
             interpolation: vec!["{".into(), "}".into()],
             keywords: vec!["if".into(), "else".into(), "if".into()],
+            properties: vec!["length".into(), " length ".into()],
             patterns: vec![SyntaxPattern {
                 pattern: r"@[a-z]+\b".into(),
                 category: "builtin".into(),
@@ -1165,6 +1170,7 @@ mod tests {
         assert_eq!(stored.extensions, ["my", "myl"]);
         assert_eq!(stored.keywords, ["if", "else"]);
         assert_eq!(stored.interpolation, ["{", "}"]);
+        assert_eq!(stored.properties, ["length"]);
         assert_eq!(stored.patterns[0].pattern, r"@[a-z]+\b");
         assert_eq!(parse(&text).unwrap(), config);
     }

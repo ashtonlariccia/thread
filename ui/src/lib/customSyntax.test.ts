@@ -13,6 +13,7 @@ const def: SyntaxDef = {
   types: ["int"],
   constants: ["true"],
   functions: ["print"],
+  properties: ["length"],
   patterns: [{ match: "@[a-z]+", as: "builtin" }],
 };
 
@@ -25,6 +26,14 @@ describe("a language described in the config", () => {
       ["int", "typeName"],
       ["=", "operator"],
       ["true", "constant"],
+    ]);
+  });
+
+  it("colours listed properties as properties", () => {
+    expect(tokens(def, ["xs.length"])[0]).toEqual([
+      ["xs", "variableName"],
+      [".", "punctuation"],
+      ["length", "propertyName"],
     ]);
   });
 

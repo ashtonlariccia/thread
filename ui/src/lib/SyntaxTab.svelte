@@ -45,6 +45,7 @@
     types: string;
     constants: string;
     functions: string;
+    properties: string;
     patterns: SyntaxPattern[];
   };
 
@@ -57,6 +58,7 @@
       { key: "types", label: "Types", colour: colours.type, hint: "int string bool" },
       { key: "constants", label: "Constants", colour: colours.constant, hint: "true false nil" },
       { key: "functions", label: "Functions", colour: colours.func, hint: "print len" },
+      { key: "properties", label: "Properties", colour: colours.property, hint: "length name" },
     ] as const;
   });
 
@@ -84,6 +86,7 @@
       types: def.types.join(" "),
       constants: def.constants.join(" "),
       functions: def.functions.join(" "),
+      properties: (def.properties ?? []).join(" "),
       patterns: def.patterns.map((pattern) => ({ ...pattern })),
     };
   }
@@ -103,6 +106,7 @@
       types: [...new Set(words(from.types))],
       constants: [...new Set(words(from.constants))],
       functions: [...new Set(words(from.functions))],
+      properties: [...new Set(words(from.properties))],
       patterns: from.patterns.filter((pattern) => pattern.match !== ""),
     };
   }
@@ -197,6 +201,7 @@
       `${of.keywords[0] ?? "let"} name = ${quote}some text${quote}`,
       `${of.types[0] ?? "value"} count = 42`,
       `${of.functions[0] ?? "call"}(name, ${of.constants[0] ?? "count"})`,
+      `name.${of.properties?.[0] ?? "length"}`,
       open && close && `${open} A comment that can\n   run over lines. ${close}`,
     ];
     return lines.filter(Boolean).join("\n") + "\n";

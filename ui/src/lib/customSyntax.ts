@@ -25,6 +25,7 @@ export type SyntaxDef = {
   types: string[];
   constants: string[];
   functions: string[];
+  properties: string[];
   patterns: SyntaxPattern[];
 };
 
@@ -40,6 +41,7 @@ export const EMPTY_SYNTAX: SyntaxDef = {
   types: [],
   constants: [],
   functions: [],
+  properties: [],
   patterns: [],
 };
 
@@ -94,6 +96,8 @@ const OPERATOR = /^[+\-*/%=<>!&|^~?:@$#\\]+/;
 export function customParser(def: SyntaxDef): StreamParser<State> {
   const words = new Map<string, string>();
   // Later lists win, so a word in two of them is the more specific thing.
+  // `?? []`: a language saved before there were properties has none.
+  for (const word of def.properties ?? []) words.set(word, TOKENS.property);
   for (const word of def.functions) words.set(word, TOKENS.function);
   for (const word of def.types) words.set(word, TOKENS.type);
   for (const word of def.constants) words.set(word, TOKENS.constant);
