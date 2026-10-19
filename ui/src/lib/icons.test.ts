@@ -32,6 +32,10 @@ describe("fileIconId", () => {
     expect(fileIconId(map, "index.ts")).toBe("typescript");
   });
 
+  it("gives Tide's own extensions their icons", () => {
+    expect(fileIconId(map, "logo.vz")).toBe("vyz");
+  });
+
   it("is case-insensitive", () => {
     expect(fileIconId(map, "MAIN.RS")).toBe("rust");
   });

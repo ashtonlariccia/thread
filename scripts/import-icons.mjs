@@ -71,6 +71,14 @@ for (const id of used) {
   cpSync(join(dirname(themePath), definition.iconPath), join(iconsOut, `${id}.svg`));
 }
 
+// Tide's own icons, for extensions the pack doesn't know. Laid on top of the
+// pack so a re-import keeps them.
+const extras = { vz: "vyz" };
+for (const [extension, id] of Object.entries(extras)) {
+  cpSync(join(root, "scripts", "extra-icons", `${id}.svg`), join(iconsOut, `${id}.svg`));
+  files.extensions[extension] = id;
+}
+
 writeFileSync(join(mapsOut, "files.json"), JSON.stringify(files));
 writeFileSync(join(mapsOut, "folders.json"), JSON.stringify(folders));
 
