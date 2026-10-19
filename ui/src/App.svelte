@@ -24,6 +24,7 @@
   import TmuxSidebar from "./lib/tmux/TmuxSidebar.svelte";
   import TmuxView from "./lib/tmux/TmuxView.svelte";
   import UnsavedDialog from "./lib/UnsavedDialog.svelte";
+  import WorkflowBar from "./lib/WorkflowBar.svelte";
 
   import { applyAccent } from "./lib/accent";
   import { applyTheme } from "./lib/themes";
@@ -36,7 +37,6 @@
   import type { OpenKind } from "./lib/terminal";
   import { ConfigStore, type Config } from "./lib/state/config.svelte";
   import { Documents } from "./lib/state/documents.svelte";
-  import { Layout } from "./lib/state/layout.svelte";
   import { Lsp } from "./lib/state/lsp.svelte";
   import { tabDrag } from "./lib/state/tabDrag.svelte";
   import { baseName, dirName, pathKey, samePath, segmentsBelow } from "./lib/paths";
@@ -52,7 +52,7 @@
     type RemoteInfo,
     type SavedConnection,
   } from "./lib/state/remote.svelte";
-  import { Tree } from "./lib/state/tree.svelte";
+  import { Workflows, type Workflow } from "./lib/state/workflows.svelte";
   import {
     busy,
     jobs,
@@ -67,9 +67,18 @@
 
   const pins = new Pins();
   const config = new ConfigStore();
-  const layout = new Layout();
-  const docs = new Documents(layout);
-  const tree = new Tree();
+  const flows = new Workflows();
+  /** The panes and the file tree of the workflow in front. */
+  const layout = $derived(flows.current.layout);
+  const tree = $derived(flows.current.tree);
+  const docs = new Documents({
+    get current() {
+      return flows.current.layout;
+    },
+    get all() {
+      return flows.layouts;
+    },
+  });
   const remote = new RemoteStore();
   const lsp = new Lsp(docs, {
     roots: () => tree.roots.map((root) => root.path),
@@ -200,7 +209,8 @@
     const staying = tree.roots.map((root) => root.path).filter((root) => !paths.includes(root));
     const kept = (path: string) => staying.some((root) => segmentsBelow(root, path) !== null);
 
-    if (!(await docs.closeWhere((path) => closing(path) && !kept(path)))) return;
+    const files = docs.list.filter((doc) => doc.path !== null && closing(doc.path) && !kept(doc.path));
+    if (!(await closeFiles(files.map((doc) => doc.key)))) return;
     for (const path of paths) tree.close(path);
   }
 
@@ -356,6 +366,8 @@
     cwd: string | null;
     /** The command line of the shell it runs; null for the one the config names. */
     shell: string | null;
+    /** The workflow it belongs to: it is only ever shown in that one's panes. */
+    flow: number;
   };
 
   /** A shell there is to open a terminal with, as the backend lists them. */
@@ -370,8 +382,10 @@
   // Files are keyed upwards from 1 and terminals downwards from -1, so a
   // strip can hold both under one kind of key and tell them apart.
   let nextTerminalKey = -1;
-  let nextTerminalNumber = 1;
   const isTerminal = (key: number) => key < 0;
+
+  /** The terminals of the workflow in front. */
+  const flowTerminals = $derived(terminals.filter((t) => t.flow === flows.current.id));
 
   /** The terminal showing in the focused pane, or null while a file is. */
   const activeTerminal = $derived.by(() => {
@@ -423,9 +437,11 @@
    * given, and named for it; with none, the config's.
    */
   function makeTerminal(shell?: Shell, saved?: SavedTerminal): number {
-    // Numbered from the top again once the last one has gone.
-    if (terminals.length === 0) nextTerminalNumber = 1;
-    const number = nextTerminalNumber++;
+    // The lowest number no terminal of this workflow has, so each starts
+    // from the top again once its last has gone.
+    const taken = new Set(flowTerminals.map((t) => t.name));
+    let number = 1;
+    while (taken.has(number === 1 ? "Terminal" : `Terminal ${number}`)) number++;
     const key = nextTerminalKey--;
     terminals.push({
       key,
@@ -435,6 +451,7 @@
       // Always the home folder, which is what the backend makes of none.
       cwd: null,
       shell: shell?.command ?? null,
+      flow: flows.current.id,
     });
     return key;
   }
@@ -499,8 +516,8 @@
       const before = leaf.last !== null && !isTerminal(leaf.last) ? leaf.last : undefined;
       const back = before ?? leaf.tabs.find((key) => !isTerminal(key));
       if (back !== undefined) layout.open(back, leaf.id);
-    } else if (terminals.length > 0) {
-      const back = terminals.find((t) => t.key === lastTerminal) ?? terminals.at(-1)!;
+    } else if (flowTerminals.length > 0) {
+      const back = flowTerminals.find((t) => t.key === lastTerminal) ?? flowTerminals.at(-1)!;
       layout.open(back.key);
     } else {
       newTerminal();
@@ -514,8 +531,9 @@
   function closeTerminal(key: number) {
     terminals = terminals.filter((t) => t.key !== key);
     delete terminalViews[key];
-    // Its pane shows the neighbour that slides into its place.
-    layout.drop(key);
+    // Its pane shows the neighbour that slides into its place, in whichever
+    // workflow it was: a shell can end while its workflow is not in front.
+    for (const each of flows.layouts) each.drop(key);
   }
 
   /**
@@ -560,13 +578,127 @@
     }
     const doc = file === undefined ? undefined : docs.list.find((each) => each.path === file);
     if (doc) {
-      await docs.close(doc.key);
+      await closeFiles([doc.key]);
       return;
     }
-    const under = (each: string) => segmentsBelow(path, each) !== null;
-    if (roots.some((each) => segmentsBelow(each, path) !== null) && (await docs.closeWhere(under))) {
+    const under = docs.list.filter((each) => each.path !== null && segmentsBelow(path, each.path) !== null);
+    if (
+      roots.some((each) => segmentsBelow(each, path) !== null) &&
+      (await closeFiles(under.map((each) => each.key)))
+    ) {
       tree.fold(path);
     }
+  }
+
+  // --- workflows ----------------------------------------------------------------
+  //
+  // Separate desks in the one window, each with its own panes, file tree and
+  // terminals, and one in front at a time. Turning to another ends nothing:
+  // the terminals of the one behind go on running, out of sight, and its
+  // panes are as they were on coming back. A file open in two is the one
+  // buffer, as in two panes; closing it in one leaves it open in the other.
+
+  let workflowBar = $state<WorkflowBar | undefined>();
+
+  /** Whether a tab is in another workflow's panes, besides this one's. */
+  const heldElsewhere = (key: number) =>
+    flows.list.some((flow) => flow.id !== flows.current.id && flow.layout.holding(key).length > 0);
+
+  /** Take a tab out of every pane of this workflow, and nowhere else. */
+  function leaveFlow(key: number) {
+    for (const leaf of layout.holding(key)) {
+      if (leaf.active === key) docs.vimLines[leaf.id]?.replaceChildren();
+      releaseFiles(leaf.id, [key]);
+      layout.closeTab(leaf.id, key);
+    }
+  }
+
+  /**
+   * Close files in the workflow in front, asking once about the unsaved
+   * ones. A file another workflow also has open only leaves this one's
+   * panes. False, having closed nothing, if the question was cancelled.
+   */
+  async function closeFiles(keys: number[], { force = false } = {}): Promise<boolean> {
+    const shared = keys.filter(heldElsewhere);
+    const own = docs.list.filter((doc) => keys.includes(doc.key) && !shared.includes(doc.key));
+    if (!force && !(await docs.confirm(own.filter((doc) => doc.dirty)))) return false;
+    for (const key of shared) leaveFlow(key);
+    docs.discard(own.map((doc) => doc.key));
+    return true;
+  }
+
+  /** The files in this workflow's panes. */
+  const flowFiles = () =>
+    [...new Set(layout.leaves.flatMap((leaf) => leaf.tabs))].filter((key) => !isTerminal(key));
+
+  /** Bring a workflow to the front, as it was left. */
+  function switchFlow(id: number) {
+    setMode("ide");
+    if (id === flows.current.id) return;
+    selectedKey = null;
+    naming = null;
+    flows.select(id);
+    // Its tree was not being watched while it was behind.
+    void tree.refresh();
+    requestAnimationFrame(grabFocus);
+  }
+
+  function stepFlow(by: 1 | -1) {
+    const count = flows.list.length;
+    if (count > 1) switchFlow(flows.list[(flows.index + by + count) % count].id);
+  }
+
+  /** New Workflow: an empty one, in front. */
+  function newFlow() {
+    switchFlow(flows.add().id);
+  }
+
+  /**
+   * Close a workflow: its files, asking about unsaved ones, and its
+   * terminals, which end. Never the last; that one is the window.
+   */
+  async function closeFlow(id: number) {
+    const flow = flows.find(id);
+    if (!flow || flows.list.length < 2) return;
+    switchFlow(id);
+
+    const shells = flowTerminals.length;
+    if (shells > 0) {
+      const one = shells === 1;
+      const sure = await confirm({
+        title: "Close workflow",
+        message: `Close "${flows.label(flow)}"?`,
+        note: one
+          ? "Its terminal is ended, and whatever is running in it."
+          : `Its ${shells} terminals are ended, and whatever is running in them.`,
+        confirm: "Close Workflow",
+        danger: true,
+      });
+      if (!sure) return;
+    }
+    if (!(await closeFiles(flowFiles()))) return;
+
+    for (const terminal of flowTerminals) closeTerminal(terminal.key);
+    for (const leaf of layout.leaves) releaseFiles(leaf.id, leaf.tabs);
+    flows.remove(id);
+    selectedKey = null;
+    naming = null;
+    void tree.refresh();
+    requestAnimationFrame(grabFocus);
+  }
+
+  function onFlowContextMenu(event: MouseEvent, flow: Workflow) {
+    ctx = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        item("Rename", () => workflowBar?.rename(flow.id)),
+        item("New Workflow", newFlow),
+        ...(flows.list.length > 1
+          ? [SEP, item("Close Workflow", () => void closeFlow(flow.id), true)]
+          : []),
+      ],
+    };
   }
 
   // --- remote -------------------------------------------------------------------
@@ -587,7 +719,16 @@
     layout: SavedNode | null;
     /** The terminals kept on a remote, to go back to. None on this machine. */
     terminals?: SavedTerminal[];
+    /**
+     * Every workflow, the one in front included; the fields above are that
+     * one's too, for a build from before there were workflows.
+     */
+    workflows?: SavedFlow[];
+    /** Which of them was in front. */
+    workflow?: number;
   };
+  /** One workflow, as it is written down: what it had open, and what it was called. */
+  type SavedFlow = Omit<Workspace, "workflows" | "workflow"> & { name: string | null };
   /** One of those terminals: the name it is kept under, and what its tab says. */
   type SavedTerminal = { session: string; name: string };
   const NOTHING: Workspace = { folders: [], unfolded: [], files: [], active: null, layout: null };
@@ -626,24 +767,50 @@
     return terminal ? TERMINAL_TAB + terminal.session : null;
   }
 
-  function captureWorkspace(): Workspace {
+  function captureFlow(flow: Workflow): SavedFlow {
+    const panes = flow.layout;
+    const active = panes.activeFile;
     return {
-      folders: tree.roots.map((root) => root.path),
-      unfolded: tree.unfolded,
+      name: flow.name,
+      folders: flow.tree.roots.map((root) => root.path),
+      unfolded: flow.tree.unfolded,
       // As the strips have them, pane by pane, so tabs dragged into an order
       // come back in it.
-      files: [...new Set(layout.leaves.flatMap((leaf) => leaf.tabs.flatMap((key) => pathOf(key) ?? [])))],
-      active: docs.active?.path ?? null,
+      files: [...new Set(panes.leaves.flatMap((leaf) => leaf.tabs.flatMap((key) => pathOf(key) ?? [])))],
+      active: active === null ? null : pathOf(active),
       // One pane is what a window has anyway, and needs no writing down.
-      layout: layout.leaves.length > 1 ? layout.save(tabName) : null,
+      layout: panes.leaves.length > 1 ? panes.save(tabName) : null,
       terminals: savesTerminals()
-        ? terminals.map(({ session, name }) => ({ session, name }))
+        ? terminals.filter((t) => t.flow === flow.id).map(({ session, name }) => ({ session, name }))
         : [],
     };
   }
 
-  /** Open what a workspace had open. What has since gone is left out quietly. */
+  function captureWorkspace(): Workspace {
+    const workflows = flows.list.map(captureFlow);
+    const { name: _name, ...front } = workflows[flows.index];
+    return { ...front, workflows, workflow: flows.index };
+  }
+
+  /**
+   * Open what a workspace had open, every workflow of it, into a window
+   * with nothing open. What has since gone is left out quietly.
+   */
   async function restoreWorkspace(workspace: Workspace) {
+    const saved: SavedFlow[] = workspace.workflows?.length
+      ? workspace.workflows
+      : [{ ...workspace, name: null }];
+    for (const [index, flow] of saved.entries()) {
+      // The empty one a window starts with is the first.
+      if (index > 0) flows.select(flows.add().id);
+      flows.current.name = flow.name ?? null;
+      await restoreFlow(flow);
+    }
+    flows.select(flows.list[Math.min(workspace.workflow ?? 0, flows.list.length - 1)].id);
+  }
+
+  /** Open what one workflow had open, into the one in front. */
+  async function restoreFlow(workspace: SavedFlow) {
     if (workspace.folders.length > 0) loadFolderIcons();
     await tree.restore(workspace.folders, workspace.unfolded);
     for (const path of workspace.files) await docs.open(path, { quiet: true });
@@ -674,7 +841,7 @@
     }
 
     const active = docs.list.find((d) => d.path !== null && d.path === workspace.active);
-    if (active) docs.select(active.key);
+    if (active && layout.holding(active.key).length > 0) docs.select(active.key);
   }
 
   /** Close everything, without asking: whoever calls this already has. */
@@ -686,8 +853,7 @@
     // Each belongs to the machine the window is leaving.
     lsp.reset();
     docs.clear();
-    layout.clear();
-    tree.clear();
+    flows.reset();
     selectedKey = null;
     naming = null;
   }
@@ -1368,6 +1534,8 @@
       files: session.files,
       active: session.active,
       layout: session.layout,
+      workflows: session.workflows,
+      workflow: session.workflow,
     };
 
     // A reloaded page starts over, but the connection it had is still up.
@@ -1461,7 +1629,7 @@
       docs.vimLines[pane]?.replaceChildren();
       releaseFiles(pane, [key]);
       layout.closeTab(pane, key);
-    } else void docs.close(key, { force });
+    } else void closeFiles([key], { force });
   }
 
   /** Step to the next or previous tab of the focused pane, wrapping at the ends. */
@@ -1578,13 +1746,14 @@
       else if (arg === "o") onlyPane();
       else if (arg === "q") closeTab();
     },
-    // Every file, in every pane. Terminals are left running: a shell is
-    // not a buffer, and ending one is not something to do in passing.
-    quitAll: (force) => void docs.closeAll({ force }),
+    // Every file, in every pane of this workflow. Terminals are left
+    // running: a shell is not a buffer, and ending one is not something to
+    // do in passing.
+    quitAll: (force) => void closeFiles(flowFiles(), { force }),
     writeAll: () => void docs.saveAll(),
     writeQuitAll: () =>
       void docs.saveAll().then((saved) => {
-        if (saved) void docs.closeAll();
+        if (saved) void closeFiles(flowFiles());
       }),
     terminal: () => newTerminal(),
   };
@@ -1884,7 +2053,9 @@
 
   // Which way round the tree lists a folder is the config's to say.
   $effect(() => {
-    tree.filesFirst = config.current.files.files_first;
+    const first = config.current.files.files_first;
+    flows.filesFirst = first;
+    for (const flow of flows.list) flow.tree.filesFirst = first;
   });
 
   // A folder opened or closed can change which project a file belongs to.
@@ -1942,6 +2113,25 @@
       mode === "ide"
         ? { title: "Switch to tmux", run: () => setMode("tmux") }
         : { title: "Switch to IDE", run: () => setMode("ide") },
+      { title: "New Workflow", run: newFlow },
+      { title: "Next Workflow", disabled: flows.list.length < 2, run: () => stepFlow(1) },
+      { title: "Previous Workflow", disabled: flows.list.length < 2, run: () => stepFlow(-1) },
+      {
+        title: "Rename Workflow",
+        run: () => {
+          setMode("ide");
+          // Once the list has gone, so the field it opens keeps the keyboard.
+          requestAnimationFrame(() => workflowBar?.rename(flows.current.id));
+        },
+      },
+      {
+        title: "Close Workflow",
+        disabled: flows.list.length < 2,
+        run: () => void closeFlow(flows.current.id),
+      },
+      ...flows.list
+        .filter((flow) => flow.id !== flows.current.id)
+        .map((flow) => ({ title: `Workflow: ${flows.label(flow)}`, run: () => switchFlow(flow.id) })),
       { title: "Reconnect", disabled: remote.status !== "lost", run: () => void reconnect() },
       { title: "Reload Window", run: () => void refreshPage() },
       { title: "Close Window", run: closeWindow },
@@ -2125,6 +2315,7 @@
     ondisconnect={() => void disconnect()}
     onreconnect={() => void reconnect()}
     onnewwindow={newWindow}
+    onnewworkflow={newFlow}
     onappearance={() => (appearanceOpen = true)}
     onlsp={() => (lspOpen = true)}
     onclosewindow={closeWindow}
@@ -2438,6 +2629,21 @@
       {/if}
     {/snippet}
     {#snippet info()}
+      <!-- The workflows: which is in front, and the others to turn to. The
+           editor's, so not while tmux is showing. -->
+      {#if mode === "ide"}
+        <WorkflowBar
+          bind:this={workflowBar}
+          flows={flows.list}
+          current={flows.current.id}
+          label={(flow) => flows.label(flow)}
+          onselect={switchFlow}
+          onnew={newFlow}
+          onrename={(id, name) => flows.rename(id, name)}
+          oncontext={onFlowContextMenu}
+          onclose={(id) => void closeFlow(id)}
+        />
+      {/if}
       <!-- Which face the window shows: the editor, or the remote's tmux. -->
       <span class="modes" role="group" aria-label="What the window shows">
         <button

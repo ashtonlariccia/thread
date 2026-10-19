@@ -44,6 +44,8 @@
     /** Connect again to what the window was on, after the connection dropped. */
     onreconnect: () => void;
     onnewwindow: () => void;
+    /** Another workflow in this window: panes, a tree and terminals of its own. */
+    onnewworkflow: () => void;
     onappearance: () => void;
     /** Edit -> LSPs: the language servers, and which are switched on. */
     onlsp: () => void;
@@ -78,6 +80,7 @@
     ondisconnect,
     onreconnect,
     onnewwindow,
+    onnewworkflow,
     onappearance,
     onlsp,
     onclosewindow,
@@ -222,6 +225,9 @@
 
           <div class="sep"></div>
 
+          <button class="menu-item" role="menuitem" onclick={() => run(onnewworkflow)}>
+            New Workflow
+          </button>
           <button class="menu-item" role="menuitem" onclick={() => run(onnewwindow)}>
             New Window
           </button>

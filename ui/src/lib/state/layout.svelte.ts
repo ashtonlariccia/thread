@@ -26,8 +26,13 @@ import {
   type SplitDir,
 } from "../panes";
 
+/**
+ * Pane ids, counted across every layout: a window has one for each of its
+ * workflows, and the editor keeps each pane's state by its id alone.
+ */
+let ids = 1;
+
 export class Layout {
-  #ids = 1;
 
   root = $state<Node>(this.#leaf());
   /** The pane the keyboard is in, and the one the menus act on. */
@@ -39,7 +44,7 @@ export class Layout {
   readonly dividers = $derived(dividers(this.root));
 
   #leaf(tabs: number[] = []): Leaf {
-    return { kind: "leaf", id: this.#ids++, tabs, active: tabs.at(-1) ?? null, last: null };
+    return { kind: "leaf", id: ids++, tabs, active: tabs.at(-1) ?? null, last: null };
   }
 
   leaf(id: number): Leaf | null {
@@ -95,7 +100,7 @@ export class Layout {
     const open = this.leaves.find((leaf) => !leaf.locked);
     if (open) return open;
     const fresh = this.#leaf();
-    this.root = split(this.root, current.id, "row", fresh, this.#ids++);
+    this.root = split(this.root, current.id, "row", fresh, ids++);
     return this.leaf(fresh.id)!;
   }
 
@@ -157,7 +162,7 @@ export class Layout {
   /** A new pane beside `pane`, to its right or below it, holding `tabs`. */
   split(dir: SplitDir, tabs: number[], pane = this.focused): number {
     const fresh = this.#leaf(tabs);
-    this.root = split(this.root, pane, dir, fresh, this.#ids++);
+    this.root = split(this.root, pane, dir, fresh, ids++);
     this.focused = fresh.id;
     return fresh.id;
   }
@@ -233,7 +238,7 @@ export class Layout {
    * changed nothing, if there is nothing usable in what was saved.
    */
   restore(saved: unknown, key: (name: string) => number | null, rest: number[]): boolean {
-    const root = revive(saved, key, () => this.#ids++);
+    const root = revive(saved, key, () => ids++);
     if (!root) return false;
 
     const panes = leaves(root);

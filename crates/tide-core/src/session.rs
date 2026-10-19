@@ -30,6 +30,27 @@ pub struct Workspace {
     /// The terminals that were open, kept in tmux on the remote, to be gone
     /// back to. Never any on this machine: a shell here ends with the window.
     pub terminals: Vec<SavedTerminal>,
+    /// Every workflow, the one in front included. The fields above are that
+    /// one's as well, so a build from before workflows still finds them.
+    pub workflows: Vec<Workflow>,
+    /// Which of `workflows` was in front.
+    pub workflow: usize,
+}
+
+/// One workflow: a desk of its own in the window, with its own folders,
+/// panes and terminals.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Workflow {
+    /// What it was called by hand; `None` to go by its first folder.
+    pub name: Option<String>,
+    pub folders: Vec<String>,
+    pub unfolded: Vec<String>,
+    pub files: Vec<String>,
+    pub active: Option<String>,
+    /// As in [`Workspace::layout`].
+    pub layout: Option<serde_json::Value>,
+    pub terminals: Vec<SavedTerminal>,
 }
 
 /// One of the editor's terminals, as it is written down.
@@ -56,6 +77,9 @@ pub struct Session {
     pub active: Option<String>,
     /// How the stage was split, as in [`Workspace::layout`].
     pub layout: Option<serde_json::Value>,
+    /// Every workflow open on this machine, as in [`Workspace::workflows`].
+    pub workflows: Vec<Workflow>,
+    pub workflow: usize,
     pub sidebar_collapsed: bool,
     pub sidebar_width: u32,
     /// The saved connection the window was on when it closed, to go back to.
@@ -74,6 +98,8 @@ impl Default for Session {
             files: Vec::new(),
             active: None,
             layout: None,
+            workflows: Vec::new(),
+            workflow: 0,
             sidebar_collapsed: true,
             sidebar_width: 230,
             connection: None,
@@ -117,6 +143,18 @@ mod tests {
                     { "tabs": ["b.rs"], "active": null },
                 ],
             })),
+            workflows: vec![
+                Workflow {
+                    folders: vec!["C:\\src\\tide".into()],
+                    ..Default::default()
+                },
+                Workflow {
+                    name: Some("rustlings".into()),
+                    folders: vec!["C:\\src\\rustlings".into()],
+                    ..Default::default()
+                },
+            ],
+            workflow: 1,
             sidebar_collapsed: false,
             sidebar_width: 300,
             connection: Some("a1b2".into()),
@@ -149,5 +187,7 @@ mod tests {
         assert_eq!(session.sidebar_width, 230);
         assert_eq!(session.connection, None);
         assert!(session.remote.is_empty());
+        assert!(session.workflows.is_empty());
+        assert_eq!(session.workflow, 0);
     }
 }

@@ -122,7 +122,15 @@ export class Documents {
     onfocus: (pane) => this.panes.focus(pane),
   });
 
-  constructor(private readonly panes: Layout) {}
+  /**
+   * `layouts.current` is the workflow in front, which is where files open;
+   * `layouts.all` is every workflow's, which a closed file leaves.
+   */
+  constructor(private readonly layouts: { readonly current: Layout; readonly all: Layout[] }) {}
+
+  private get panes(): Layout {
+    return this.layouts.current;
+  }
 
   #config: Config = DEFAULTS;
   /** The vim extension, once fetched and while switched on. */
@@ -484,19 +492,27 @@ export class Documents {
     for (const doc of [...this.list]) this.#remove(doc);
   }
 
+  /** Close these files without asking: whoever calls this already has. */
+  discard(keys: number[]) {
+    for (const doc of this.list.filter((d) => keys.includes(d.key))) this.#remove(doc);
+  }
+
   #remove(doc: Doc) {
     const index = this.list.findIndex((d) => d.key === doc.key);
     if (index === -1) return;
     this.list.splice(index, 1);
     // Whatever vim was showing was about this file, or was asked from it.
-    for (const leaf of this.panes.holding(doc.key)) {
-      if (leaf.active === doc.key) this.vimLines[leaf.id]?.replaceChildren();
+    for (const layout of this.layouts.all) {
+      for (const leaf of layout.holding(doc.key)) {
+        if (leaf.active === doc.key) this.vimLines[leaf.id]?.replaceChildren();
+      }
     }
     this.watcher?.closed(doc);
     this.editor.drop(doc.key);
     this.#grammars.delete(doc.key);
-    // Each pane that had it shows the neighbour that slides into its place.
-    this.panes.drop(doc.key);
+    // Each pane that had it, in whichever workflow, shows the neighbour that
+    // slides into its place.
+    for (const layout of this.layouts.all) layout.drop(doc.key);
   }
 
 
