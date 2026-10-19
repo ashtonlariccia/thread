@@ -73,6 +73,8 @@ auto_close = true
 exclude = [".*"]
 # Whether the file tree lists a folder's files above its folders.
 files_first = false
+# Whether the file tree lists a `foo.h` just above its `foo.c`.
+headers_first = false
 
 [theme]
 # The colour theme: the window, the code and the terminal. Available:
@@ -307,6 +309,8 @@ pub struct Files {
     pub exclude: Vec<String>,
     /// Whether the tree lists a folder's files above its folders.
     pub files_first: bool,
+    /// Whether the tree lists a `foo.h` just above its `foo.c`.
+    pub headers_first: bool,
 }
 
 impl Default for Files {
@@ -314,6 +318,7 @@ impl Default for Files {
         Self {
             exclude: vec![".*".into()],
             files_first: false,
+            headers_first: false,
         }
     }
 }

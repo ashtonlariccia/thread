@@ -352,6 +352,15 @@
         />
         Files before folders in the tree
       </label>
+      <span></span>
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={config.current.files.headers_first}
+          onchange={(e) => void config.set("files", "headers_first", e.currentTarget.checked)}
+        />
+        <code>.h</code> above its <code>.c</code>
+      </label>
     </div>
     <p class="hint">
       Names, separated by commas. <code>*</code> stands for anything, so <code>.*</code> is every

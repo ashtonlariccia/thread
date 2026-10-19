@@ -1985,8 +1985,17 @@
       row?.folder && terminal !== null
         ? [item("Jump Terminal Here", () => jumpTerminal(terminal, row.path)), SEP]
         : [];
-    // Reloading is for the empty space below the rows, not for a row.
-    const items = [...jump, ...create, ...own, ...(row ? [] : [item("Refresh Page", refreshPage)])];
+    // Reloading and the ordering are for the empty space below the rows, not for a row.
+    const headers = config.current.files.headers_first;
+    const below = row
+      ? []
+      : [
+          item(headers ? "Stop Putting .h Above .c" : "Put .h Above .c", () =>
+            void config.set("files", "headers_first", !headers),
+          ),
+          item("Refresh Page", refreshPage),
+        ];
+    const items = [...jump, ...create, ...own, ...below];
     // No line under the last entry.
     if (items.at(-1) === SEP) items.pop();
 
@@ -2056,6 +2065,11 @@
     const first = config.current.files.files_first;
     flows.filesFirst = first;
     for (const flow of flows.list) flow.tree.filesFirst = first;
+  });
+  $effect(() => {
+    const headers = config.current.files.headers_first;
+    flows.headersFirst = headers;
+    for (const flow of flows.list) flow.tree.headersFirst = headers;
   });
 
   // A folder opened or closed can change which project a file belongs to.

@@ -26,6 +26,8 @@ export class Workflows {
 
   /** Whether a tree lists a folder's files above its folders, for each new one. */
   filesFirst = false;
+  /** Whether a tree lists a `foo.h` above its `foo.c`, for each new one. */
+  headersFirst = false;
 
   constructor() {
     this.reset();
@@ -34,6 +36,7 @@ export class Workflows {
   #make(name: string | null = null): Workflow {
     const tree = new Tree();
     tree.filesFirst = this.filesFirst;
+    tree.headersFirst = this.headersFirst;
     return { id: this.#ids++, name, layout: new Layout(), tree };
   }
 

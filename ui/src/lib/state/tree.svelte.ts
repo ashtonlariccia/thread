@@ -13,6 +13,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 
 import { baseName, samePath, segmentsBelow } from "../paths";
 import { pickFolder } from "../pick";
+import { headersFirst } from "../treeOrder";
 
 export type Entry = { name: string; path: string; dir: boolean };
 
@@ -45,15 +46,19 @@ export class Tree {
 
   /** Whether a folder's files are listed above its folders: `[files] files_first`. */
   filesFirst = $state(false);
+  /** Whether a `foo.h` is listed just above its `foo.c`: `[files] headers_first`. */
+  headersFirst = $state(false);
 
   /** Every row the tree shows: each root, and whatever is unfolded under it. */
   get rows(): TreeRow[] {
     const rows: TreeRow[] = [];
     // A listing comes with its folders first, each lot by name.
-    const ordered = (children: Entry[]) =>
-      this.filesFirst
-        ? [...children.filter((child) => !child.dir), ...children.filter((child) => child.dir)]
-        : children;
+    const ordered = (children: Entry[]) => {
+      const sorted = this.headersFirst ? headersFirst(children) : children;
+      return this.filesFirst
+        ? [...sorted.filter((child) => !child.dir), ...sorted.filter((child) => child.dir)]
+        : sorted;
+    };
     for (const root of this.roots) {
       const walk = (entry: Entry, depth: number) => {
         const open = entry.dir && this.#open[entry.path] === true;
